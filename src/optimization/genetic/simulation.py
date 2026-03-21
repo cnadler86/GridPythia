@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from src.optimization.genetic.geneticparams import GeneticEnergyManagementParameters
-from src.prediction.interpolator import get_load_interpolator
+from src.optimization.genetic.interpolator import get_load_interpolator
 from src.simulation.devices import InverterMode
 from src.simulation.devices.homeappliance import HomeAppliance
 from src.simulation.devices.inverterbase import InverterBase
