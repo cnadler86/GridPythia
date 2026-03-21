@@ -24,9 +24,11 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
+# where = ["src"]
+# include = ["*"]
 
 [tool.pytest.ini_options]
-testpaths = ["test"]
+testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.ruff]
@@ -68,3 +70,7 @@ ignore = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ty.environment]
+root = ["."]
+python = ".venv"
