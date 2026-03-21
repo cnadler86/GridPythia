@@ -13,7 +13,7 @@ from src.prediction.pvforecast.provider import PVPlaneConfig
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 END_24H = datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc)
 
-_PLANE = PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0, inverter_pac_w=5000)
+_PLANE = PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0)
 
 
 # ── PVPlaneConfig ────────────────────────────────────────────────────────
@@ -21,11 +21,8 @@ _PLANE = PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0, inverter_pac_w=500
 
 class TestPVPlaneConfig:
     def test_defaults(self):
-        p = PVPlaneConfig(peak_kw=3.0)
-        assert p.tilt == 30.0
-        assert p.azimuth == 180.0
-        assert p.inverter_pac_w is None
-        assert p.loss_pct == 14.0
+        p = PVPlaneConfig(peak_kw=3.0, tilt=30.0, azimuth=180.0)
+        assert p.loss_pct == 2.0
         assert p.userhorizon is None
 
     def test_custom(self):
@@ -33,7 +30,6 @@ class TestPVPlaneConfig:
             peak_kw=4.0,
             tilt=25.0,
             azimuth=90.0,
-            inverter_pac_w=4000,
             userhorizon=[10, 20, 30],
         )
         assert p.peak_kw == 4.0
@@ -136,8 +132,8 @@ def _forecastsolar_response(start: datetime, ac_w: float = 2000.0) -> dict:
 class TestPVForecastAkkudoktor:
     def _make_provider(self) -> PVForecastAkkudoktor:
         planes = [
-            PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0, inverter_pac_w=5000),
-            PVPlaneConfig(peak_kw=3.0, tilt=20.0, azimuth=90.0, inverter_pac_w=3000),
+            PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0),
+            PVPlaneConfig(peak_kw=3.0, tilt=20.0, azimuth=90.0),
         ]
         return PVForecastAkkudoktor(planes=planes, latitude=52.52, longitude=13.405)
 
@@ -153,7 +149,7 @@ class TestPVForecastAkkudoktor:
     def test_url_azimuth_conversion(self):
         """south=180° must become 0° for Akkudoktor."""
         p = PVForecastAkkudoktor(
-            planes=[PVPlaneConfig(peak_kw=5.0, azimuth=180.0)],
+            planes=[PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0)],
             latitude=52.52,
             longitude=13.405,
         )
@@ -162,7 +158,7 @@ class TestPVForecastAkkudoktor:
     def test_url_azimuth_east(self):
         """east=90° must become -90° for Akkudoktor."""
         p = PVForecastAkkudoktor(
-            planes=[PVPlaneConfig(peak_kw=5.0, azimuth=90.0)],
+            planes=[PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=90.0)],
             latitude=52.52,
             longitude=13.405,
         )
@@ -332,8 +328,8 @@ class TestPVForecastSolar:
 
         p = PVForecastSolar(
             planes=[
-                PVPlaneConfig(peak_kw=3.0, azimuth=180.0),
-                PVPlaneConfig(peak_kw=2.0, azimuth=90.0),
+                PVPlaneConfig(peak_kw=3.0, tilt=30.0, azimuth=180.0),
+                PVPlaneConfig(peak_kw=2.0, tilt=30.0, azimuth=90.0),
             ],
             latitude=52.52,
             longitude=13.405,

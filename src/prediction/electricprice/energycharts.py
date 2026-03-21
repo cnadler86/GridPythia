@@ -23,7 +23,7 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         self,
         bidding_zone: str = "DE-LU",
         charges_kwh: float = 0.0,
-        vat_rate: float = 1.0,
+        vat_rate: float = 1.19,
     ) -> None:
         self._bidding_zone = bidding_zone
         self._charges_kwh = charges_kwh

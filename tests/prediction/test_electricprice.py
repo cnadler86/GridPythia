@@ -82,3 +82,59 @@ class TestElecPriceImport:
 
     def test_provider_id(self):
         assert ElecPriceImport(prices_wh=[]).provider_id == "ElecPriceImport"
+
+
+def test_energycharts_fetch_today():
+    """Attempt to fetch today's prices from Energy-Charts for DE-LU.
+
+    If the Energy-Charts server is unreachable or returns an error the
+    test is skipped so CI environments without network won't fail.
+    """
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+
+    import requests
+
+    from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts
+
+    # Build today's Berlin 00:00..next day 00:00 in UTC (Energy-Charts expects UTC timestamps)
+    berlin = ZoneInfo("Europe/Berlin")
+    start_local = datetime.now(berlin).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    start = start_local.astimezone(timezone.utc)
+    end = start + timedelta(days=1)
+
+    # Quick reachability check
+    try:
+        probe = requests.get(
+            "https://api.energy-charts.info/price",
+            params={
+                "bzn": "DE-LU",
+                "start": start.strftime("%Y-%m-%dT%H:%M"),
+                "end": end.strftime("%Y-%m-%dT%H:%M"),
+            },
+            timeout=5,
+        )
+        probe.raise_for_status()
+    except Exception as exc:  # network error or non-2xx
+        import pytest
+
+        pytest.skip(f"Energy-Charts API unreachable or returned error: {exc}")
+
+    # Now call the provider to validate parsing
+    provider = ElecPriceEnergyCharts(bidding_zone="DE-LU")
+    try:
+        prices = provider._request_prices(start, end)
+    except Exception as exc:
+        import pytest
+
+        pytest.skip(f"Energy-Charts API call failed: {exc}")
+
+    assert prices, "no prices returned from Energy-Charts"
+    # basic sanity checks
+    for dt, price in prices:
+        assert isinstance(dt, datetime)
+        assert start <= dt <= end
+        assert isinstance(price, float)
+    assert any(price > -100.0 for _, price in prices)

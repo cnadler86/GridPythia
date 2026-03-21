@@ -29,3 +29,42 @@ include = ["src*"]
 testpaths = ["test"]
 pythonpath = ["."]
 
+[tool.ruff]
+line-length = 100
+exclude = [
+    "tests",
+    "scripts",
+]
+output-format = "full"
+
+[tool.ruff.lint]
+select = [
+    "F",      # Enable all `Pyflakes` rules.
+    "D",      # Enable all `pydocstyle` rules, limiting to those that adhere to the
+              # Google convention via `convention = "google"`, below.
+    "S",      # Enable all `flake8-bandit` rules.
+]
+ignore = [
+   # Prevent errors due to ruff false positives
+   # ------------------------------------------
+   # On top of `Pyflakes (F)` to allow numpydantic Shape forward annotation
+   "F722",    # forward-annotation-syntax-error: forward annotations that include invalid syntax.
+
+    # Prevent errors for existing sources. Should be removed!!!
+    # ---------------------------------------------------------
+    # On top of `Pyflakes (F)`
+    "F841",   # unused-variable: Local variable {name} is assigned to but never used
+    # On top of `pydocstyle (D)`
+    "D100",   # undocumented-public-module: Missing docstring in public module
+    "D101",   # undocumented-public-class: Missing docstring in public class
+    "D102",   # undocumented-public-method: Missing docstring in public method
+    "D103",   # undocumented-public-function: Missing docstring in public function
+    "D104",   # undocumented-public-package: Missing docstring in public package
+    "D105",   # undocumented-magic-method: Missing docstring in magic method
+    "D106",   # undocumented-public-nested-class: Missing docstring in public nested class
+    "D107",   # undocumented-public-init: Missing docstring in __init__
+    "D417",   # undocumented-param: Missing argument description in the docstring for {definition}: {name}
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

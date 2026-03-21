@@ -18,20 +18,18 @@ class PVPlaneConfig:
 
     Args:
         peak_kw:       Nominal peak power in kW.
-        tilt:          Tilt angle from horizontal (0–90°).  Default 30°.
+        tilt:          Tilt angle from horizontal (0-90°).  Default 30°.
         azimuth:       Surface azimuth in degrees (north=0, south=180).  Default 180°.
-        inverter_pac_w: AC power rating of the inverter in watts.  ``None`` = no clipping.
         userhorizon:   Elevation of horizon in degrees at equally-spaced azimuth
                        steps clockwise from north.  ``None`` = flat horizon.
-        loss_pct:      System losses in percent (cables, soiling, …).  Default 14 %.
+        loss_pct:      System losses in percent (cables, soiling, …).  Default 2 %.
     """
 
     peak_kw: float
-    tilt: float = 30.0
-    azimuth: float = 180.0
-    inverter_pac_w: Optional[int] = None
+    tilt: float
+    azimuth: float
     userhorizon: Optional[list[float]] = field(default=None)
-    loss_pct: float = 14.0
+    loss_pct: float = 2.0
 
 
 class PVForecastProvider(PredictionProvider):

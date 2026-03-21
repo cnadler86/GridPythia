@@ -73,8 +73,6 @@ class PVForecastAkkudoktor(PVForecastProvider):
             ak_az = int(plane.azimuth) - 180
             params.append(f"azimuth={ak_az}")
             params.append(f"tilt={int(plane.tilt)}")
-            pac = plane.inverter_pac_w if plane.inverter_pac_w is not None else 25000
-            params.append(f"powerInverter={pac}")
             horizon = plane.userhorizon or [0, 0]
             params.append("horizont=" + ",".join(str(round(h)) for h in horizon))
 
