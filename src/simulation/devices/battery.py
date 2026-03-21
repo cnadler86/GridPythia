@@ -1,0 +1,198 @@
+"""Battery device simulation."""
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class BatteryParameters:
+    """Battery configuration parameters."""
+
+    device_id: str = "battery1"
+    capacity_wh: int = 8000
+    charging_efficiency: float = 0.98
+    discharging_efficiency: float = 0.98
+    max_charge_power_w: float = 5000
+    max_discharge_power_w: float = 5000
+    initial_soc_percentage: int = 0
+    min_soc_percentage: int = 0
+    max_soc_percentage: int = 100
+    hours: int | None = None
+
+
+@dataclass
+class ElectricVehicleParameters(BatteryParameters):
+    """Electric vehicle battery parameters."""
+
+    max_charge_power_w: float = 0
+
+
+@dataclass(slots=True)
+class Battery:
+    """Represents a battery device with methods to simulate energy charging and discharging."""
+
+    parameters: BatteryParameters = field(repr=False)
+    prediction_hours: int
+
+    # Derived / runtime fields (initialized in _setup)
+    capacity_wh: float = field(init=False)
+    initial_soc_percentage: float = field(init=False)
+    min_soc_percentage: float = field(init=False)
+    max_soc_percentage: float = field(init=False)
+    charging_efficiency: float = field(init=False)
+    discharging_efficiency: float = field(init=False)
+    max_charge_power_w: float = field(init=False)
+    max_discharge_power_w: float = field(init=False)
+    soc_wh: float = field(init=False)
+    min_soc_wh: float = field(init=False)
+    max_soc_wh: float = field(init=False)
+    _initial_soc_wh: float = field(init=False, repr=False)
+    _soc_pct_factor: float = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._setup()
+
+    def _setup(self) -> None:
+        """Sets up the battery parameters based on provided parameters."""
+        self.capacity_wh = self.parameters.capacity_wh
+        self.initial_soc_percentage = self.parameters.initial_soc_percentage
+        self.min_soc_percentage = self.parameters.min_soc_percentage
+        self.max_soc_percentage = self.parameters.max_soc_percentage
+        self.charging_efficiency = self.parameters.charging_efficiency
+        self.discharging_efficiency = self.parameters.discharging_efficiency
+
+        if self.parameters.max_charge_power_w is not None:
+            self.max_charge_power_w = self.parameters.max_charge_power_w
+        else:
+            self.max_charge_power_w = self.capacity_wh
+        if self.parameters.max_discharge_power_w is not None:
+            self.max_discharge_power_w = self.parameters.max_discharge_power_w
+        else:
+            self.max_discharge_power_w = self.capacity_wh
+
+        if not (self.capacity_wh > 0):
+            raise ValueError("capacity_wh must be > 0")
+
+        for val, name in (
+            (self.charging_efficiency, "charging_efficiency"),
+            (self.discharging_efficiency, "discharging_efficiency"),
+        ):
+            if not (0.0 < val <= 1.0):
+                raise ValueError(f"{name} must be in (0, 1], got {val}")
+
+        for perc, name in (
+            (self.min_soc_percentage, "min_soc_percentage"),
+            (self.max_soc_percentage, "max_soc_percentage"),
+            (self.initial_soc_percentage, "initial_soc_percentage"),
+        ):
+            if not (0.0 <= perc <= 100.0):
+                raise ValueError(f"{name} must be within [0, 100], got {perc}")
+
+        if self.min_soc_percentage > self.max_soc_percentage:
+            raise ValueError(
+                "Min_soc_percentage cannot be greater than max_soc_percentage"
+            )
+
+        # Clamp initial SoC percentage into [min, max]
+        self.initial_soc_percentage = min(
+            max(self.initial_soc_percentage, self.min_soc_percentage),
+            self.max_soc_percentage,
+        )
+
+        self.soc_wh = (self.initial_soc_percentage / 100) * self.capacity_wh
+        self.min_soc_wh = (self.min_soc_percentage / 100) * self.capacity_wh
+        self.max_soc_wh = (self.max_soc_percentage / 100) * self.capacity_wh
+
+        self._initial_soc_wh: float = self.soc_wh
+        self._soc_pct_factor: float = 100.0 / self.capacity_wh
+
+    def to_dict(self) -> dict[str, Any]:
+        """Converts the object to a dictionary representation."""
+        return {
+            "device_id": self.parameters.device_id,
+            "capacity_wh": self.capacity_wh,
+            "initial_soc_percentage": self.initial_soc_percentage,
+            "soc_wh": self.soc_wh,
+            "hours": self.prediction_hours,
+            "charging_efficiency": self.charging_efficiency,
+            "discharging_efficiency": self.discharging_efficiency,
+            "max_charge_power_w": self.max_charge_power_w,
+            "max_discharge_power_w": self.max_discharge_power_w,
+        }
+
+    def reset(self) -> None:
+        """Resets the battery state to its initial values."""
+        self.soc_wh = self._initial_soc_wh
+
+    def current_soc_percentage(self) -> float:
+        """Calculates the current state of charge in percentage."""
+        return self.soc_wh * self._soc_pct_factor
+
+    def discharge_energy(self, wh: float, dt: float = 1.0) -> tuple[float, float]:
+        """Discharge energy from the battery.
+
+        Returns:
+            tuple[float, float]: (delivered_wh, losses_wh)
+        """
+        s = self.soc_wh
+        min_s = self.min_soc_wh
+        eff = self.discharging_efficiency
+        max_power = self.max_discharge_power_w * dt
+
+        usable_raw = s - min_s
+        if usable_raw <= 0.0:
+            return 0.0, 0.0
+
+        deliverable_by_energy = usable_raw * eff
+        max_deliverable = (
+            deliverable_by_energy if deliverable_by_energy < max_power else max_power
+        )
+        requested = wh if wh < max_deliverable else max_deliverable
+        raw_req = requested / eff
+        raw_used = raw_req if raw_req < usable_raw else usable_raw
+        delivered = raw_used * eff
+        losses = raw_used - delivered
+
+        s -= raw_used
+        if s < min_s:
+            s = min_s
+        self.soc_wh = s
+
+        return delivered, losses
+
+    def charge_energy(self, wh: float, dt: float = 1.0) -> tuple[float, float]:
+        """Charge energy into the battery.
+
+        Returns:
+            tuple[float, float]: (stored_wh, losses_wh)
+        """
+        s = self.soc_wh
+        max_s = self.max_soc_wh
+        eff = self.charging_efficiency
+        max_power = self.max_charge_power_w * dt
+
+        headroom = max_s - s
+        if headroom <= 0.0:
+            return 0.0, 0.0
+
+        max_raw_headroom = headroom / eff
+        max_raw = max_raw_headroom if max_raw_headroom < max_power else max_power
+        raw = wh if wh < max_raw else max_raw
+        stored = raw * eff
+
+        s += stored
+        if s > max_s:
+            s = max_s
+        self.soc_wh = s
+
+        losses = raw - stored
+        return stored, losses
+
+    def current_raw_deliverable_energy_content(self) -> float:
+        """Returns the current raw deliverable energy in the battery (pre-efficiency)."""
+        return max(self.soc_wh - self.min_soc_wh, 0.0)
+
+    def current_deliverable_energy_content(self) -> float:
+        """Returns the current deliverable energy in the battery."""
+        usable_energy = (self.soc_wh - self.min_soc_wh) * self.discharging_efficiency
+        return max(usable_energy, 0.0)

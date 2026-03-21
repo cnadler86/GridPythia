@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "hems2"
+version = "0.1.0"
+description = "Simplified Home Energy Management System"
+requires-python = ">=3.13"
+dependencies = [
+    "deap>=1.4",
+    "loguru",
+    "numpy",
+    "scipy",
+    "bokeh>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "matplotlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+pythonpath = ["."]
+
