@@ -31,6 +31,10 @@ class PredictionConfig:
 
     hours: int = 48
     historic_hours: int = 24
+    dt_hours: float = 1.0
+    latitude: float = 52.52
+    longitude: float = 13.405
+    timezone: str = "Europe/Berlin"
 
 
 @dataclass

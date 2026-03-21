@@ -9,6 +9,7 @@ dependencies = [
     "numpy",
     "scipy",
     "bokeh>=3.0",
+    "requests>=2.28",
 ]
 
 [dependency-groups]
@@ -17,6 +18,7 @@ dev = [
     "pytest-cov",
     "matplotlib",
     "ty",
+    "statsmodels",
 ]
 
 [tool.setuptools.packages.find]
