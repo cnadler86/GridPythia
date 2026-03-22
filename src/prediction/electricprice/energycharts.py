@@ -1,11 +1,11 @@
 """Energy-Charts electricity price provider."""
 
 import logging
-from array import array
 from datetime import datetime, timedelta, timezone
-from statistics import median
 
-from src.prediction.base import make_array, n_steps
+import aiohttp
+import polars as pl
+
 from src.prediction.electricprice.provider import ElecPriceProvider
 
 logger = logging.getLogger(__name__)
@@ -35,15 +35,8 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
 
     # ── API request ───────────────────────────────────────────────────
 
-    def _request_prices(
-        self, start: datetime, end: datetime
-    ) -> list[tuple[datetime, float]]:
-        """Call ``https://api.energy-charts.info/price``.
-
-        Returns a list of *(aware-datetime, price_eur_per_wh)* tuples.
-        """
-        import requests
-
+    async def _request_prices(self, start: datetime, end: datetime) -> list[tuple[datetime, float]]:
+        """Call ``https://api.energy-charts.info/price``."""
         url = "https://api.energy-charts.info/price"
         params = {
             "bzn": self._bidding_zone,
@@ -51,16 +44,18 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
             "end": end.strftime("%Y-%m-%dT%H:%M"),
         }
 
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                resp.raise_for_status()
+                data = await resp.json(content_type=None)
 
-        timestamps: list[int] = data.get("unix_seconds", [])
+        timestamps_s: list[int] = data.get("unix_seconds", [])
         prices_mwh: list[float | None] = data.get("price", [])
         charges_wh = self._charges_kwh / 1000.0
 
         result: list[tuple[datetime, float]] = []
-        for ts, price_mwh in zip(timestamps, prices_mwh):
+        for ts, price_mwh in zip(timestamps_s, prices_mwh):
             if price_mwh is None:
                 continue
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
@@ -85,57 +80,69 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         return [max(lo, min(hi, v)) for v in values]
 
     def _forecast(self, history: list[float], steps: int) -> list[float]:
-        """Extend *history* by *steps* hours using ETS or median."""
+        """Extend *history* by *steps* 15-minute intervals using ETS or median."""
         capped = self._cap_outliers(history)
         try:
             from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
-            sp = 168 if len(capped) > 800 else 24
+            sp_hours = 168 if len(capped) > 800 else 24
+            sp = sp_hours * 4  # convert hours -> number of 15-minute periods
             if len(capped) > sp * 2:
-                model = ExponentialSmoothing(
-                    capped, seasonal="add", seasonal_periods=sp
-                ).fit(optimized=True)
+                model = ExponentialSmoothing(capped, seasonal="add", seasonal_periods=sp).fit(
+                    optimized=True
+                )
                 return [float(v) for v in model.forecast(steps)]
         except Exception:
             pass
+        from statistics import median
         med = median(capped) if capped else 0.0
         return [med] * steps
 
     # ── public API ────────────────────────────────────────────────────
 
-    def fetch(self, start: datetime, end: datetime, dt_hours: float = 1.0) -> array:
-        hours = (end - start).total_seconds() / 3600
-        steps = n_steps(hours, dt_hours)
+    async def fetch(self, timestamps: pl.Series) -> pl.Series:
+        ts_list: list[datetime] = timestamps.to_list()
+        start = ts_list[0]
+        end = ts_list[-1]
 
-        # Pull extra 5 weeks of history for ETS
-        hist_start = start - timedelta(days=35)
-        raw = self._request_prices(hist_start, end)
+        def _to_utc(dt: datetime) -> datetime:
+            return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+        start_utc = _to_utc(start)
+        end_utc = _to_utc(end)
+
+        # Pull 5 weeks of history for ETS
+        hist_start = start_utc - timedelta(days=35)
+        raw = await self._request_prices(hist_start, end_utc + timedelta(hours=1))
         if not raw:
-            return make_array(size=steps)
+            return pl.Series([0.0] * len(ts_list), dtype=pl.Float32)
 
-        # Separate history (before start) from future
+        # Build 15-minute-indexed lookup (key = unix 15-min bucket since epoch)
         history: list[float] = []
         lookup: dict[int, float] = {}
+        start_bucket = int(start_utc.timestamp()) // 900
+
         for dt, price in raw:
-            offset_h = (dt - start).total_seconds() / 3600.0
-            idx = round(offset_h / dt_hours)
-            if idx < 0:
-                history.append(price)
-            elif 0 <= idx < steps:
-                lookup[idx] = price
-                history.append(price)
+            b = int(dt.timestamp()) // 900
+            history.append(price)
+            if b >= start_bucket:
+                lookup[b] = price
 
-        result = make_array(size=steps)
-        last_known = -1
-        for idx in sorted(lookup):
-            result[idx] = lookup[idx]
-            last_known = idx
+        # Map each target timestamp to its 15-minute bucket
+        result: list[float | None] = []
+        for ts in ts_list:
+            b = int(_to_utc(ts).timestamp()) // 900
+            result.append(lookup.get(b))
 
-        # Fill remaining steps with ETS / median
-        if last_known < steps - 1 and history:
-            gap = steps - last_known - 1
-            forecast = self._forecast(history, gap)
-            for i, val in enumerate(forecast):
-                result[last_known + 1 + i] = val
+        # Fill gaps with ETS / median forecast
+        missing = sum(1 for v in result if v is None)
+        if missing and history:
+            forecast = self._forecast(history, missing)
+            fi = 0
+            for i in range(len(result)):
+                if result[i] is None:
+                    result[i] = forecast[fi]
+                    fi += 1
 
-        return result
+        filled = [v if v is not None else 0.0 for v in result]
+        return pl.Series(filled, dtype=pl.Float32)

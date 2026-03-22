@@ -1,10 +1,10 @@
 """Fixed / time-of-use electricity price provider."""
 
-from array import array
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from src.prediction.base import make_array, n_steps
+import polars as pl
+
 from src.prediction.electricprice.provider import ElecPriceProvider
 
 
@@ -25,7 +25,7 @@ class ElecPriceFixed(ElecPriceProvider):
     """Constant or time-of-use electricity price.
 
     When *schedule* is ``None`` every step gets the flat *price_kwh*.
-    Otherwise, the first matching :class:`TimeWindow` wins.
+    Otherwise the first matching :class:`TimeWindow` wins.
     """
 
     def __init__(
@@ -45,20 +45,14 @@ class ElecPriceFixed(ElecPriceProvider):
         return "ElecPriceFixed"
 
     def _price_at(self, hour_of_day: float) -> float:
-        """EUR / Wh at a given fractional hour of day."""
+        """EUR/Wh at a given fractional hour of day."""
         if self._schedule:
             for w in self._schedule:
                 if w.start_hour <= hour_of_day < w.end_hour:
-                    return (
-                        w.value / 1000.0 + self._charges_kwh / 1000.0
-                    ) * self._vat_rate
+                    return (w.value / 1000.0 + self._charges_kwh / 1000.0) * self._vat_rate
         return (self._price_kwh / 1000.0 + self._charges_kwh / 1000.0) * self._vat_rate
 
-    def fetch(self, start: datetime, end: datetime, dt_hours: float = 1.0) -> array:
-        hours = (end - start).total_seconds() / 3600
-        steps = n_steps(hours, dt_hours)
-        result = make_array(size=steps)
-        for i in range(steps):
-            t = start + timedelta(hours=i * dt_hours)
-            result[i] = self._price_at(t.hour + t.minute / 60.0)
-        return result
+    async def fetch(self, timestamps: pl.Series) -> pl.Series:
+        ts_list: list[datetime] = timestamps.to_list()
+        values = [self._price_at(t.hour + t.minute / 60.0) for t in ts_list]
+        return pl.Series(values, dtype=pl.Float32)

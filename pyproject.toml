@@ -8,13 +8,15 @@ dependencies = [
     "loguru",
     "numpy",
     "scipy",
-    "bokeh>=3.0",
-    "requests>=2.28",
+    "polars",
+    "aiohttp>=3.9",
+    "open-meteo-solar-forecast>=0.1.29",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=7.0",
+    "pytest-asyncio>=0.23",
     "pytest-cov",
     "matplotlib",
     "ty",
@@ -30,6 +32,7 @@ include = ["src*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100
