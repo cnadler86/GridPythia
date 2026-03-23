@@ -161,7 +161,7 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
                     optimized=True
                 )
                 return [float(v) for v in model.forecast(steps)]
-        except Exception:
+        except Exception:  # noqa: S110
             pass
         from statistics import median
 

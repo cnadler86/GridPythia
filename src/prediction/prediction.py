@@ -1,54 +1,77 @@
 """Unified prediction orchestration."""
 
-from array import array
+import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime
 
-from src.prediction.base import make_array, n_steps
+import polars as pl
+
+from src.prediction.base import make_timestamps
 from src.prediction.electricprice.provider import ElecPriceProvider
 from src.prediction.feedintariff.provider import FeedInTariffProvider
 from src.prediction.load.provider import LoadProvider
 from src.prediction.pvforecast.provider import PVForecastProvider
-from src.prediction.weather.provider import WeatherData, WeatherProvider
+from src.prediction.weather.provider import WeatherProvider
 
 
 @dataclass
 class PredictionData:
-    """All prediction data for a time window.
+    """All prediction channels aligned on a shared time axis.
 
-    Every array has *steps* entries.  Power values are in **watts**,
-    prices / tariffs in **EUR / Wh**.
+    The internal :attr:`df` has the following columns:
+
+    * ``timestamp`` — ``pl.Datetime``
+    * ``electricprice_eur_wh`` — ``pl.Float32``
+    * ``feedintariff_eur_wh`` — ``pl.Float32``
+    * ``load_w`` — ``pl.Float32``
+    * ``pv_{name}_w`` — ``pl.Float32`` for each registered PV plant
+    * ``weather_{channel}`` — ``pl.Float32`` for each weather channel delivered
+      by the weather provider (e.g. ``weather_temperature_c``)
+
+    Quick access: ``data["load_w"]`` returns the corresponding ``pl.Series``.
     """
 
-    start: datetime
+    df: pl.DataFrame
     dt_hours: float
-    steps: int
 
-    electricprice_per_wh: array
-    feedintariff_per_wh: array
-    load_power_w: array
-    pv_power_w: dict[str, array]
-    weather: Optional[WeatherData] = None
+    def __getitem__(self, key: str) -> pl.Series:
+        return self.df[key]
+
+    @property
+    def timestamps(self) -> pl.Series:
+        return self.df["timestamp"]
+
+    @property
+    def steps(self) -> int:
+        return len(self.df)
+
+    @property
+    def pv_names(self) -> list[str]:
+        """Plant names extracted from ``pv_{name}_w`` columns."""
+        return [
+            c.removeprefix("pv_").removesuffix("_w")
+            for c in self.df.columns
+            if c.startswith("pv_") and c.endswith("_w")
+        ]
 
 
 @dataclass
 class PredictionSetup:
-    """Wire providers before calling :pymethod:`Prediction.fetch`.
+    """Wire providers before calling :pymeth:`Prediction.fetch`.
 
-    All fields are optional — unprovided domains produce zero-filled arrays.
-    *pv* is a dict mapping plant names to their forecast provider.
+    All fields are optional — omitted domains produce zero-filled columns.
+    *pv* maps plant names to their forecast provider.
     """
 
-    electricprice: Optional[ElecPriceProvider] = None
-    feedintariff: Optional[FeedInTariffProvider] = None
-    load: Optional[LoadProvider] = None
+    electricprice: ElecPriceProvider | None = None
+    feedintariff: FeedInTariffProvider | None = None
+    load: LoadProvider | None = None
     pv: dict[str, PVForecastProvider] = field(default_factory=dict)
-    weather: Optional[WeatherProvider] = None
+    weather: WeatherProvider | None = None
 
 
 class Prediction:
-    """Configure once, then fetch aggregated predictions.
+    """Configure providers once, then fetch all channels in one async call.
 
     Example::
 
@@ -58,54 +81,68 @@ class Prediction:
             load=LoadFixed(power_w=500),
             pv={"roof": PVForecastImport(power_w=[0]*6 + [500]*12 + [0]*6)},
         ))
-        data = pred.fetch(start=datetime.now(), hours=24, dt_hours=1.0)
+        data = await pred.fetch(start=datetime.now(), hours=24, dt_hours=1.0)
+        data["load_w"]  # → pl.Series
     """
 
     def __init__(self, setup: PredictionSetup) -> None:
         self.setup = setup
 
-    def fetch(
+    async def fetch(
         self,
         start: datetime,
         hours: int | float,
         dt_hours: float = 1.0,
     ) -> PredictionData:
-        """Fetch all prediction channels for the next *hours* from *start*."""
-        end = start + timedelta(hours=hours)
-        steps = n_steps(hours, dt_hours)
+        """Fetch all prediction channels in parallel for the next *hours* from *start*."""
+        timestamps = make_timestamps(start, hours, dt_hours)
+        n = len(timestamps)
 
-        eprice = (
-            self.setup.electricprice.fetch(start, end, dt_hours)
-            if self.setup.electricprice
-            else make_array(size=steps)
+        async def _zeros() -> pl.Series:
+            return pl.Series([0.0] * n, dtype=pl.Float32)
+
+        # Build all coroutines; run in parallel with asyncio.gather
+        eprice_coro = (
+            self.setup.electricprice.fetch(timestamps) if self.setup.electricprice else _zeros()
         )
-        ftariff = (
-            self.setup.feedintariff.fetch(start, end, dt_hours)
-            if self.setup.feedintariff
-            else make_array(size=steps)
+        ftariff_coro = (
+            self.setup.feedintariff.fetch(timestamps) if self.setup.feedintariff else _zeros()
         )
-        load = (
-            self.setup.load.fetch(start, end, dt_hours)
-            if self.setup.load
-            else make_array(size=steps)
-        )
-        pv = {
-            name: provider.fetch(start, end, dt_hours)
-            for name, provider in self.setup.pv.items()
+        load_coro = self.setup.load.fetch(timestamps) if self.setup.load else _zeros()
+        weather_coro = self.setup.weather.fetch(timestamps) if self.setup.weather else None
+
+        pv_names = list(self.setup.pv)
+        pv_coros = [self.setup.pv[name].fetch(timestamps) for name in pv_names]
+
+        all_coros = [eprice_coro, ftariff_coro, load_coro] + pv_coros
+        if weather_coro is not None:
+            all_coros.append(weather_coro)
+
+        results = await asyncio.gather(*all_coros)
+
+        # Unpack results
+        eprice, ftariff, load_w, *rest = results
+        if weather_coro is not None:
+            pv_series = rest[: len(pv_names)]
+            weather_df: pl.DataFrame | None = rest[len(pv_names)]
+        else:
+            pv_series = rest
+            weather_df = None
+
+        # Build the unified DataFrame
+        data: dict[str, pl.Series] = {
+            "timestamp": timestamps,
+            "electricprice_eur_wh": eprice,
+            "feedintariff_eur_wh": ftariff,
+            "load_w": load_w,
         }
-        weather = (
-            self.setup.weather.fetch(start, end, dt_hours)
-            if self.setup.weather
-            else None
-        )
+        for name, series in zip(pv_names, pv_series):
+            data[f"pv_{name}_w"] = series
 
-        return PredictionData(
-            start=start,
-            dt_hours=dt_hours,
-            steps=steps,
-            electricprice_per_wh=eprice,
-            feedintariff_per_wh=ftariff,
-            load_power_w=load,
-            pv_power_w=pv,
-            weather=weather,
-        )
+        if weather_df is not None:
+            for col_name in weather_df.columns:
+                data[f"weather_{col_name}"] = weather_df[col_name]
+
+        df = pl.DataFrame(data)
+
+        return PredictionData(df=df, dt_hours=dt_hours)
