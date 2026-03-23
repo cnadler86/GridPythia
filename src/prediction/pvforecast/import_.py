@@ -1,9 +1,8 @@
 """PV forecast import provider."""
 
-from array import array
-from datetime import datetime
+import polars as pl
 
-from src.prediction.base import make_array, n_steps, resample
+from src.prediction.base import resample_to_timestamps
 from src.prediction.pvforecast.provider import PVForecastProvider
 
 
@@ -14,22 +13,13 @@ class PVForecastImport(PVForecastProvider):
     """
 
     def __init__(self, power_w: list[float], source_dt_hours: float = 1.0) -> None:
-        self._power = array("f", power_w)
+        self._power: list[float] = list(power_w)
         self._source_dt = source_dt_hours
 
     @property
     def provider_id(self) -> str:
         return "PVForecastImport"
 
-    def fetch(self, start: datetime, end: datetime, dt_hours: float = 1.0) -> array:
-        data = self._power
-        if abs(self._source_dt - dt_hours) > 1e-9:
-            data = resample(data, self._source_dt, dt_hours)
-
-        hours = (end - start).total_seconds() / 3600
-        steps = n_steps(hours, dt_hours)
-        result = make_array(size=steps)
-        for i in range(min(steps, len(data))):
-            result[i] = data[i]
-        # PV defaults to 0 for missing steps (night)
-        return result
+    async def fetch(self, timestamps: pl.Series) -> pl.Series:
+        # PV pads with 0 (night) beyond the provided data
+        return resample_to_timestamps(self._power, self._source_dt, timestamps, pad_value=0.0)
