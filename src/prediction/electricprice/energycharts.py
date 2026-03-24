@@ -2,31 +2,35 @@
 
 Caching strategy
 ----------------
-Day-ahead prices change at most once per day (Energy-Charts publishes the
-next day's prices around 14:00 CET, though the exact time can vary).
-Calling ``fetch()`` every 5–15 minutes without caching would therefore redo
-expensive ETS fitting and hit the external API far more than necessary.
+Day-ahead prices are published by ENTSO-E around 12:00–13:00 CET each day.
+The provider fetches complete calendar days (from midnight of the first
+requested date to midnight of the last) and stores the result in a single
+in-memory price map.
 
-The provider maintains an internal *price map* – a ``dict[int, float]``
-mapping 15-minute unix buckets to EUR/Wh prices.  The map always covers
-``[ts_first, ts_last + horizon_buffer]`` (default buffer 25 h) where
-``ts_first``/``ts_last`` are the first and last timestamps of the current
-``fetch()`` call.  A 25 h buffer beyond the last requested timestamp means
-an hour-by-hour consumer can run for ~25 h without any re-anchor.
-Only after the buffer is exhausted (or ``poll_interval`` expires) does the
-provider contact the API again.
+Cache invalidation rules (checked on every ``fetch()`` call):
 
-Map invalidation rules (checked on every ``fetch()``):
+1. Cache is empty.
+2. The requested date range is not fully covered by the cached date range.
+3. **Poll window** – all three conditions are true simultaneously:
 
-1. Map is empty (first call or after reset).
-2. ``poll_interval`` has elapsed since the last Energy-Charts API check –
-   we re-poll to detect a new day-ahead publication.  If the API's maximum
-   timestamp has *not* advanced the existing map is kept as-is.
-3. The latest requested timestamp falls outside the current map coverage.
+   - The real current time (``datetime.now(UTC)``) is *beyond* the last
+     real API timestamp in the cache, meaning cached real prices no longer
+     cover "now".
+   - The real current time falls *within* the requested series
+     (``requested_start ≤ now ≤ requested_end``).
+   - The real current time is at or after **12:30 UTC** – the earliest
+     realistic day-ahead publication time.
 
-When new Energy-Charts data is detected the map is fully rebuilt:
-real API prices are used for all available buckets; remaining future
-buckets are filled by ETS (``statsmodels``, optional) or a median fallback.
+Outside that narrow publishing window the cache is served as-is, avoiding
+repeated API calls.  Once new day-ahead data extends ``_last_real_ts``
+beyond ``now``, the poll condition becomes false and no further fetches
+happen until the next publication cycle.
+
+Price map construction
+----------------------
+Real API prices cover the available portion of the requested window.
+Any remaining future slots (up to ``last_real_ts + horizon_buffer``) are
+filled by ETS (``statsmodels``, optional) or a median fallback.
 
 Concurrency
 -----------
@@ -37,7 +41,7 @@ pattern avoids unnecessary lock contention on the hot path.
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import aiohttp
 import polars as pl
@@ -47,7 +51,6 @@ from src.prediction.electricprice.provider import ElecPriceProvider
 logger = logging.getLogger(__name__)
 
 _HISTORY_WINDOW = timedelta(days=35)
-_POLL_INTERVAL_DEFAULT = timedelta(minutes=30)
 _HORIZON_BUFFER_DEFAULT = timedelta(hours=25)
 
 
@@ -67,12 +70,10 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         day-ahead price.
     vat_rate:
         VAT multiplier applied *after* adding charges (default ``1.19``).
-    poll_interval:
-        How often to check Energy-Charts for newly published prices.
     horizon_buffer:
-        Extra time added *beyond the last requested timestamp* when
-        pre-computing the price map.  Defaults to 25 h so that a 48 h
-        fetch window can slide forward ~25 h before a re-anchor is needed.
+        Extra time added *beyond the last real API data point* when
+        pre-computing the price map.  Defaults to 25 h so that forecast
+        coverage extends well into the next day after publication.
     """
 
     def __init__(
@@ -80,22 +81,22 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         bidding_zone: str = "DE-LU",
         charges_kwh: float = 0.0,
         vat_rate: float = 1.19,
-        poll_interval: timedelta = _POLL_INTERVAL_DEFAULT,
         horizon_buffer: timedelta = _HORIZON_BUFFER_DEFAULT,
     ) -> None:
         self._bidding_zone = bidding_zone
         self._charges_kwh = charges_kwh
         self._vat_rate = vat_rate
-        self._poll_interval = poll_interval
         self._horizon_buffer = horizon_buffer
 
         # ── cache state ───────────────────────────────────────────────
         # bucket = unix_timestamp // 900  (15-min granularity)
         self._price_map: dict[int, float] = {}
-        # Highest Energy-Charts bucket seen; advances only when EC publishes
-        # new day-ahead data – used to detect stale-vs-fresh API responses.
-        self._ec_max_bucket: int | None = None
-        self._last_api_check: datetime | None = None
+        # Last real (API-provided) timestamp in the price map; everything
+        # beyond this was filled by ETS/median forecast.
+        self._last_real_ts: datetime | None = None
+        # Calendar-day bounds of the currently cached window.
+        self._cache_start_day: date | None = None
+        self._cache_end_day: date | None = None
         self._lock = asyncio.Lock()
 
     @property
@@ -150,13 +151,26 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
 
     def _forecast(self, history: list[float], steps: int) -> list[float]:
         """Extend *history* by *steps* 15-minute intervals using ETS or median."""
-        capped = self._cap_outliers(history)
+        # capped = self._cap_outliers(history)
+        capped = history
         try:
             from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
-            sp_hours = 168 if len(capped) > 800 else 24
-            sp = sp_hours * 4  # convert hours -> number of 15-minute periods
-            if len(capped) > sp * 2:
+            # For 15-minute data there are 4 samples per hour
+            periods_per_hour = 4
+            weekly_sp = 168 * periods_per_hour  # 168 h -> 672 periods
+            daily_sp = 24 * periods_per_hour  # 24 h -> 96 periods
+
+            # Prefer weekly seasonality when we have at least two full weekly
+            # cycles in the history; otherwise fall back to daily if possible.
+            sp = None
+            if len(capped) >= 2 * weekly_sp:
+                sp = weekly_sp
+            elif len(capped) >= 2 * daily_sp:
+                sp = daily_sp
+
+            if sp is not None and len(capped) >= 2 * sp:
+                logger.debug("Using ETS with seasonal_periods=%d (history=%d)", sp, len(capped))
                 model = ExponentialSmoothing(capped, seasonal="add", seasonal_periods=sp).fit(
                     optimized=True
                 )
@@ -170,79 +184,94 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
 
     # ── cache management ──────────────────────────────────────────────
 
-    def _needs_refresh(self, now_utc: datetime, max_bucket_needed: int) -> bool:
-        """Return True when the price map must be rebuilt before serving."""
+    def _needs_refresh(
+        self, now_utc: datetime, requested_start: datetime, requested_end: datetime
+    ) -> bool:
+        """Return True when the price map must be rebuilt before serving.
+
+        Rebuild if:
+
+        - the cache is empty,
+        - the requested date range is not fully covered by the cache, or
+        - the poll window is open: ``now_utc`` is past the last real API
+          data point, falls within the requested series, and is at or
+          after 12:30 UTC (earliest realistic day-ahead publication time).
+        """
         if not self._price_map:
             return True
-        if self._last_api_check is None or (now_utc - self._last_api_check) >= self._poll_interval:
+        if (
+            self._cache_start_day is None
+            or self._cache_end_day is None
+            or requested_start.date() < self._cache_start_day
+            or requested_end.date() > self._cache_end_day
+        ):
             return True
-        if max_bucket_needed not in self._price_map:
+        if (
+            self._last_real_ts is not None
+            and now_utc > self._last_real_ts
+            and requested_start <= now_utc <= requested_end
+            and (now_utc.hour > 12 or (now_utc.hour == 12 and now_utc.minute >= 30))
+        ):
             logger.debug(
-                "Cache miss: bucket %d not in price map – forcing refresh", max_bucket_needed
+                "Poll window open: now=%s > last_real_ts=%s, within series, after 12:30 UTC",
+                now_utc.strftime("%H:%M"),
+                self._last_real_ts.strftime("%Y-%m-%dT%H:%M"),
             )
             return True
         return False
 
-    async def _refresh(self, now_utc: datetime, max_bucket_needed: int, end_utc: datetime) -> None:
-        """Poll Energy-Charts and rebuild the price map when new data is found."""
+    async def _refresh(
+        self, now_utc: datetime, requested_start: datetime, requested_end: datetime
+    ) -> None:
+        """Fetch full calendar days and rebuild the price map.
+
+        Fetches from midnight of *requested_start*'s day through 23:59 of
+        *requested_end*'s day.  ``_last_real_ts`` is set to the maximum
+        timestamp returned by the API; forecast slots are appended up to
+        ``_last_real_ts + horizon_buffer``.
+        """
+        map_start = requested_start.replace(hour=0, minute=0, second=0, microsecond=0)
         hist_start = now_utc - _HISTORY_WINDOW
-        horizon_end = end_utc + self._horizon_buffer
+        fetch_end = requested_end.replace(hour=23, minute=59, second=0, microsecond=0)
 
         logger.debug(
-            "Polling Energy-Charts (bzn=%s, window=[%s, %s UTC])",
+            "Polling Energy-Charts (bzn=%s, history=[%s, map=[%s, %s UTC])",
             self._bidding_zone,
             hist_start.strftime("%Y-%m-%dT%H:%M"),
-            horizon_end.strftime("%Y-%m-%dT%H:%M"),
+            map_start.strftime("%Y-%m-%dT%H:%M"),
+            fetch_end.strftime("%Y-%m-%dT%H:%M"),
         )
-        raw = await self._request_prices(hist_start, horizon_end)
-        self._last_api_check = now_utc
+        raw = await self._request_prices(hist_start, fetch_end)
 
         if not raw:
             logger.warning("Energy-Charts returned no data for bzn=%s", self._bidding_zone)
             return
 
-        new_max_bucket = max(int(dt.timestamp()) // 900 for dt, _ in raw)
-
-        if (
-            new_max_bucket == self._ec_max_bucket
-            and self._price_map
-            and max_bucket_needed in self._price_map
-        ):
-            logger.debug(
-                "Energy-Charts data unchanged (ec_max_bucket=%d) – price map kept",
-                new_max_bucket,
-            )
-            return
-
-        if new_max_bucket == self._ec_max_bucket and self._price_map:
-            logger.debug(
-                "Energy-Charts data unchanged (ec_max_bucket=%d) but coverage gap "
-                "(bucket %d missing) – re-anchoring price map to new now_utc",
-                new_max_bucket,
-                max_bucket_needed,
-            )
+        last_real_ts = max(dt for dt, _ in raw)
+        horizon_end = max(last_real_ts + self._horizon_buffer, fetch_end)
 
         logger.info(
-            "New Energy-Charts data detected (ec_max_bucket %s → %d, %d raw points) "
-            "– rebuilding price map [now, last_ts + %.0f h]",
-            self._ec_max_bucket,
-            new_max_bucket,
+            "Energy-Charts: %d real data points, last_real_ts=%s, forecast until %s (+%.0f h)",
             len(raw),
+            last_real_ts.strftime("%Y-%m-%dT%H:%M"),
+            horizon_end.strftime("%Y-%m-%dT%H:%M"),
             self._horizon_buffer.total_seconds() / 3600,
         )
-        self._ec_max_bucket = new_max_bucket
-        self._build_price_map(raw, now_utc, horizon_end)
+        self._build_price_map(raw, map_start, horizon_end)
+        self._last_real_ts = last_real_ts
+        self._cache_start_day = requested_start.date()
+        self._cache_end_day = requested_end.date()
 
     def _build_price_map(
-        self, raw: list[tuple[datetime, float]], now_utc: datetime, horizon_end: datetime
+        self, raw: list[tuple[datetime, float]], map_start: datetime, horizon_end: datetime
     ) -> None:
         """Populate ``_price_map`` from *raw* API data plus ETS/median forecast.
 
-        The map covers ``[now_utc, horizon_end]`` at 15-minute granularity where
-        ``horizon_end = ts_last + horizon_buffer``.  Slots present in *raw* are
-        taken directly; remaining future slots are filled by :meth:`_forecast`.
+        The map covers ``[map_start, horizon_end]`` at 15-minute granularity.
+        Slots present in *raw* use the real API price; remaining slots are
+        filled by :meth:`_forecast`.
         """
-        start_bucket = int(now_utc.timestamp()) // 900
+        start_bucket = int(map_start.timestamp()) // 900
         end_bucket = int(horizon_end.timestamp()) // 900
         total_slots = end_bucket - start_bucket + 1
         target_buckets = [start_bucket + i for i in range(total_slots)]
@@ -291,28 +320,26 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
     async def fetch(self, timestamps: pl.Series) -> pl.Series:
         """Return prices in EUR/Wh for each timestamp in *timestamps*.
 
-        The first call (or after the poll interval expires) contacts
-        Energy-Charts; subsequent calls within the poll window are served
-        entirely from the in-memory price map without any I/O.
+        Contacts Energy-Charts only when the cache is stale (see module
+        docstring); all other calls are served from the in-memory price map
+        without any I/O.
         """
         ts_list: list[datetime] = timestamps.to_list()
 
         def _to_utc(dt: datetime) -> datetime:
             return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
-        # First timestamp drives the cache anchor; last timestamp determines
-        # how far forward the map must reach (+ horizon_buffer).
-        now_utc = _to_utc(ts_list[0])
-        end_utc = _to_utc(ts_list[-1])
-        max_bucket_needed = int(end_utc.timestamp()) // 900
+        requested_start = _to_utc(ts_list[0])
+        requested_end = _to_utc(ts_list[-1])
+        now_utc = datetime.now(timezone.utc)
 
         # Fast path: avoid lock acquisition when no refresh is required
-        if self._needs_refresh(now_utc, max_bucket_needed):
+        if self._needs_refresh(now_utc, requested_start, requested_end):
             async with self._lock:
                 # Re-check inside the lock – another coroutine may have just
                 # finished a refresh while we were waiting
-                if self._needs_refresh(now_utc, max_bucket_needed):
-                    await self._refresh(now_utc, max_bucket_needed, end_utc)
+                if self._needs_refresh(now_utc, requested_start, requested_end):
+                    await self._refresh(now_utc, requested_start, requested_end)
 
         # Serve from the price map (pure in-memory, no I/O)
         result: list[float] = []
