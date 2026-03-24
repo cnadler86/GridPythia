@@ -24,7 +24,8 @@ class PredictionData:
     * ``electricprice_eur_wh`` — ``pl.Float32``
     * ``feedintariff_eur_wh`` — ``pl.Float32``
     * ``load_w`` — ``pl.Float32``
-    * ``pv_{name}_w`` — ``pl.Float32`` for each registered PV plant
+        * ``pv_{name}_{inverter}_w`` — ``pl.Float32`` for each registered PV plant
+            and inverter
     * ``weather_{channel}`` — ``pl.Float32`` for each weather channel delivered
       by the weather provider (e.g. ``weather_temperature_c``)
 
@@ -47,7 +48,7 @@ class PredictionData:
 
     @property
     def pv_names(self) -> list[str]:
-        """Plant names extracted from ``pv_{name}_w`` columns."""
+        """PV channel names extracted from ``pv_{name}_{inverter}_w`` columns."""
         return [
             c.removeprefix("pv_").removesuffix("_w")
             for c in self.df.columns
@@ -60,7 +61,7 @@ class PredictionSetup:
     """Wire providers before calling :pymeth:`Prediction.fetch`.
 
     All fields are optional — omitted domains produce zero-filled columns.
-    *pv* maps plant names to their forecast provider.
+    *pv* maps plant-name prefixes to their forecast provider.
     """
 
     electricprice: ElecPriceProvider | None = None
@@ -112,7 +113,7 @@ class Prediction:
         weather_coro = self.setup.weather.fetch(timestamps) if self.setup.weather else None
 
         pv_names = list(self.setup.pv)
-        pv_coros = [self.setup.pv[name].fetch(timestamps) for name in pv_names]
+        pv_coros = [self.setup.pv[name].fetch_by_inverter(timestamps) for name in pv_names]
 
         all_coros = [eprice_coro, ftariff_coro, load_coro] + pv_coros
         if weather_coro is not None:
@@ -136,8 +137,9 @@ class Prediction:
             "feedintariff_eur_wh": ftariff,
             "load_w": load_w,
         }
-        for name, series in zip(pv_names, pv_series):
-            data[f"pv_{name}_w"] = series
+        for name, series_by_inverter in zip(pv_names, pv_series):
+            for inverter, series in series_by_inverter.items():
+                data[f"pv_{name}_{inverter}_w"] = series
 
         if weather_df is not None:
             for col_name in weather_df.columns:

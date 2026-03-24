@@ -123,6 +123,21 @@ def _textarea(parent: tk.Misc, row: int, height: int = 5) -> scrolledtext.Scroll
     return w
 
 
+def _place_hover_annotation(ax, annot, x: float, y: float) -> None:
+    """Keep hover annotations inside the visible figure area near the hovered point."""
+    bbox = ax.figure.bbox
+    px, py = ax.transData.transform((x, y))
+    xoff = 10
+    yoff = 15
+    if px > bbox.x0 + bbox.width * 0.72:
+        xoff = -10
+    if py > bbox.y0 + bbox.height * 0.72:
+        yoff = -15
+    annot.set_position((xoff, yoff))
+    annot.set_ha("left" if xoff > 0 else "right")
+    annot.set_va("bottom" if yoff > 0 else "top")
+
+
 # ── Hover tooltip ────────────────────────────────────────────────────────
 
 
@@ -151,6 +166,10 @@ def _wire_hover(
         zorder=10,
     )
     vline = ax.axvline(x=xs_num[0], color="#999", lw=0.7, ls="--", visible=False, zorder=5)
+    annot.set_in_layout(False)
+    annot.set_annotation_clip(False)
+    annot.set_clip_on(False)
+    vline.set_in_layout(False)
 
     def _on_move(event):
         if event.inaxes is not ax:
@@ -165,6 +184,7 @@ def _wire_hover(
         xi = xs_dt[idx]
         yi = float(ys_arr[idx])
         annot.xy = (xs_num[idx], yi)
+        _place_hover_annotation(ax, annot, xs_num[idx], yi)
         suffix = f" {unit}" if unit else ""
         annot.set_text(f"{xi:%Y-%m-%d %H:%M}\n{fmt_y.format(yi)}{suffix}")
         annot.set_visible(True)
@@ -215,6 +235,10 @@ def _wire_pv_hover(
         zorder=10,
     )
     vline = ax.axvline(x=xs_num[0], color="#999", lw=0.7, ls="--", visible=False, zorder=5)
+    annot.set_in_layout(False)
+    annot.set_annotation_clip(False)
+    annot.set_clip_on(False)
+    vline.set_in_layout(False)
 
     def _on_move(event):
         if event.inaxes is not ax:
@@ -232,6 +256,7 @@ def _wire_pv_hover(
         total_kwh = day_total_wh.get(d, 0.0) / 1000.0
         rem_kwh = remaining_wh[idx] / 1000.0
         annot.xy = (xs_num[idx], yi)
+        _place_hover_annotation(ax, annot, xs_num[idx], yi)
         annot.set_text(
             f"{xi:%Y-%m-%d %H:%M}\n"
             f"{yi:.0f} W\n"
@@ -385,9 +410,9 @@ class _Tab:
         self._status.set(f"Error: {exc}")
         messagebox.showerror("Fetch error", f"{exc}\n\n{tb[:1500]}", parent=self.frame)
 
-    def _do_plot(self, series: pl.Series, ts: pl.Series) -> None:
+    def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
         ax = self._fig.add_subplot(111)
-        ax.plot(ts.to_list(), series.to_list(), linewidth=1.4)
+        ax.plot(ts.to_list(), s.to_list(), linewidth=1.4)
         ax.set_title(self.TITLE)
         ax.grid(True, alpha=0.3)
         self._fig.autofmt_xdate(rotation=25)
@@ -602,8 +627,6 @@ class PVForecastTab(_Tab):
             if prov == "ForecastSolar":
                 self._apikey = _field(f, row, "API key (opt.)", "")
             elif prov == "OpenMeteo":
-                self._om_ac_kwp = _field(f, row, "AC limit [kW]", "")
-                row += 1
                 self._om_apikey = _field(f, row, "API key (opt.)", "")
                 row += 1
                 self._om_weather_model = _field(f, row, "Weather model", "")
@@ -635,13 +658,11 @@ class PVForecastTab(_Tab):
         plane = self._plane()
         tz = self.app._tz.get()
         if p == "OpenMeteo":
-            ac_text = self._om_ac_kwp.get().strip()
             return PVForecastOpenMeteo(
                 planes=[plane],
                 latitude=float(self._lat.get()),
                 longitude=float(self._lon.get()),
                 timezone_str=tz,
-                ac_kwp=float(ac_text) if ac_text else None,
                 api_key=self._om_apikey.get().strip() or None,
                 weather_model=self._om_weather_model.get().strip() or None,
             )
@@ -825,10 +846,11 @@ class App:
 
 def run() -> None:
     """Launch the interactive forecast preview GUI."""
-    # set overall logger to debug to catch provider warnings; GUI will show errors in popups
+    # Keep third-party loggers quiet while retaining debug output from this package.
     import logging
 
-    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+    logging.getLogger("src").setLevel(logging.DEBUG)
 
     app = App()
     app.root.mainloop()

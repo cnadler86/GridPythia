@@ -10,13 +10,15 @@ Azimuth convention:
     Conversion: ``om_az = plane.azimuth − 180``.
 
 Caching:
-    API responses are cached per date-range pair for
+    Responses are cached per plane for
     :attr:`PVForecastOpenMeteo._TTL_S` seconds (default 3600 = 1 h).
 """
 
 import logging
-from datetime import date, datetime, timezone
-from typing import ClassVar
+from collections import defaultdict
+from datetime import datetime, timezone
+from time import monotonic
+from typing import ClassVar, Sequence
 
 import polars as pl
 from open_meteo_solar_forecast import OpenMeteoSolarForecast
@@ -28,16 +30,16 @@ logger = logging.getLogger(__name__)
 
 
 def _userhorizon_to_map(
-    userhorizon: list[float] | None,
+    userhorizon: Sequence[float] | None,
 ) -> tuple[tuple[float, float], ...]:
     """Convert equally-spaced horizon elevations to ``(azimuth, elevation)`` pairs.
 
     The library's *horizon_map* expects a sequence of ``(azimuth_deg, elevation_deg)``
     tuples.  When *userhorizon* is ``None`` the library's default flat-horizon map is
-    returned (two sentinel points at 20° elevation).
+    returned (two sentinel points at 0° elevation).
     """
     if not userhorizon:
-        return ((0.0, 20.0), (360.0, 20.0))
+        return ((0.0, 0.0), (360.0, 0.0))
     n = len(userhorizon)
     return tuple((i * 360.0 / n, elev) for i, elev in enumerate(userhorizon))
 
@@ -60,9 +62,7 @@ class PVForecastOpenMeteo(PVForecastProvider):
         longitude:     Location longitude in decimal degrees.
         timezone_str:  IANA timezone string (unused in API calls but kept for
                        consistency with other providers).
-        ac_kwp:        AC inverter output capacity in kW.  ``None`` = unlimited.
         api_key:       Optional Open-Meteo API key for commercial endpoints.
-        base_url:      Override the default Open-Meteo API base URL.
         weather_model: Open-Meteo weather model identifier
                        (e.g. ``"best_match"``, ``"ecmwf_ifs04"``).  ``None`` = API default.
     """
@@ -75,9 +75,7 @@ class PVForecastOpenMeteo(PVForecastProvider):
         latitude: float,
         longitude: float,
         timezone_str: str = "UTC",
-        ac_kwp: float | None = None,
         api_key: str | None = None,
-        base_url: str | None = None,
         weather_model: str | None = None,
     ) -> None:
         if not planes:
@@ -86,12 +84,13 @@ class PVForecastOpenMeteo(PVForecastProvider):
         self._lat = latitude
         self._lon = longitude
         self._tz = timezone_str
-        self._ac_kwp = ac_kwp
         self._api_key = api_key
-        self._base_url = base_url
         self._weather_model = weather_model
-        # Cache: key=(start_date, end_date) → (mono_time, [plane0_dict, plane1_dict, ...])
-        self._cache: dict[tuple[date, date], tuple[float, list[dict[datetime, float]]]] = {}
+        # Per-plane cache: plane -> (forecast_days, past_days, fetched_at_mono, data)
+        self._cache: dict[
+            PVPlaneConfig,
+            tuple[int, int, float, dict[datetime, float]],
+        ] = {}
 
     @property
     def provider_id(self) -> str:
@@ -120,8 +119,8 @@ class PVForecastOpenMeteo(PVForecastProvider):
     ) -> dict[datetime, float]:
         """Fetch 15-min data for *plane* and return a ``{slot_utc: watts}`` dict.
 
-        Keys are UTC datetimes floored to the nearest 15-minute boundary,
-        preserving the full 15-minute resolution of the Open-Meteo API.
+        Keys are the UTC-converted 15-minute timestamps returned by the
+        Open-Meteo API.
         """
         om_az = plane.azimuth - 180.0
         logger.debug(
@@ -148,28 +147,26 @@ class PVForecastOpenMeteo(PVForecastProvider):
             partial_shading=plane.partial_shading,
             use_horizon=plane.userhorizon is not None,
             horizon_map=_userhorizon_to_map(plane.userhorizon),
-            ac_kwp=self._ac_kwp,
             api_key=self._api_key,
-            **(({"base_url": self._base_url}) if self._base_url else {}),
-            **(({"weather_model": self._weather_model}) if self._weather_model else {}),
+            weather_model=self._weather_model if self._weather_model else None,
         ) as forecaster:
             estimate = await forecaster.estimate()
 
-        # Keep full 15-min resolution; floor each timestamp to its 15-min slot
+        # The API already returns 15-minute timestamps; only normalize to UTC.
         result: dict[datetime, float] = {}
+        logger.debug(
+            "OpenMeteo response: %d estimates for plane with az=%s tilt=%s.",
+            len(estimate.watts),
+            om_az,
+            plane.tilt,
+        )
         for ts, w in estimate.watts.items():
-            ts_utc = ts.astimezone(timezone.utc)
-            slot = ts_utc.replace(
-                minute=(ts_utc.minute // 15) * 15,
-                second=0,
-                microsecond=0,
-            )
-            result[slot] = float(w)
+            result[ts.astimezone(timezone.utc)] = float(w)
         return result
 
     # ── public API ────────────────────────────────────────────────────
 
-    async def fetch(self, timestamps: pl.Series) -> pl.Series:
+    async def fetch_by_inverter(self, timestamps: pl.Series) -> dict[str, pl.Series]:
         ts_list: list[datetime] = timestamps.to_list()
 
         def _to_utc(dt: datetime) -> datetime:
@@ -179,26 +176,40 @@ class PVForecastOpenMeteo(PVForecastProvider):
         end_utc = _to_utc(ts_list[-1])
 
         past_days, forecast_days = self._derive_days(start_utc, end_utc)
-        cache_key = (start_utc.date(), end_utc.date())
+        now_mono = monotonic()
+        plane_data_by_inverter: dict[str, list[dict[datetime, float]]] = defaultdict(list)
+        for plane in self._planes:
+            cached = self._cache.get(plane)
+            if (
+                cached is None
+                or cached[0] != forecast_days
+                or cached[1] != past_days
+                or (now_mono - cached[2]) >= self._TTL_S
+            ):
+                plane_data = await self._fetch_plane(plane, forecast_days, past_days)
+                self._cache[plane] = (forecast_days, past_days, now_mono, plane_data)
+            else:
+                logger.debug(
+                    "OpenMeteo: using cached response for plane az=%s tilt=%s (age=%.0fs)",
+                    plane.azimuth - 180.0,
+                    plane.tilt,
+                    now_mono - cached[2],
+                )
+                plane_data = cached[3]
+            plane_data_by_inverter[plane.inverter].append(plane_data)
 
-        first_time = start_utc.timestamp()
-        cached = self._cache.get(cache_key)
-        if cached is None or (first_time - cached[0]) >= self._TTL_S:
-            data: list[dict[datetime, float]] = [
-                await self._fetch_plane(p, forecast_days, past_days) for p in self._planes
-            ]
-            self._cache[cache_key] = (first_time, data)
-        else:
-            logger.debug("OpenMeteo: using cached response (age=%.0fs)", first_time - cached[0])
-            data = cached[1]
-
-        # Build 15-min array aligned to start_utc, summing all planes
         n_slots = max(1, round((end_utc - start_utc).total_seconds() / 900) + 4)
-        quarterly = [0.0] * n_slots
-        for plane_data in data:
-            for slot_utc, watts in plane_data.items():
-                idx = round((slot_utc - start_utc).total_seconds() / 900)
-                if 0 <= idx < n_slots:
-                    quarterly[idx] += max(0.0, watts)
+        result: dict[str, pl.Series] = {}
+        for inverter, plane_data_list in plane_data_by_inverter.items():
+            quarterly = [0.0] * n_slots
+            for plane_data in plane_data_list:
+                for slot_utc, watts in plane_data.items():
+                    idx = round((slot_utc - start_utc).total_seconds() / 900)
+                    if 0 <= idx < n_slots:
+                        quarterly[idx] += max(0.0, watts)
+            result[inverter] = resample_to_timestamps(quarterly, 0.25, timestamps, pad_value=0.0)
 
-        return resample_to_timestamps(quarterly, 0.25, timestamps, pad_value=0.0)
+        return result
+
+    async def fetch(self, timestamps: pl.Series) -> pl.Series:
+        return self._sum_series_by_key(await self.fetch_by_inverter(timestamps))
