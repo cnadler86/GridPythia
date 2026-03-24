@@ -50,7 +50,7 @@ from src.prediction.electricprice.provider import ElecPriceProvider
 
 logger = logging.getLogger(__name__)
 
-_HISTORY_WINDOW = timedelta(days=35)
+_HISTORY_WINDOW = timedelta(days=15)
 _HORIZON_BUFFER_DEFAULT = timedelta(hours=25)
 
 
@@ -122,37 +122,24 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
 
         timestamps_s: list[int] = data.get("unix_seconds", [])
         prices_mwh: list[float | None] = data.get("price", [])
-        charges_wh = self._charges_kwh / 1000.0
 
+        # Return raw EPEX/Energy-Charts prices in EUR/Wh. Charges and VAT
+        # are applied later when serving values so that forecasts (ETS)
+        # operate on the underlying market prices.
         result: list[tuple[datetime, float]] = []
         for ts, price_mwh in zip(timestamps_s, prices_mwh):
             if price_mwh is None:
                 continue
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            price_wh = price_mwh / 1_000_000.0  # EUR/MWh → EUR/Wh
-            if charges_wh > 0:
-                price_wh = (price_wh + charges_wh) * self._vat_rate
+            price_wh = price_mwh / 1_000_000.0  # EUR/MWh → EUR/Wh (raw)
             result.append((dt, price_wh))
 
         return result
 
     # ── ETS / fallback ────────────────────────────────────────────────
 
-    @staticmethod
-    def _cap_outliers(values: list[float], sigma: int = 2) -> list[float]:
-        n = len(values)
-        if n < 2:
-            return list(values)
-        mean = sum(values) / n
-        var = sum((v - mean) ** 2 for v in values) / n
-        std = var**0.5
-        lo, hi = mean - sigma * std, mean + sigma * std
-        return [max(lo, min(hi, v)) for v in values]
-
     def _forecast(self, history: list[float], steps: int) -> list[float]:
         """Extend *history* by *steps* 15-minute intervals using ETS or median."""
-        # capped = self._cap_outliers(history)
-        capped = history
         try:
             from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
@@ -164,23 +151,25 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
             # Prefer weekly seasonality when we have at least two full weekly
             # cycles in the history; otherwise fall back to daily if possible.
             sp = None
-            if len(capped) >= 2 * weekly_sp:
+            if len(history) >= 2 * weekly_sp:
                 sp = weekly_sp
-            elif len(capped) >= 2 * daily_sp:
+            elif len(history) >= 2 * daily_sp:
                 sp = daily_sp
 
-            if sp is not None and len(capped) >= 2 * sp:
-                logger.debug("Using ETS with seasonal_periods=%d (history=%d)", sp, len(capped))
-                model = ExponentialSmoothing(capped, seasonal="add", seasonal_periods=sp).fit(
+            if sp is not None and len(history) >= 2 * sp:
+                logger.debug("Using ETS with seasonal_periods=%d (history=%d)", sp, len(history))
+                model = ExponentialSmoothing(history, seasonal="add", seasonal_periods=sp).fit(
                     optimized=True
                 )
-                return [float(v) for v in model.forecast(steps)]
+                # Ensure forecasts are non-negative (floor at 0.0)
+                return [max(0.0, float(v)) for v in model.forecast(steps)]
         except Exception:  # noqa: S110
             pass
         from statistics import median
 
-        med = median(capped) if capped else 0.0
-        return [med] * steps
+        med = median(history) if history else 0.0
+        # Floor median fallback at 0.0 as well
+        return [max(0.0, med)] * steps
 
     # ── cache management ──────────────────────────────────────────────
 
@@ -306,6 +295,13 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
             logger.warning(
                 "No history for ETS forecast – %d slots will default to 0.0", len(missing_pos)
             )
+
+        # Apply configured charges and VAT to every slot once here so the
+        # in-memory price map contains final end-prices.
+        charges_wh = self._charges_kwh / 1000.0
+        if charges_wh != 0.0 or self._vat_rate != 1.0:
+            for k in list(new_map.keys()):
+                new_map[k] = (new_map[k] + charges_wh) * self._vat_rate
 
         self._price_map = new_map
         logger.info(
