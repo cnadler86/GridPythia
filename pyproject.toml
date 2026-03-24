@@ -11,6 +11,7 @@ dependencies = [
     "polars",
     "aiohttp>=3.9",
     "open-meteo-solar-forecast>=0.1.29",
+    "statsmodels",
 ]
 
 [dependency-groups]
@@ -20,7 +21,6 @@ dev = [
     "pytest-cov",
     "matplotlib",
     "ty",
-    "statsmodels",
 ]
 
 [tool.setuptools.packages.find]

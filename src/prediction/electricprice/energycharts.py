@@ -197,7 +197,7 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
             return True
         if (
             self._last_real_ts is not None
-            and now_utc > self._last_real_ts
+            and (now_utc + timedelta(days=1)) > self._last_real_ts
             and requested_start <= now_utc <= requested_end
             and (now_utc.hour > 12 or (now_utc.hour == 12 and now_utc.minute >= 30))
         ):
@@ -237,6 +237,25 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
             return
 
         last_real_ts = max(dt for dt, _ in raw)
+
+        if self._last_real_ts is not None and last_real_ts <= self._last_real_ts:
+            # Only skip rebuilding the cache if the requested range is
+            # already fully covered by the existing cached window. If the
+            # requested range extends beyond the cached days we must rebuild
+            # (even if no newer API data was found) so that the price map
+            # covers the requested timestamps.
+            if (
+                self._cache_start_day is not None
+                and self._cache_end_day is not None
+                and requested_start.date() >= self._cache_start_day
+                and requested_end.date() <= self._cache_end_day
+            ):
+                logger.debug(
+                    "No new data beyond last_real_ts=%s (fetched last_real_ts=%s) – skipping refresh (requested range already cached)",
+                    self._last_real_ts.strftime("%Y-%m-%dT%H:%M"),
+                    last_real_ts.strftime("%Y-%m-%dT%H:%M"),
+                )
+                return
         horizon_end = max(last_real_ts + self._horizon_buffer, fetch_end)
 
         logger.info(
