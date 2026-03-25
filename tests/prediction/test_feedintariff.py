@@ -2,46 +2,56 @@
 
 from datetime import datetime, timezone
 
+import polars as pl
 import pytest
 
+from src.prediction.base import make_timestamps
 from src.prediction.feedintariff.fixed import FeedInTariffFixed
 from src.prediction.feedintariff.import_ import FeedInTariffImport
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
-END_24H = datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc)
+
+
+def _ts(hours: float = 24, dt: float = 1.0) -> pl.Series:
+    return make_timestamps(START, hours, dt)
 
 
 class TestFeedInTariffFixed:
-    def test_constant_tariff(self):
+    async def test_constant_tariff(self):
         provider = FeedInTariffFixed(tariff_kwh=0.082)
-        result = provider.fetch(START, END_24H, dt_hours=1.0)
+        result = await provider.fetch(_ts())
         assert len(result) == 24
         assert result[0] == pytest.approx(0.082 / 1000.0)
-        assert all(v == pytest.approx(result[0]) for v in result)
+        assert all(v == pytest.approx(result[0]) for v in result.to_list())
 
-    def test_quarter_hour(self):
+    async def test_quarter_hour(self):
         provider = FeedInTariffFixed(tariff_kwh=0.082)
-        result = provider.fetch(START, END_24H, dt_hours=0.25)
+        result = await provider.fetch(_ts(dt=0.25))
         assert len(result) == 96
 
-    def test_provider_id(self):
+    async def test_provider_id(self):
         assert FeedInTariffFixed().provider_id == "FeedInTariffFixed"
+
+    async def test_returns_polars_float32(self):
+        result = await FeedInTariffFixed().fetch(_ts())
+        assert isinstance(result, pl.Series)
+        assert result.dtype == pl.Float32
 
 
 class TestFeedInTariffImport:
-    def test_exact_length(self):
+    async def test_exact_length(self):
         tariffs = [0.00008] * 24
         provider = FeedInTariffImport(tariffs_wh=tariffs)
-        result = provider.fetch(START, END_24H, dt_hours=1.0)
+        result = await provider.fetch(_ts())
         assert len(result) == 24
         assert list(result) == pytest.approx(tariffs)
 
-    def test_padding(self):
+    async def test_padding(self):
         tariffs = [0.00005, 0.00010]
         provider = FeedInTariffImport(tariffs_wh=tariffs)
-        result = provider.fetch(START, END_24H, dt_hours=1.0)
+        result = await provider.fetch(_ts())
         assert len(result) == 24
         assert result[23] == pytest.approx(0.00010)
 
-    def test_provider_id(self):
+    async def test_provider_id(self):
         assert FeedInTariffImport(tariffs_wh=[]).provider_id == "FeedInTariffImport"

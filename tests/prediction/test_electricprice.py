@@ -117,13 +117,13 @@ class TestElecPriceEnergyChartsCache:
     @staticmethod
     def _provider(poll_minutes: int = 30, buffer_hours: int = 25):
         from datetime import timedelta
-
-        from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts
-
-        return ElecPriceEnergyCharts(
-            poll_interval=timedelta(minutes=poll_minutes),
-            horizon_buffer=timedelta(hours=buffer_hours),
+        from src.prediction.electricprice.energycharts import (
+            ElecPriceEnergyCharts,
+            EnergyChartsConfig,
         )
+
+        cfg = EnergyChartsConfig(horizon_buffer=timedelta(hours=buffer_hours))
+        return ElecPriceEnergyCharts(cfg)
 
     # ── tests ─────────────────────────────────────────────────────────
 
@@ -148,7 +148,7 @@ class TestElecPriceEnergyChartsCache:
         """Multiple fetch() calls within poll_interval make only one API call."""
         from datetime import timedelta
 
-        provider = self._provider(poll_minutes=30)
+        provider = self._provider()
         now = datetime.now(timezone.utc)
         raw = self._make_raw(now)
         provider._request_prices = AsyncMock(return_value=raw)
@@ -165,9 +165,13 @@ class TestElecPriceEnergyChartsCache:
         from datetime import timedelta
         from unittest.mock import patch
 
-        provider = self._provider(poll_minutes=30)
-        now = datetime.now(timezone.utc)
-        raw = self._make_raw(now)
+        provider = self._provider()
+        # Use a deterministic 'now' in the early afternoon so the poll
+        # window condition (after 12:30 UTC) can be satisfied reliably.
+        now = datetime.now(timezone.utc).replace(hour=13, minute=0, second=0, microsecond=0)
+        # Short future coverage so that last_real_ts < now + 1 day and a
+        # recheck becomes possible when time advances.
+        raw = self._make_raw(now, n_future=4)
         provider._request_prices = AsyncMock(return_value=raw)
 
         ts = make_timestamps(now, hours=24, dt_hours=1.0)
@@ -175,12 +179,14 @@ class TestElecPriceEnergyChartsCache:
         await provider.fetch(ts)
         assert provider._request_prices.call_count == 1
 
-        # Simulate time has passed beyond poll_interval by requesting
-        # timestamps that start in the future (the provider uses the
-        # first requested timestamp as reference time).
+        # Simulate time has passed beyond poll by patching the module's
+        # `datetime.now()` so the provider sees the bumped current time
+        # and decides to recheck.
         expired = now + timedelta(minutes=31)
         ts_expired = make_timestamps(expired, hours=24, dt_hours=1.0)
-        await provider.fetch(ts_expired)
+        with patch("src.prediction.electricprice.energycharts.datetime") as mock_dt:
+            mock_dt.now.return_value = expired
+            await provider.fetch(ts_expired)
 
         assert provider._request_prices.call_count == 2
 
@@ -188,7 +194,7 @@ class TestElecPriceEnergyChartsCache:
         """When EC max bucket does not advance, the price map is not rebuilt."""
         from datetime import timedelta
 
-        provider = self._provider(poll_minutes=0)  # always re-check
+        provider = self._provider()  # always re-check
         now = datetime.now(timezone.utc)
         raw = self._make_raw(now)
         provider._request_prices = AsyncMock(return_value=raw)
@@ -205,8 +211,10 @@ class TestElecPriceEnergyChartsCache:
         """When EC max bucket advances (new day-ahead published) map is rebuilt."""
         from datetime import timedelta
 
-        provider = self._provider(poll_minutes=0)  # always re-check
-        now = datetime.now(timezone.utc)
+        provider = self._provider()
+        # Use a deterministic afternoon time so the poll window can trigger
+        # when we advance the perceived current time.
+        now = datetime.now(timezone.utc).replace(hour=13, minute=0, second=0, microsecond=0)
 
         raw_day1 = self._make_raw(now, n_future=24 * 4, base_price=10.0)
         raw_day2 = self._make_raw(now, n_future=48 * 4, base_price=20.0)  # more future + higher
@@ -218,7 +226,15 @@ class TestElecPriceEnergyChartsCache:
         bucket1 = int(ts.to_list()[0].timestamp()) // 900
         price1 = provider._price_map.get(bucket1, 0.0)
 
-        result2 = await provider.fetch(ts)
+        # Advance perceived current time so the provider re-checks and
+        # fetches fresh data (side_effect returns raw_day2).
+        later = now + timedelta(hours=2)
+        from unittest.mock import patch
+
+        with patch("src.prediction.electricprice.energycharts.datetime") as mock_dt:
+            mock_dt.now.return_value = later
+            result2 = await provider.fetch(ts)
+
         price2 = provider._price_map.get(bucket1, 0.0)
 
         # The map was rebuilt with different (higher) prices
@@ -252,7 +268,7 @@ class TestElecPriceEnergyChartsCache:
         # Small buffer (6 h) so we can easily exceed it:
         # ts_short last = now+3h → map covers [now, now+9h].
         # ts_long last = now+23h > now+9h → cache miss → refresh.
-        provider = self._provider(poll_minutes=60, buffer_hours=6)
+        provider = self._provider(buffer_hours=6)
         now = datetime.now(timezone.utc)
         raw = self._make_raw(now, n_future=30 * 4)  # 30 h covers 3 h last_ts + 6 h buffer + slack
         provider._request_prices = AsyncMock(return_value=raw)
@@ -275,7 +291,7 @@ class TestElecPriceEnergyChartsCache:
         # buffer=6h: first 24h fetch → map covers [now, now+23+6=now+29h].
         # Advance 8h: new last ts = now+8+23=now+31h > now+29h → re-anchor.
         buffer_h = 6
-        provider = self._provider(poll_minutes=0, buffer_hours=buffer_h)
+        provider = self._provider(buffer_hours=buffer_h)
         now = datetime.now(timezone.utc)
         raw = self._make_raw(now, n_history=400, n_future=40 * 4)
         provider._request_prices = AsyncMock(return_value=raw)
@@ -341,9 +357,12 @@ class TestElecPriceEnergyChartsCache:
         """charges_kwh and vat_rate are factored into the cached prices."""
         from datetime import timedelta
 
-        from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts
+        from src.prediction.electricprice.energycharts import (
+            ElecPriceEnergyCharts,
+            EnergyChartsConfig,
+        )
 
-        provider = ElecPriceEnergyCharts(charges_kwh=0.05, vat_rate=1.19)
+        provider = ElecPriceEnergyCharts(EnergyChartsConfig(charges_kwh=0.05, vat_rate=1.19))
         now = datetime.now(timezone.utc)
 
         # Provide a constant price of 100 EUR/MWh = 1e-4 EUR/Wh
@@ -355,8 +374,11 @@ class TestElecPriceEnergyChartsCache:
         ts = make_timestamps(now, hours=2, dt_hours=0.25)
         result = await provider.fetch(ts)
 
-        # All values should equal the injected raw price (no double-conversion)
-        assert all(v == pytest.approx(raw_price_wh, rel=1e-3) for v in result.to_list())
+        # The injected raw prices are market prices; the provider applies
+        # configured charges and VAT when building the in-memory price map.
+        charges_wh = provider._charges_kwh / 1000.0
+        expected = (raw_price_wh + charges_wh) * (1+provider._vat_rate)
+        assert all(v == pytest.approx(expected, rel=1e-3) for v in result.to_list())
 
 
 async def test_energycharts_fetch_today():
@@ -381,7 +403,9 @@ async def test_energycharts_fetch_today():
     except Exception as exc:
         pytest.skip(f"Energy-Charts API unreachable: {exc}")
 
-    provider = ElecPriceEnergyCharts(bidding_zone="DE-LU")
+    from src.prediction.electricprice.energycharts import EnergyChartsConfig
+
+    provider = ElecPriceEnergyCharts(EnergyChartsConfig(bidding_zone="DE-LU"))
     ts = make_timestamps(start, hours=24, dt_hours=1.0)
     try:
         prices = await provider.fetch(ts)

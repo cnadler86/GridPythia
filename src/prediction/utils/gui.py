@@ -15,6 +15,7 @@ import threading
 import tkinter as tk
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -29,7 +30,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 
 from src.prediction.base import make_timestamps
-from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts
+from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts, EnergyChartsConfig
 from src.prediction.electricprice.fixed import ElecPriceFixed
 from src.prediction.electricprice.import_ import ElecPriceImport
 from src.prediction.feedintariff.fixed import FeedInTariffFixed
@@ -37,6 +38,7 @@ from src.prediction.feedintariff.import_ import FeedInTariffImport
 from src.prediction.load.akkudoktor import LoadAkkudoktor, LoadAkkudoktorAdjusted
 from src.prediction.load.fixed import LoadFixed
 from src.prediction.load.import_ import LoadImport
+from src.prediction.load.profilejson import LoadProfileJSON
 from src.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
 from src.prediction.pvforecast.import_ import PVForecastImport
 from src.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
@@ -449,7 +451,7 @@ class ElecPriceTab(_Tab):
         row += 1
         self._charges = _field(f, row, "Charges EUR/kWh", "0.1528")
         row += 1
-        self._vat = _field(f, row, "VAT rate", "1.19")
+        self._vat = _field(f, row, "VAT rate", "0.19")
 
     def _provider_sig(self) -> str | None:
         p = self._prov_var.get()
@@ -463,9 +465,8 @@ class ElecPriceTab(_Tab):
         if p == "Fixed":
             return ElecPriceFixed(price_kwh=float(self._price.get()), charges_kwh=ch, vat_rate=vat)
         if p == "EnergyCharts":
-            return ElecPriceEnergyCharts(
-                bidding_zone=self._zone.get(), charges_kwh=ch, vat_rate=vat
-            )
+            cfg = EnergyChartsConfig(bidding_zone=self._zone.get(), charges_kwh=ch, vat_rate=vat)
+            return ElecPriceEnergyCharts(cfg)
         return ElecPriceImport(
             prices_wh=_csv(self._ta.get("1.0", "end")),
             source_dt_hours=float(self._srcdt.get()),
@@ -530,7 +531,7 @@ class FeedInTariffTab(_Tab):
 
 class LoadTab(_Tab):
     TITLE = "Load"
-    PROVIDERS = ["Fixed", "Import", "Akkudoktor", "AkkudoktorAdjusted"]
+    PROVIDERS = ["Fixed", "Import", "Akkudoktor", "AkkudoktorAdjusted", "ProfileJSON"]
 
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
@@ -539,6 +540,20 @@ class LoadTab(_Tab):
             self._power = _field(f, row, "Power [W]", "500.0")
         elif p in ("Akkudoktor", "AkkudoktorAdjusted"):
             self._year_energy = _field(f, row, "Year energy [kWh]", "4500.0")
+        elif p == "ProfileJSON":
+            self._profile_json_path = _field(
+                f,
+                row,
+                "Profile JSON",
+                str(Path("src/prediction/load/data/load_profiles.json")),
+            )
+            row += 1
+            self._vacation_profile = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                f,
+                text="Use vacation profile",
+                variable=self._vacation_profile,
+            ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
         else:  # Import
             ttk.Label(f, text="Values (W, CSV):").grid(
                 row=row, column=0, columnspan=2, sticky="w", **_PAD
@@ -556,6 +571,11 @@ class LoadTab(_Tab):
             return LoadAkkudoktor(year_energy_kwh=float(self._year_energy.get()))
         if p == "AkkudoktorAdjusted":
             return LoadAkkudoktorAdjusted(year_energy_kwh=float(self._year_energy.get()))
+        if p == "ProfileJSON":
+            return LoadProfileJSON(
+                data_path=Path(self._profile_json_path.get()),
+                use_vacation_profile=self._vacation_profile.get(),
+            )
         return LoadImport(
             load_w=_csv(self._ta.get("1.0", "end")),
             source_dt_hours=float(self._srcdt.get()),
@@ -593,9 +613,9 @@ class PVForecastTab(_Tab):
         row += 1
         self._tilt = _field(f, row, "Tilt [°]", "75.0")
         row += 1
-        self._az = _field(f, row, "Azimuth [°]", "210.0")
+        self._az = _field(f, row, "Azimuth [°]", "218.0")
         row += 1
-        self._loss = _field(f, row, "Loss [%]", "2.0")
+        self._loss = _field(f, row, "Loss [%]", "4.0")
         row += 1
         self._horizon = _field(f, row, "Horizon [°] CSV", "")
         row += 1

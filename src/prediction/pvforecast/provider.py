@@ -2,16 +2,15 @@
 
 from abc import abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Optional, Sequence, Tuple
 
 import polars as pl
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.prediction.base import PredictionProvider
 
 
-@dataclass(frozen=True)
-class PVPlaneConfig:
+class PVPlaneConfig(BaseModel):
     """Physical configuration of one PV array / plane.
 
     Azimuth convention (consistent with EOS / PVGIS):
@@ -19,33 +18,35 @@ class PVPlaneConfig:
 
     Args:
         peak_kw:         Nominal peak power in kW.
-        tilt:            Tilt angle from horizontal (0–90°).
+        tilt:            Tilt angle from horizontal (0-90°).
         azimuth:         Surface azimuth in degrees (north=0, south=180).
         userhorizon:     Horizon elevation in degrees at equally-spaced azimuth
                          steps clockwise from north.  ``None`` = flat horizon.
                          Converted to the library's ``horizon_map`` format when
                          used with the Open-Meteo provider. Stored internally as
                          an immutable tuple.
-        loss_pct:        System losses in percent.  Default 2 %.
-        damping_morning: Morning shading damping factor (0–1).  Open-Meteo only.
-        damping_evening: Evening shading damping factor (0–1).  Open-Meteo only.
+        loss_pct:        System losses in percent.
+        damping_morning: Morning shading damping factor.  Open-Meteo only.
+        damping_evening: Evening shading damping factor.  Open-Meteo only.
         partial_shading: Enable partial-shading model.  Open-Meteo only.
         inverter:        Inverter model name. Default is "default".
     """
 
-    peak_kw: float
-    tilt: float
-    azimuth: float
-    userhorizon: Sequence[float] | None = field(default=None)
-    loss_pct: float = 2.0
+    peak_kw: float = Field(..., gt=0.0)
+    tilt: float = Field(..., ge=0.0, le=90.0)
+    azimuth: float = Field(..., ge=0.0, le=360.0)
+    userhorizon: Optional[Tuple[float, ...]] = None
+    loss_pct: float = Field(2.0, ge=0.0, lt=100.0)
     damping_morning: float = 0.0
     damping_evening: float = 0.0
     partial_shading: bool = False
     inverter: str = "default"
 
-    def __post_init__(self) -> None:
-        if self.userhorizon is not None and not isinstance(self.userhorizon, tuple):
-            object.__setattr__(self, "userhorizon", tuple(self.userhorizon))
+    model_config = ConfigDict(frozen=True)
+
+    @field_validator("userhorizon", mode="before")
+    def _to_tuple(cls, v: Sequence[float] | None):
+        return None if v is None else tuple(v)
 
 
 class PVForecastProvider(PredictionProvider):

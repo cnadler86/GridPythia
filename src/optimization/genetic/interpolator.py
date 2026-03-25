@@ -13,9 +13,7 @@ class SelfConsumptionProbabilityInterpolator:
         with open(self.filepath, "rb") as file:
             self.interpolator: RegularGridInterpolator = pickle.load(file)  # noqa: S301
 
-    def calculate_self_consumption(
-        self, load_1h_power: float, pv_power: float
-    ) -> float:
+    def calculate_self_consumption(self, load_1h_power: float, pv_power: float) -> float:
         """Calculate the PV self-consumption rate using RegularGridInterpolator.
 
         Args:
@@ -40,10 +38,7 @@ def get_load_interpolator() -> SelfConsumptionProbabilityInterpolator:
     global _interpolator
     if _interpolator is None:
         filepath = (
-            Path(__file__).parent.resolve()
-            / ".."
-            / "data"
-            / "regular_grid_interpolator.pkl"
+            Path(__file__).parent.parent.resolve() / ".." / "data" / "regular_grid_interpolator.pkl"
         )
         _interpolator = SelfConsumptionProbabilityInterpolator(filepath)
     return _interpolator

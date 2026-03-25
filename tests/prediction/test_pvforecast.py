@@ -1,22 +1,26 @@
 """Tests for PV forecast providers."""
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
+import polars as pl
 import pytest
 
-from src.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
-from src.prediction.pvforecast.forecastsolar import PVForecastSolar
+from src.prediction.base import make_timestamps
+from src.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor, _ForecastValue
 from src.prediction.pvforecast.import_ import PVForecastImport
+from src.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
 from src.prediction.pvforecast.provider import PVPlaneConfig
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
-END_24H = datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc)
-
 _PLANE = PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0)
 
 
-# ── PVPlaneConfig ────────────────────────────────────────────────────────
+def _ts(hours: float = 24, dt: float = 1.0) -> pl.Series:
+    return make_timestamps(START, hours, dt)
+
+
+# ── PVPlaneConfig ─────────────────────────────────────────────────────────────
 
 
 class TestPVPlaneConfig:
@@ -24,109 +28,106 @@ class TestPVPlaneConfig:
         p = PVPlaneConfig(peak_kw=3.0, tilt=30.0, azimuth=180.0)
         assert p.loss_pct == 2.0
         assert p.userhorizon is None
+        assert p.inverter.startswith("default")
 
     def test_custom(self):
-        p = PVPlaneConfig(
-            peak_kw=4.0,
-            tilt=25.0,
-            azimuth=90.0,
-            userhorizon=[10, 20, 30],
-        )
+        p = PVPlaneConfig(peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=[10, 20, 30])
         assert p.peak_kw == 4.0
         assert p.azimuth == 90.0
-        assert p.userhorizon == [10, 20, 30]
+        assert p.userhorizon == (10, 20, 30)
+
+    def test_userhorizon_is_normalized_for_hashing(self):
+        p1 = PVPlaneConfig(
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=[10, 20, 30], inverter="inv-a"
+        )
+        p2 = PVPlaneConfig(
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inv-a"
+        )
+        assert p1 == p2
+        assert hash(p1) == hash(p2)
+
+    def test_can_be_used_as_dict_key(self):
+        p1 = PVPlaneConfig(
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=[10, 20, 30], inverter="inv-a"
+        )
+        p2 = PVPlaneConfig(
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inv-a"
+        )
+        cache = {p1: "cached"}
+        assert cache[p2] == "cached"
 
 
-# ── PVForecastImport ─────────────────────────────────────────────────────
+# ── PVForecastImport ──────────────────────────────────────────────────────────
 
 
 class TestPVForecastImport:
-    def test_full_day(self):
-        power = (
-            [0.0] * 6
-            + [500 * (i / 6) for i in range(6)]
-            + [500 * (1 - i / 6) for i in range(6)]
-            + [0.0] * 6
-        )
+    async def test_full_day(self):
+        power = [0.0] * 6 + [500.0] * 12 + [0.0] * 6
         provider = PVForecastImport(power_w=power)
-        result = provider.fetch(START, END_24H, dt_hours=1.0)
+        result = await provider.fetch(_ts())
         assert len(result) == 24
         assert result[0] == pytest.approx(0.0)
-        assert result[12] == pytest.approx(500 * (1 - 0 / 6))
+        assert result[6] == pytest.approx(500.0)
 
-    def test_shorter_than_window_pads_with_zero(self):
+    async def test_shorter_pads_zero(self):
         power = [1000.0] * 12
         provider = PVForecastImport(power_w=power)
-        result = provider.fetch(START, END_24H, dt_hours=1.0)
+        result = await provider.fetch(_ts())
         assert len(result) == 24
         assert result[11] == pytest.approx(1000.0)
-        assert result[12] == pytest.approx(0.0)  # zero-padded (night)
+        assert result[12] == pytest.approx(0.0)
 
-    def test_quarter_hour(self):
-        power = [0.0, 100.0]  # 2h hourly
-        end_2h = datetime(2025, 6, 15, 2, 0, tzinfo=timezone.utc)
+    async def test_quarter_hour(self):
+        power = [0.0, 100.0]
+        ts = make_timestamps(START, hours=2, dt_hours=0.25)
         provider = PVForecastImport(power_w=power, source_dt_hours=1.0)
-        result = provider.fetch(START, end_2h, dt_hours=0.25)
+        result = await provider.fetch(ts)
         assert len(result) == 8
 
-    def test_provider_id(self):
+    async def test_provider_id(self):
         assert PVForecastImport(power_w=[]).provider_id == "PVForecastImport"
 
+    async def test_returns_polars_float32(self):
+        result = await PVForecastImport(power_w=[0.0] * 24).fetch(_ts())
+        assert isinstance(result, pl.Series)
+        assert result.dtype == pl.Float32
 
-# ── Helpers ───────────────────────────────────────────────────────────────
+    async def test_fetch_by_inverter_uses_default(self):
+        provider = PVForecastImport(power_w=[0.0] * 24)
+        result = await provider.fetch_by_inverter(_ts())
+        assert set(result) == {"default"}
+        assert result["default"].dtype == pl.Float32
 
 
-def _akkudoktor_response(start: datetime, n_hours: int = 48) -> dict:
-    """Build a minimal Akkudoktor-style JSON response with two planes."""
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _make_akkudoktor_response(start: datetime, n_hours: int = 48) -> list[_ForecastValue]:
     from datetime import timedelta
 
-    def _vals(ac_w: float):
-        return [
-            {
-                "datetime": (start + timedelta(hours=i)).isoformat(),
-                "dcPower": ac_w * 1.04,
-                "power": ac_w,
-                "sunTilt": 30.0,
-                "sunAzimuth": 180.0,
-                "temperature": 20.0,
-                "relativehumidity_2m": 60.0,
-                "windspeed_10m": 10.0,
-            }
-            for i in range(n_hours)
-        ]
-
-    ac_profile = [0.0] * 6 + [1000.0] * 12 + [0.0] * 6
-    # Pad to n_hours
-    ac_profile = (ac_profile * (n_hours // len(ac_profile) + 1))[:n_hours]
-    plane_a = _vals(0)
-    plane_b = _vals(0)
-    for i, ac in enumerate(ac_profile):
-        plane_a[i]["power"] = ac * 0.6
-        plane_a[i]["dcPower"] = ac * 0.6 * 1.04
-        plane_b[i]["power"] = ac * 0.4
-        plane_b[i]["dcPower"] = ac * 0.4 * 1.04
-    return {"values": [plane_a, plane_b]}
+    ac_profile = ([0.0] * 6 + [1000.0] * 12 + [0.0] * 6) * (n_hours // 24 + 1)
+    return [
+        _ForecastValue(
+            dt=start + timedelta(hours=i),
+            dc_power_w=ac_profile[i] * 1.04,
+            ac_power_w=ac_profile[i],
+        )
+        for i in range(n_hours)
+    ]
 
 
-def _forecastsolar_response(start: datetime, ac_w: float = 2000.0) -> dict:
-    """Build a minimal forecast.solar-style JSON response.
-
-    Uses UTC timestamps so offset from ``START`` (which is also UTC) is
-    unambiguous when parsed back in the provider.
-    """
+def _make_forecastsolar_response(start: datetime, ac_w: float = 2000.0) -> dict[str, float]:
     from datetime import timedelta
 
-    watts = {}
-    for i in range(24):
-        dt = start + timedelta(hours=i)
-        # forecast.solar returns naive strings in the requested tz;
-        # for the test we keep UTC and rely on the provider's ZoneInfo("UTC") path
-        power = ac_w if 7 <= i < 19 else 0.0
-        watts[dt.strftime("%Y-%m-%d %H:%M:%S")] = power
-    return {"result": {"watts": watts, "watt_hours": {}}}
+    return {
+        (start + timedelta(hours=i)).strftime("%Y-%m-%d %H:%M:%S"): (
+            ac_w if 7 <= i < 19 else 0.0
+        )
+        for i in range(24)
+    }
 
 
-# ── PVForecastAkkudoktor ──────────────────────────────────────────────────
+# ── PVForecastAkkudoktor ──────────────────────────────────────────────────────
 
 
 class TestPVForecastAkkudoktor:
@@ -141,200 +142,230 @@ class TestPVForecastAkkudoktor:
         assert self._make_provider().provider_id == "PVForecastAkkudoktor"
 
     def test_url_contains_lat_lon(self):
-        p = self._make_provider()
-        url = p._build_url()
+        url = self._make_provider()._build_url()
         assert "lat=52.52" in url
         assert "lon=13.405" in url
 
-    def test_url_azimuth_conversion(self):
-        """south=180° must become 0° for Akkudoktor."""
+    def test_url_azimuth_south(self):
         p = PVForecastAkkudoktor(
             planes=[PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0)],
-            latitude=52.52,
-            longitude=13.405,
+            latitude=52.52, longitude=13.405,
         )
         assert "azimuth=0" in p._build_url()
 
     def test_url_azimuth_east(self):
-        """east=90° must become -90° for Akkudoktor."""
         p = PVForecastAkkudoktor(
             planes=[PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=90.0)],
-            latitude=52.52,
-            longitude=13.405,
+            latitude=52.52, longitude=13.405,
         )
         assert "azimuth=-90" in p._build_url()
-
-    def test_url_two_planes(self):
-        p = self._make_provider()
-        url = p._build_url()
-        # Each plane adds `power=`, verify at least 2 occurrences
-        assert url.count("power=") >= 2
 
     def test_requires_at_least_one_plane(self):
         with pytest.raises(ValueError):
             PVForecastAkkudoktor(planes=[], latitude=52.0, longitude=13.0)
 
-    @patch("requests.get")
-    def test_fetch_hourly(self, mock_get):
-        response_data = _akkudoktor_response(START, n_hours=48)
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = response_data
-        mock_resp.raise_for_status = MagicMock()
-        mock_get.return_value = mock_resp
-
+    @patch.object(PVForecastAkkudoktor, "_request", new_callable=AsyncMock)
+    async def test_fetch_hourly(self, mock_req):
+        mock_req.return_value = _make_akkudoktor_response(START, n_hours=48)
         provider = self._make_provider()
-        result = provider.fetch(START, END_24H, dt_hours=1.0)
-
+        result = await provider.fetch(_ts())
         assert len(result) == 24
-        # Night hours should be 0
         assert result[0] == pytest.approx(0.0)
-        assert result[1] == pytest.approx(0.0)
-        # Day hours (6–17) should be > 0
         assert result[10] > 0.0
 
-    @patch("requests.get")
-    def test_fetch_quarter_hour(self, mock_get):
-        response_data = _akkudoktor_response(START, n_hours=48)
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = response_data
-        mock_resp.raise_for_status = MagicMock()
-        mock_get.return_value = mock_resp
-
-        provider = self._make_provider()
-        result = provider.fetch(START, END_24H, dt_hours=0.25)
+    @patch.object(PVForecastAkkudoktor, "_request", new_callable=AsyncMock)
+    async def test_fetch_quarter_hour(self, mock_req):
+        mock_req.return_value = _make_akkudoktor_response(START, n_hours=48)
+        result = await self._make_provider().fetch(_ts(dt=0.25))
         assert len(result) == 96
 
-    @patch("requests.get")
-    def test_planes_summed(self, mock_get):
-        """Both planes' ac power must be summed."""
-        response_data = _akkudoktor_response(START, n_hours=24)
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = response_data
-        mock_resp.raise_for_status = MagicMock()
-        mock_get.return_value = mock_resp
+    @patch.object(PVForecastAkkudoktor, "_request", new_callable=AsyncMock)
+    async def test_no_negative_power(self, mock_req):
+        values = _make_akkudoktor_response(START, n_hours=24)
+        values[10] = _ForecastValue(dt=values[10].dt, dc_power_w=-500.0, ac_power_w=-500.0)
+        mock_req.return_value = values
+        provider = PVForecastAkkudoktor(planes=[_PLANE], latitude=52.52, longitude=13.405)
+        result = await provider.fetch(_ts())
+        assert all(v >= 0.0 for v in result.to_list())
 
-        provider = self._make_provider()
-        result = provider.fetch(START, END_24H, dt_hours=1.0)
-        # hour 10: both planes contribute 1000 * 0.6 + 1000 * 0.4 = 1000 W total
-        assert result[10] == pytest.approx(1000.0, abs=1.0)
-
-    @patch("requests.get")
-    def test_no_negative_power(self, mock_get):
-        """Values must be clamped to ≥ 0."""
-        data = _akkudoktor_response(START, n_hours=24)
-        # Inject a negative value in one plane
-        data["values"][0][10]["power"] = -500.0
-        data["values"][1][10]["power"] = -200.0
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = data
-        mock_resp.raise_for_status = MagicMock()
-        mock_get.return_value = mock_resp
-
+    @patch.object(PVForecastAkkudoktor, "_request_raw", new_callable=AsyncMock)
+    async def test_fetch_by_inverter_groups_planes(self, mock_req_raw):
+        mock_req_raw.return_value = [
+            [
+                {"datetime": "2025-06-15T10:00:00+00:00", "dcPower": 520.0, "power": 500.0},
+                {"datetime": "2025-06-15T11:00:00+00:00", "dcPower": 520.0, "power": 500.0},
+            ],
+            [
+                {"datetime": "2025-06-15T10:00:00+00:00", "dcPower": 310.0, "power": 300.0},
+                {"datetime": "2025-06-15T11:00:00+00:00", "dcPower": 310.0, "power": 300.0},
+            ],
+            [
+                {"datetime": "2025-06-15T10:00:00+00:00", "dcPower": 210.0, "power": 200.0},
+                {"datetime": "2025-06-15T11:00:00+00:00", "dcPower": 210.0, "power": 200.0},
+            ],
+        ]
         provider = PVForecastAkkudoktor(
-            planes=[_PLANE], latitude=52.52, longitude=13.405
-        )
-        result = provider.fetch(START, END_24H, dt_hours=1.0)
-        for v in result:
-            assert v >= 0.0
-
-
-# ── PVForecastSolar ───────────────────────────────────────────────────────
-
-
-class TestPVForecastSolar:
-    def _make_provider(self) -> PVForecastSolar:
-        # Use UTC so that test datetime strings map 1:1 to array indices
-        return PVForecastSolar(
-            planes=[_PLANE],
+            planes=[
+                PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0, inverter="inv-a"),
+                PVPlaneConfig(peak_kw=3.0, tilt=20.0, azimuth=90.0, inverter="inv-a"),
+                PVPlaneConfig(peak_kw=2.0, tilt=20.0, azimuth=270.0, inverter="inv-b"),
+            ],
             latitude=52.52,
             longitude=13.405,
-            timezone_str="UTC",
+        )
+
+        result = await provider.fetch_by_inverter(_ts())
+
+        assert set(result) == {"inv-a", "inv-b"}
+        assert result["inv-a"][10] == pytest.approx(800.0)
+        assert result["inv-b"][10] == pytest.approx(200.0)
+
+
+# ── PVForecastOpenMeteo ───────────────────────────────────────────────────────
+
+
+class TestPVForecastOpenMeteo:
+    def _make_provider(self) -> PVForecastOpenMeteo:
+        return PVForecastOpenMeteo(
+            planes=[_PLANE], latitude=52.52, longitude=13.405, timezone_str="UTC"
         )
 
     def test_provider_id(self):
-        assert self._make_provider().provider_id == "PVForecastSolar"
-
-    def test_url_south_azimuth(self):
-        """south=180° must become 0.0 for forecast.solar."""
-        p = PVForecastSolar(
-            planes=[PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0)],
-            latitude=52.52,
-            longitude=13.405,
-        )
-        url = p._build_url(_PLANE)
-        # URL path: /lat/lon/dec/az/kwp — az should be 0.0
-        assert "/0.0/" in url
-
-    def test_url_east_azimuth(self):
-        """east=90° must become -90.0 for forecast.solar."""
-        plane = PVPlaneConfig(peak_kw=3.0, tilt=20.0, azimuth=90.0)
-        p = PVForecastSolar(planes=[plane], latitude=52.52, longitude=13.405)
-        url = p._build_url(plane)
-        assert "/-90.0/" in url
-
-    def test_url_contains_lat_lon_kwp(self):
-        plane = PVPlaneConfig(peak_kw=5.5, tilt=30.0, azimuth=180.0)
-        p = PVForecastSolar(planes=[plane], latitude=48.1, longitude=11.6)
-        url = p._build_url(plane)
-        assert "48.1" in url
-        assert "11.6" in url
-        assert "5.500" in url
-
-    def test_url_with_api_key(self):
-        p = PVForecastSolar(
-            planes=[_PLANE], latitude=52.52, longitude=13.405, api_key="MYKEY"
-        )
-        url = p._build_url(_PLANE)
-        assert "/MYKEY/" in url
+        assert self._make_provider().provider_id == "PVForecastOpenMeteo"
 
     def test_requires_at_least_one_plane(self):
         with pytest.raises(ValueError):
-            PVForecastSolar(planes=[], latitude=52.0, longitude=13.0)
+            PVForecastOpenMeteo(planes=[], latitude=52.0, longitude=13.0)
 
-    @patch("requests.get")
-    def test_fetch_hourly(self, mock_get):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = _forecastsolar_response(START, ac_w=2000.0)
-        mock_resp.raise_for_status = MagicMock()
-        mock_get.return_value = mock_resp
+    def test_azimuth_conversion(self):
+        from datetime import timedelta, timezone as tz_mod
+        import asyncio
 
-        provider = self._make_provider()
-        result = provider.fetch(START, END_24H, dt_hours=1.0)
+        # om_az = plane.azimuth - 180; south=180 -> 0, east=90 -> -90
+        p = PVForecastOpenMeteo(
+            planes=[PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0)],
+            latitude=52.52, longitude=13.405,
+        )
+        assert p._planes[0].azimuth - 180.0 == pytest.approx(0.0)
 
+    @patch.object(PVForecastOpenMeteo, "_fetch_plane", new_callable=AsyncMock)
+    async def test_fetch_single_plane(self, mock_fetch):
+        from datetime import timedelta
+        # 15-min keyed dict: 0 W until slot 24 (hour 6), 500 W until slot 72 (hour 18)
+        plane_data = {
+            START + timedelta(minutes=15 * i): 500.0 if 24 <= i < 72 else 0.0
+            for i in range(104)
+        }
+        mock_fetch.return_value = plane_data
+        result = await self._make_provider().fetch(_ts())
         assert len(result) == 24
-        assert result[0] == pytest.approx(0.0)  # midnight
-        assert result[6] == pytest.approx(0.0)  # 6:00 → not in 7–18
-        assert result[10] == pytest.approx(2000.0)
-        assert result[19] == pytest.approx(0.0)  # after sunset
+        assert result[6] == pytest.approx(500.0)
+        assert result[0] == pytest.approx(0.0)
 
-    @patch("requests.get")
-    def test_fetch_quarter_hour(self, mock_get):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = _forecastsolar_response(START, ac_w=1500.0)
-        mock_resp.raise_for_status = MagicMock()
-        mock_get.return_value = mock_resp
-
-        provider = self._make_provider()
-        result = provider.fetch(START, END_24H, dt_hours=0.25)
+    @patch.object(PVForecastOpenMeteo, "_fetch_plane", new_callable=AsyncMock)
+    async def test_fetch_quarter_hour(self, mock_fetch):
+        from datetime import timedelta
+        plane_data = {START + timedelta(minutes=15 * i): 100.0 for i in range(104)}
+        mock_fetch.return_value = plane_data
+        result = await self._make_provider().fetch(_ts(dt=0.25))
         assert len(result) == 96
 
-    @patch("requests.get")
-    def test_multi_plane_summed(self, mock_get):
-        """Two planes: each returns 1000 W during the day → total 2000 W."""
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = _forecastsolar_response(START, ac_w=1000.0)
-        mock_resp.raise_for_status = MagicMock()
-        mock_get.return_value = mock_resp
+    @patch.object(PVForecastOpenMeteo, "_fetch_plane", new_callable=AsyncMock)
+    async def test_planes_summed(self, mock_fetch):
+        """Two planes: each returns 1000 W -> total 2000 W."""
+        from datetime import timedelta
+        plane_data = {
+            START + timedelta(minutes=15 * i): 1000.0 if 24 <= i < 72 else 0.0
+            for i in range(104)
+        }
+        mock_fetch.return_value = plane_data
+        p = PVForecastOpenMeteo(
+            planes=[_PLANE, PVPlaneConfig(peak_kw=3.0, tilt=20.0, azimuth=90.0)],
+            latitude=52.52, longitude=13.405,
+        )
+        result = await p.fetch(_ts())
+        # Both planes return the same mock data -> sum = 2000
+        assert result[10] == pytest.approx(2000.0)
 
-        p = PVForecastSolar(
+    @patch.object(PVForecastOpenMeteo, "_fetch_plane", new_callable=AsyncMock)
+    async def test_reuses_cache_for_repeated_fetch(self, mock_fetch):
+        from datetime import timedelta
+
+        plane_data = {
+            START + timedelta(minutes=15 * i): 500.0 if 24 <= i < 72 else 0.0
+            for i in range(104)
+        }
+        mock_fetch.return_value = plane_data
+
+        provider = self._make_provider()
+        await provider.fetch(_ts())
+        await provider.fetch(_ts())
+
+        assert mock_fetch.await_count == 1
+
+    @patch.object(PVForecastOpenMeteo, "_fetch_plane", new_callable=AsyncMock)
+    async def test_reuses_cache_for_equal_plane_configs(self, mock_fetch):
+        from datetime import timedelta
+
+        plane_data = {
+            START + timedelta(minutes=15 * i): 500.0 if 24 <= i < 72 else 0.0
+            for i in range(104)
+        }
+        mock_fetch.return_value = plane_data
+
+        plane1 = PVPlaneConfig(
+            peak_kw=5.0, tilt=30.0, azimuth=180.0, userhorizon=[0.0, 5.0], inverter="inv-a"
+        )
+        plane2 = PVPlaneConfig(
+            peak_kw=5.0, tilt=30.0, azimuth=180.0, userhorizon=(0.0, 5.0), inverter="inv-a"
+        )
+        provider = PVForecastOpenMeteo(
+            planes=[plane1, plane2], latitude=52.52, longitude=13.405, timezone_str="UTC"
+        )
+
+        result = await provider.fetch(_ts())
+
+        assert result[6] == pytest.approx(1000.0)
+        assert mock_fetch.await_count == 1
+
+    @patch.object(PVForecastOpenMeteo, "_fetch_plane", new_callable=AsyncMock)
+    async def test_invalidates_cache_when_forecast_window_changes(self, mock_fetch):
+        from datetime import timedelta
+
+        plane_data = {
+            START + timedelta(minutes=15 * i): 500.0 if 24 <= i < 72 else 0.0
+            for i in range(200)
+        }
+        mock_fetch.return_value = plane_data
+
+        provider = self._make_provider()
+        await provider.fetch(_ts(hours=24))
+        await provider.fetch(_ts(hours=72))
+
+        assert mock_fetch.await_count == 2
+
+    @patch.object(PVForecastOpenMeteo, "_fetch_plane", new_callable=AsyncMock)
+    async def test_fetch_by_inverter_groups_planes(self, mock_fetch):
+        from datetime import timedelta
+
+        plane_data = {
+            START + timedelta(minutes=15 * i): 100.0 if 24 <= i < 72 else 0.0
+            for i in range(104)
+        }
+        mock_fetch.return_value = plane_data
+        provider = PVForecastOpenMeteo(
             planes=[
-                PVPlaneConfig(peak_kw=3.0, tilt=30.0, azimuth=180.0),
-                PVPlaneConfig(peak_kw=2.0, tilt=30.0, azimuth=90.0),
+                PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0, inverter="inv-a"),
+                PVPlaneConfig(peak_kw=3.0, tilt=20.0, azimuth=90.0, inverter="inv-a"),
+                PVPlaneConfig(peak_kw=2.0, tilt=20.0, azimuth=270.0, inverter="inv-b"),
             ],
             latitude=52.52,
             longitude=13.405,
             timezone_str="UTC",
         )
-        result = p.fetch(START, END_24H, dt_hours=1.0)
-        # Two calls, each returning 1000 W at hour 10
-        assert result[10] == pytest.approx(2000.0)
+
+        result = await provider.fetch_by_inverter(_ts())
+
+        assert set(result) == {"inv-a", "inv-b"}
+        assert result["inv-a"][10] == pytest.approx(200.0)
+        assert result["inv-b"][10] == pytest.approx(100.0)

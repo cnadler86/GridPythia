@@ -2,7 +2,7 @@
 
 Caching strategy
 ----------------
-Day-ahead prices are published by ENTSO-E around 12:00–13:00 CET each day.
+Day-ahead prices are published by ENTSO-E around 12:00-13:00 CET each day.
 The provider fetches complete calendar days (from midnight of the first
 requested date to midnight of the last) and stores the result in a single
 in-memory price map.
@@ -11,14 +11,14 @@ Cache invalidation rules (checked on every ``fetch()`` call):
 
 1. Cache is empty.
 2. The requested date range is not fully covered by the cached date range.
-3. **Poll window** – all three conditions are true simultaneously:
+3. **Poll window** - all three conditions are true simultaneously:
 
    - The real current time (``datetime.now(UTC)``) is *beyond* the last
      real API timestamp in the cache, meaning cached real prices no longer
      cover "now".
    - The real current time falls *within* the requested series
      (``requested_start ≤ now ≤ requested_end``).
-   - The real current time is at or after **12:30 UTC** – the earliest
+   - The real current time is at or after **12:30 UTC** - the earliest
      realistic day-ahead publication time.
 
 Outside that narrow publishing window the cache is served as-is, avoiding
@@ -45,6 +45,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import aiohttp
 import polars as pl
+from pydantic import BaseModel, Field, field_validator
 
 from src.prediction.electricprice.provider import ElecPriceProvider
 
@@ -52,6 +53,21 @@ logger = logging.getLogger(__name__)
 
 _HISTORY_WINDOW = timedelta(days=15)
 _HORIZON_BUFFER_DEFAULT = timedelta(hours=25)
+
+
+class EnergyChartsConfig(BaseModel):
+    """Pydantic config model for ElecPriceEnergyCharts."""
+
+    bidding_zone: str = Field("DE-LU", min_length=1)
+    charges_kwh: float = Field(0.0, ge=0.0)
+    vat_rate: float = Field(0.19, ge=0.0, lt=1.0)
+    horizon_buffer: timedelta = Field(default=_HORIZON_BUFFER_DEFAULT)
+
+    @field_validator("horizon_buffer", mode="before")
+    def _ensure_timedelta(cls, v):
+        if isinstance(v, (int, float)):
+            return timedelta(hours=float(v))
+        return v
 
 
 class ElecPriceEnergyCharts(ElecPriceProvider):
@@ -69,24 +85,26 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         Additional grid/levy charges in EUR/kWh added on top of the
         day-ahead price.
     vat_rate:
-        VAT multiplier applied *after* adding charges (default ``1.19``).
+        VAT rate applied *after* adding charges (default ``0.19`` for 19% VAT).
     horizon_buffer:
         Extra time added *beyond the last real API data point* when
         pre-computing the price map.  Defaults to 25 h so that forecast
         coverage extends well into the next day after publication.
     """
 
-    def __init__(
-        self,
-        bidding_zone: str = "DE-LU",
-        charges_kwh: float = 0.0,
-        vat_rate: float = 1.19,
-        horizon_buffer: timedelta = _HORIZON_BUFFER_DEFAULT,
-    ) -> None:
-        self._bidding_zone = bidding_zone
-        self._charges_kwh = charges_kwh
-        self._vat_rate = vat_rate
-        self._horizon_buffer = horizon_buffer
+    def __init__(self, config: EnergyChartsConfig) -> None:
+        """Initialize with an EnergyChartsConfig instance or a mapping.
+
+        The constructor accepts either an EnergyChartsConfig instance or a
+        mapping/dict that can be validated into one.
+        """
+        if not isinstance(config, EnergyChartsConfig):
+            config = EnergyChartsConfig(**config)
+
+        self._bidding_zone = config.bidding_zone
+        self._charges_kwh = config.charges_kwh
+        self._vat_rate = config.vat_rate
+        self._horizon_buffer = config.horizon_buffer
 
         # ── cache state ───────────────────────────────────────────────
         # bucket = unix_timestamp // 900  (15-min granularity)
@@ -318,9 +336,9 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         # Apply configured charges and VAT to every slot once here so the
         # in-memory price map contains final end-prices.
         charges_wh = self._charges_kwh / 1000.0
-        if charges_wh != 0.0 or self._vat_rate != 1.0:
+        if charges_wh != 0.0 or self._vat_rate != 0.0:
             for k in list(new_map.keys()):
-                new_map[k] = (new_map[k] + charges_wh) * self._vat_rate
+                new_map[k] = (new_map[k] + charges_wh) * (1 + self._vat_rate)
 
         self._price_map = new_map
         logger.info(

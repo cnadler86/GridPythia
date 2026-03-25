@@ -107,7 +107,10 @@ class PVForecastOpenMeteo(PVForecastProvider):
         The first timestamp in the requested series acts as the time reference;
         no wall-clock ``datetime.now()`` is used.
         """
-        past_days = 1
+        now_utc = datetime.now(timezone.utc)
+        past_days = (
+            max(1, (now_utc.date() - start_utc.date()).days + 1) if start_utc < now_utc else 1
+        )
         forecast_days = max(1, (end_utc.date() - start_utc.date()).days + 2)
         return past_days, forecast_days
 
