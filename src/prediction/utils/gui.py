@@ -819,7 +819,7 @@ class OptimizationTab(_Tab):
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
         # Battery price (EUR/Wh)
-        self._bat_price = _field(f, row, "Battery price EUR/Wh", "0.01")
+        self._bat_price = _field(f, row, "Battery price EUR/Wh", "0.0")
         row += 1
         # Genetic algorithm generations (optimization-level)
         self._generations = _field(f, row, "Generations", "100")
@@ -836,9 +836,9 @@ class OptimizationTab(_Tab):
         row += 1
         self._initial_soc = _field(f, row, "Initial battery SoC (%)", "50.0")
         row += 1
-        self._min_soc = _field(f, row, "Min SoC (%)", "0.0")
+        self._min_soc = _field(f, row, "Min SoC (%)", "20")
         row += 1
-        self._max_soc = _field(f, row, "Max SoC (%)", "100.0")
+        self._max_soc = _field(f, row, "Max SoC (%)", "100")
         row += 1
 
         # Inverter configuration
@@ -1095,7 +1095,7 @@ class OptimizationTab(_Tab):
                         # Plot SoC on left axis
                         if res.battery_soc_percentage_per_dt:
                             for k, arr in (res.battery_soc_percentage_per_dt or {}).items():
-                                (h,) = ax4.plot(x, list(arr), label=f"SoC {k} (%)")
+                                (h,) = ax4.plot(x, list(arr), label=f"SoC {k} (end of step %)")
                                 handles.append(h)
                                 labels.append(f"SoC {k} (%)")
                                 plotted = True

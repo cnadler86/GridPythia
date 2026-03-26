@@ -33,6 +33,8 @@ class SimulationResult:
     solar_generation_wh_per_dt: Optional[Dict[str, array[float]]] = None
     battery_wh_per_dt: Optional[Dict[str, array[float]]] = None
     battery_soc_percentage_per_dt: Optional[Dict[str, array[float]]] = None
+    inverter_modes_per_dt: Optional[Dict[str, array[int]]] = None
+    inverter_ac_rate_per_dt: Optional[Dict[str, array[float]]] = None
     home_appliance_load_per_dt: Optional[array[float]] = None
 
     @property
@@ -94,9 +96,11 @@ class SimulationResult:
             "losses_wh_per_dt": _conv(self.losses_wh_per_dt),
             "solar_generation_wh_per_dt": _conv(self.solar_generation_wh_per_dt or {}),
             "battery_wh_per_dt": _conv(self.battery_wh_per_dt or {}),
-            "battery_soc_percentage_per_dt": _conv(
-                self.battery_soc_percentage_per_dt or {}
-            ),
+            "battery_soc_percentage_per_dt": _conv(self.battery_soc_percentage_per_dt or {}),
+            # explicit alias: SOC values refer to the state at the end of each simulated step
+            "battery_soc_percentage_at_step_end": _conv(self.battery_soc_percentage_per_dt or {}),
+            "inverter_modes_per_dt": _conv(self.inverter_modes_per_dt or {}),
+            "inverter_ac_rate_per_dt": _conv(self.inverter_ac_rate_per_dt or {}),
             "electricity_price_per_dt": _conv(self.electricity_price_per_dt),
             "home_appliance_load_per_dt": _conv(self.home_appliance_load_per_dt),
         }
@@ -104,8 +108,7 @@ class SimulationResult:
     def compatibility_adapter(self) -> Dict[str, Any]:
         """Adapt the simulation result to match the legacy output format."""
         total_load = [
-            g + s
-            for g, s in zip(self.grid_import_wh_per_dt, self.self_consumption_wh_per_dt)
+            g + s for g, s in zip(self.grid_import_wh_per_dt, self.self_consumption_wh_per_dt)
         ]
         return {
             "Last_Wh_pro_Stunde": total_load,
@@ -114,20 +117,18 @@ class SimulationResult:
             "Kosten_Euro_pro_Stunde": self.costs_per_dt,
             "Einnahmen_Euro_pro_Stunde": self.revenue_per_dt,
             "Gesamtbilanz_Euro": self.net_balance,
-            "akku_soc_pro_stunde": next(
-                iter(self.battery_soc_percentage_per_dt.values()), None
-            )
+            "akku_soc_pro_stunde": next(iter(self.battery_soc_percentage_per_dt.values()), None)
             if self.battery_soc_percentage_per_dt
             else None,
             "EAuto_SoC_pro_Stunde": self.battery_soc_percentage_per_dt.get("EV", None)
-            if self.battery_soc_percentage_per_dt
-            and "EV" in self.battery_soc_percentage_per_dt
+            if self.battery_soc_percentage_per_dt and "EV" in self.battery_soc_percentage_per_dt
             else None,
             "Gesamteinnahmen_Euro": self.total_revenue,
             "Gesamtkosten_Euro": self.total_cost,
             "Verluste_Pro_Stunde": self.losses_wh_per_dt,
             "Gesamt_Verluste": self.total_losses,
             "Home_appliance_wh_per_hour": self.home_appliance_load_per_dt,
+            "Inverter_modes_per_hour": self.inverter_modes_per_dt,
         }
 
     def make_figure(self):
@@ -298,9 +299,7 @@ class GeneticSimulation:
         self.optimization_hours = optimization_hours
 
         self.load_energy_array = array("f", map(float, parameters.gesamtlast))
-        self.electricity_price = array(
-            "f", map(float, parameters.strompreis_euro_pro_wh)
-        )
+        self.electricity_price = array("f", map(float, parameters.strompreis_euro_pro_wh))
         if isinstance(parameters.einspeiseverguetung_euro_pro_wh, list):
             self.electricity_revenue = array(
                 "f", map(float, parameters.einspeiseverguetung_euro_pro_wh)
@@ -308,16 +307,14 @@ class GeneticSimulation:
         else:
             self.electricity_revenue = array(
                 "f",
-                [float(parameters.einspeiseverguetung_euro_pro_wh)]
-                * len(self.load_energy_array),
+                [float(parameters.einspeiseverguetung_euro_pro_wh)] * len(self.load_energy_array),
             )
         self.price_per_wh_akku = parameters.preis_euro_pro_wh_akku
 
         self.pv_prediction_map: Optional[Dict[str, array[float]]] = None
         if isinstance(parameters.pv_prognose_wh, dict):
             self.pv_prediction_map = {
-                k: array("f", map(float, v))
-                for k, v in parameters.pv_prognose_wh.items()
+                k: array("f", map(float, v)) for k, v in parameters.pv_prognose_wh.items()
             }
 
         self.inverters: Dict[str, InverterBase] = (
@@ -464,9 +461,13 @@ class GeneticSimulation:
         for inv in inv_list:
             if inv.battery is not None:
                 battery_wh_per_dt[inv.device_id] = array("f", [0.0] * total_idx)
-                battery_soc_percentage_per_dt[inv.device_id] = array(
-                    "f", [0.0] * total_idx
-                )
+                battery_soc_percentage_per_dt[inv.device_id] = array("f", [0.0] * total_idx)
+
+        inverter_modes_per_dt: Dict[str, array[int]] = {}
+        inverter_ac_rate_per_dt: Dict[str, array[float]] = {}
+        for inv in inv_list:
+            inverter_modes_per_dt[inv.device_id] = array("b", [0] * total_idx)
+            inverter_ac_rate_per_dt[inv.device_id] = array("f", [0.0] * total_idx)
 
         _bat_tracking = [
             (
@@ -489,6 +490,11 @@ class GeneticSimulation:
                 step.mode = inverter_modes[j][h]
                 step.generation = pv_arrs[j][h] if h < pv_lens[j] else 0.0
                 step.ac_rate = inverter_ac_rates[j][h]
+
+                # record inverter mode and ac_rate for output
+                inv_id = inv_list[j].device_id
+                inverter_modes_per_dt[inv_id][i] = inverter_modes[j][h]
+                inverter_ac_rate_per_dt[inv_id][i] = float(inverter_ac_rates[j][h])
 
             end_load, pv_ac_wh, losses_wh_per_dt[i] = _step(step_buf, load_wh, dt)
 
@@ -529,6 +535,8 @@ class GeneticSimulation:
             losses_wh_per_dt=losses_wh_per_dt,
             battery_wh_per_dt=battery_wh_per_dt or None,
             battery_soc_percentage_per_dt=battery_soc_percentage_per_dt or None,
+            inverter_modes_per_dt=inverter_modes_per_dt or None,
+            inverter_ac_rate_per_dt=inverter_ac_rate_per_dt or None,
             electricity_price_per_dt=elec_price_series,
             home_appliance_load_per_dt=appliance_load,
         )
