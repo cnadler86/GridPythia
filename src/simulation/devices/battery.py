@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+from loguru import logger
+
 
 @dataclass
 class BatteryParameters:
@@ -89,9 +91,7 @@ class Battery:
                 raise ValueError(f"{name} must be within [0, 100], got {perc}")
 
         if self.min_soc_percentage > self.max_soc_percentage:
-            raise ValueError(
-                "Min_soc_percentage cannot be greater than max_soc_percentage"
-            )
+            raise ValueError("Min_soc_percentage cannot be greater than max_soc_percentage")
 
         # Clamp initial SoC percentage into [min, max]
         self.initial_soc_percentage = min(
@@ -105,6 +105,13 @@ class Battery:
 
         self._initial_soc_wh: float = self.soc_wh
         self._soc_pct_factor: float = 100.0 / self.capacity_wh
+
+        logger.info(
+            "Initialized Battery '{}' with capacity {} Wh, initial SoC {}%.",
+            self.parameters.device_id,
+            self.capacity_wh,
+            self.initial_soc_percentage,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Converts the object to a dictionary representation."""
@@ -144,9 +151,7 @@ class Battery:
             return 0.0, 0.0
 
         deliverable_by_energy = usable_raw * eff
-        max_deliverable = (
-            deliverable_by_energy if deliverable_by_energy < max_power else max_power
-        )
+        max_deliverable = deliverable_by_energy if deliverable_by_energy < max_power else max_power
         requested = wh if wh < max_deliverable else max_deliverable
         raw_req = requested / eff
         raw_used = raw_req if raw_req < usable_raw else usable_raw

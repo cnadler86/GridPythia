@@ -23,12 +23,22 @@ from zoneinfo import ZoneInfo
 import matplotlib
 
 matplotlib.use("TkAgg")
+import json
+from array import array
+
 import matplotlib.dates as mdates
 import numpy as np
 import polars as pl
+from loguru import logger
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
+from src.config import HEMSConfig
+from src.optimization.genetic.genetic import GeneticOptimization, GeneticSolution
+from src.optimization.genetic.geneticparams import GeneticOptimizationParameters
+
+# Genetic integration
+from src.optimization.genetic.prediction_adapter import prediction_to_genetic_params
 from src.prediction.base import make_timestamps
 from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts, EnergyChartsConfig
 from src.prediction.electricprice.fixed import ElecPriceFixed
@@ -39,12 +49,16 @@ from src.prediction.load.akkudoktor import LoadAkkudoktor, LoadAkkudoktorAdjuste
 from src.prediction.load.fixed import LoadFixed
 from src.prediction.load.import_ import LoadImport
 from src.prediction.load.profilejson import LoadProfileJSON
+from src.prediction.prediction import Prediction, PredictionSetup
 from src.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
 from src.prediction.pvforecast.import_ import PVForecastImport
 from src.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
 from src.prediction.pvforecast.provider import PVPlaneConfig
 from src.prediction.weather.brightsky import WeatherBrightSky
 from src.prediction.weather.openmeteo import WeatherOpenMeteo
+from src.simulation.devices import InverterMode
+from src.simulation.devices.battery import Battery, BatteryParameters
+from src.simulation.devices.inverterbase import InverterBase, InverterParameters
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -531,7 +545,7 @@ class FeedInTariffTab(_Tab):
 
 class LoadTab(_Tab):
     TITLE = "Load"
-    PROVIDERS = ["Fixed", "Import", "Akkudoktor", "AkkudoktorAdjusted", "ProfileJSON"]
+    PROVIDERS = ["ProfileJSON", "Fixed", "Import", "Akkudoktor", "AkkudoktorAdjusted"]
 
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
@@ -798,6 +812,386 @@ class WeatherTab(_Tab):
 # ── Main App ──────────────────────────────────────────────────────────────
 
 
+class OptimizationTab(_Tab):
+    TITLE = "Optimization"
+    PROVIDERS = []
+
+    def _build_fields(self) -> None:
+        f, row = self._cfg, 0
+        # Battery price (EUR/Wh)
+        self._bat_price = _field(f, row, "Battery price EUR/Wh", "0.01")
+        row += 1
+        # Genetic algorithm generations (optimization-level)
+        self._generations = _field(f, row, "Generations", "100")
+        row += 1
+
+        # Battery configuration (separate section)
+        ttk.Label(f, text="Battery", foreground="#555", font=("TkDefaultFont", 8, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 0)
+        )
+        row += 1
+        self._bat_id = _field(f, row, "Battery ID", "battery1")
+        row += 1
+        self._bat_capacity = _field(f, row, "Battery capacity Wh", "1920")
+        row += 1
+        self._initial_soc = _field(f, row, "Initial battery SoC (%)", "50.0")
+        row += 1
+        self._min_soc = _field(f, row, "Min SoC (%)", "0.0")
+        row += 1
+        self._max_soc = _field(f, row, "Max SoC (%)", "100.0")
+        row += 1
+
+        # Inverter configuration
+        ttk.Label(f, text="Inverter", foreground="#555", font=("TkDefaultFont", 8, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 0)
+        )
+        row += 1
+        self._inv_id = _field(f, row, "Device ID", "inverter1")
+        row += 1
+        self._pv_source = _field(f, row, "PV source key", "default")
+        row += 1
+        self._inv_max_out = _field(f, row, "Max AC output W", "800")
+        row += 1
+        self._inv_max_charge = _field(f, row, "Max AC charge W", "1000")
+        row += 1
+        self._inv_dc2ac = _field(f, row, "DC→AC eff", "0.95")
+        row += 1
+        self._inv_ac2dc = _field(f, row, "AC→DC eff", "0.95")
+        row += 1
+        # Feed-in default (EUR/Wh) when feedin provider is not configured
+        self._feedin_default = _field(f, row, "Feed-in default EUR/Wh", "0.0")
+        row += 1
+        # Run button
+        ttk.Separator(f).grid(row=row, column=0, columnspan=2, sticky="ew", pady=4)
+        row += 1
+        ttk.Button(f, text="▶ Run Optimization", command=self.run_optimization).grid(
+            row=row, column=0, columnspan=2, sticky="ew"
+        )
+
+    def make_provider(self):
+        # Not used: this tab aggregates other providers
+        return None
+
+    def fetch(self) -> None:
+        """Override fetch: run optimization flow instead of provider fetch."""
+        self.run_optimization()
+
+    def run_optimization(self) -> None:
+        try:
+            start, hours, dt = self.app.get_time_params()
+            logger.info("Optimization start: start=%s hours=%s dt=%s", start, hours, dt)
+        except Exception as exc:
+            self.app.root.bell()
+            messagebox.showerror("Time parsing", str(exc), parent=self.frame)
+            return
+
+        # Gather providers from other tabs
+        elec_tab = next((t for t in self.app.tabs if isinstance(t, ElecPriceTab)), None)
+        feed_tab = next((t for t in self.app.tabs if isinstance(t, FeedInTariffTab)), None)
+        load_tab = next((t for t in self.app.tabs if isinstance(t, LoadTab)), None)
+        pv_tab = next((t for t in self.app.tabs if isinstance(t, PVForecastTab)), None)
+        weather_tab = next((t for t in self.app.tabs if isinstance(t, WeatherTab)), None)
+
+        setup = PredictionSetup(
+            electricprice=elec_tab._get_provider() if elec_tab else None,
+            feedintariff=feed_tab._get_provider() if feed_tab else None,
+            load=load_tab._get_provider() if load_tab else None,
+            pv={"__global__": pv_tab._get_provider()} if pv_tab else {},
+            weather=weather_tab._get_provider() if weather_tab else None,
+        )
+
+        pred = Prediction(setup)
+
+        self.app.root.after(0, lambda: self._status.set("Fetching prediction…"))
+
+        # Fetch prediction asynchronously
+        def on_pred_done(pdata):
+            try:
+                # cache timestamps and dt for plotting
+                try:
+                    self._last_ts = pdata.timestamps.to_list()
+                except Exception:
+                    self._last_ts = None
+                self._last_dt = getattr(pdata, "dt_hours", None)
+                # Convert and run simulation in background thread
+                bat_price = float(self._bat_price.get())
+                feedin_default = float(self._feedin_default.get())
+
+                # Build battery + inverter objects from GUI config
+                bat_params = BatteryParameters(
+                    device_id=self._bat_id.get(),
+                    capacity_wh=int(float(self._bat_capacity.get())),
+                    max_charge_power_w=int(float(self._inv_max_charge.get())),
+                    max_discharge_power_w=int(float(self._inv_max_out.get())),
+                    initial_soc_percentage=int(float(self._initial_soc.get())),
+                    min_soc_percentage=int(float(self._min_soc.get())),
+                    max_soc_percentage=int(float(self._max_soc.get())),
+                )
+
+                def _make_devices(params):
+                    # instantiate battery and inverter
+                    bat = Battery(params, prediction_hours=int(hours))
+                    inv_params = InverterParameters(
+                        device_id=self._inv_id.get(),
+                        battery_id=bat.parameters.device_id,
+                        pv_source=self._pv_source.get(),
+                        max_ac_output_power_w=float(self._inv_max_out.get()),
+                        max_ac_charge_power_w=float(self._inv_max_charge.get()),
+                        dc_to_ac_efficiency=float(self._inv_dc2ac.get()),
+                        ac_to_dc_efficiency=float(self._inv_ac2dc.get()),
+                    )
+                    inv = InverterBase(inv_params, battery=bat)
+                    return bat, inv
+
+                async def _run_sim():
+                    # Convert prediction -> genetic EMS params
+                    ems_params = prediction_to_genetic_params(
+                        pdata, preis_euro_pro_wh_akku=bat_price, einspeise_default=feedin_default
+                    )
+                    # create battery + inverter instances
+                    bat_obj, inv_obj = _make_devices(bat_params)
+                    # Build genetic optimization parameter wrapper
+                    opt_params = GeneticOptimizationParameters(
+                        ems=ems_params,
+                        pv_akku=bat_params,
+                        inverter=inv_obj.parameters,
+                    )
+                    # Build a minimal HEMSConfig matching the requested horizon
+                    cfg = HEMSConfig()
+                    # prediction.hours in GeneticOptimization should be number of timesteps
+                    try:
+                        dt_val = float(self.app._dt.get())
+                    except Exception:
+                        dt_val = float(dt)
+                    steps = max(1, int(float(hours) / dt_val))
+                    cfg.prediction.hours = steps
+                    cfg.prediction.dt_hours = float(dt_val)
+                    cfg.optimization.horizon_hours = float(hours)
+
+                    genopt = GeneticOptimization(cfg, verbose=False)
+                    logger.info("Starting genetic optimization thread")
+                    # run optimization in thread and return the GeneticSolution
+                    sol: GeneticSolution = await asyncio.to_thread(
+                        lambda: genopt.optimierung_ems(
+                            opt_params,
+                            start_hour=0,
+                            worst_case=False,
+                            ngen=int(self._generations.get()),
+                        )
+                    )
+                    return sol
+
+                def _sim_done(res_tuple):
+                    # res_tuple may be a SimulationResult tuple or a GeneticSolution
+                    inv_modes_arrs = None
+                    inv_ac_rates_arrs = None
+                    if isinstance(res_tuple, GeneticSolution):
+                        sol = res_tuple
+                        res = sol.result
+                        # extract modes/rates arrays from inverter_plans if present
+                        if sol.inverter_plans and len(sol.inverter_plans) > 0:
+                            plan = sol.inverter_plans[0]
+                            try:
+                                inv_modes_arrs = [
+                                    array("i", [int(x) for x in plan.get("modes", [])])
+                                ]
+                                inv_ac_rates_arrs = [
+                                    array("f", [float(x) for x in plan.get("rates", [])])
+                                ]
+                            except Exception:
+                                inv_modes_arrs = None
+                                inv_ac_rates_arrs = None
+                    else:
+                        # legacy tuple (res, modes, rates)
+                        if isinstance(res_tuple, tuple):
+                            res, inv_modes_arrs, inv_ac_rates_arrs = res_tuple
+                        else:
+                            res = res_tuple
+
+                    if res is None:
+                        messagebox.showinfo(
+                            "Optimization", "Simulation returned no result.", parent=self.frame
+                        )
+                        self._status.set("Simulation finished: no result")
+                        return
+                    logger.info("Simulation finished, preparing plots and JSON output")
+                    out = res.to_dict()
+                    # store timestamps for plotting
+                    ts = getattr(self, "_last_ts", None)
+                    dt_hours = getattr(self, "_last_dt", None) or float(dt)
+
+                    # Draw results into the right-side figure of this tab
+                    try:
+                        self._fig.clear()
+                        n = len(res.costs_per_dt)
+                        x = list(range(n))
+
+                        # Top: energy flows
+                        ax = self._fig.add_subplot(311)
+                        ax.plot(x, list(res.grid_import_wh_per_dt), label="Grid import (Wh)")
+                        ax.plot(
+                            x, list(res.self_consumption_wh_per_dt), label="Self-consumption (Wh)"
+                        )
+                        ax.plot(x, list(res.feedin_wh_per_dt), label="Feed-in (Wh)")
+                        ax.plot(x, list(res.losses_wh_per_dt), label="Losses (Wh)")
+                        ax.legend(loc="upper right", fontsize=8)
+                        ax.set_ylabel("Wh")
+                        ax.grid(alpha=0.3)
+
+                        # Middle: PV generation and Load (left axis), electric price (right axis)
+                        ax2 = self._fig.add_subplot(312)
+                        # compute total load (grid import + self-consumption)
+                        load_wh = [
+                            g + s
+                            for g, s in zip(
+                                list(res.grid_import_wh_per_dt),
+                                list(res.self_consumption_wh_per_dt),
+                            )
+                        ]
+                        (h_load,) = ax2.plot(
+                            x, load_wh, color="#1565C0", linewidth=1.4, label="Load (Wh)"
+                        )
+
+                        # Plot PV sources if available
+                        pv_handles = []
+                        if res.solar_generation_wh_per_dt:
+                            for i, (k, arr) in enumerate(
+                                (res.solar_generation_wh_per_dt or {}).items()
+                            ):
+                                # choose color cycle
+                                col = f"C{i + 2}"
+                                (h,) = ax2.plot(
+                                    x, list(arr), color=col, linewidth=1.2, label=f"PV {k} (Wh)"
+                                )
+                                pv_handles.append(h)
+
+                        ax2.set_ylabel("Wh")
+                        ax2.grid(alpha=0.2)
+
+                        # Right axis: electricity price (€/Wh)
+                        ax3 = ax2.twinx()
+                        price_vals = [float(v) for v in res.electricity_price_per_dt]
+                        (h_price,) = ax3.plot(
+                            x,
+                            price_vals,
+                            color="orange",
+                            linewidth=1.2,
+                            linestyle="-",
+                            label="Price (€/Wh)",
+                        )
+                        ax3.set_ylabel("€/Wh")
+
+                        # Combined legend
+                        lines, labels = ax2.get_legend_handles_labels()
+                        lines2, labels2 = ax3.get_legend_handles_labels()
+                        ax2.legend(lines + lines2, labels + labels2, loc="upper right", fontsize=8)
+
+                        # Bottom: battery SoC (%) (left axis) and inverter modes (right axis)
+                        ax4 = self._fig.add_subplot(313)
+                        ax4r = ax4.twinx()
+                        plotted = False
+                        handles = []
+                        labels = []
+                        # Plot SoC on left axis
+                        if res.battery_soc_percentage_per_dt:
+                            for k, arr in (res.battery_soc_percentage_per_dt or {}).items():
+                                (h,) = ax4.plot(x, list(arr), label=f"SoC {k} (%)")
+                                handles.append(h)
+                                labels.append(f"SoC {k} (%)")
+                                plotted = True
+
+                        # Plot inverter modes on right axis (signed rate: discharge=+, charge=-, idle=0)
+                        if inv_modes_arrs and len(inv_modes_arrs) > 0:
+                            modes_arr = inv_modes_arrs[0]
+                            rates_arr = (
+                                inv_ac_rates_arrs[0]
+                                if inv_ac_rates_arrs and len(inv_ac_rates_arrs) > 0
+                                else None
+                            )
+                            mode_vals = []
+                            for i, m in enumerate(modes_arr):
+                                try:
+                                    mode_int = int(m)
+                                except Exception:
+                                    mode_int = int(InverterMode.IDLE)
+                                rate = (
+                                    float(rates_arr[i])
+                                    if rates_arr is not None and i < len(rates_arr)
+                                    else 1.0
+                                )
+                                if mode_int in (
+                                    int(InverterMode.DISCHARGE),
+                                    int(InverterMode.DISCHARGE_ZERO_FEED_IN),
+                                ):
+                                    mode_vals.append(+rate)
+                                elif mode_int in (
+                                    int(InverterMode.AC_CHARGE),
+                                    int(InverterMode.AC_CHARGE_ZERO_FEED_IN),
+                                ):
+                                    mode_vals.append(-rate)
+                                else:
+                                    mode_vals.append(0.0)
+                            h2 = ax4r.step(
+                                x,
+                                mode_vals,
+                                where="post",
+                                color="#555555",
+                                label="Inv mode (signed rate)",
+                            )
+                            # ax4r.step returns a list of Line2D objects; pick first for legend handle
+                            if isinstance(h2, (list, tuple)) and h2:
+                                handles.append(h2[0])
+                            else:
+                                handles.append(h2)
+                            labels.append("Inv mode (signed rate)")
+                            plotted = True
+
+                        if plotted:
+                            ax4.set_ylabel("SoC %")
+                            ax4r.set_ylabel("Inv mode (signed rate)")
+                            ax4.legend(
+                                handles=handles, labels=labels, loc="upper right", fontsize=8
+                            )
+                        ax4.grid(alpha=0.2)
+
+                        self._canvas.draw()
+                    except Exception:
+                        # Fall back to JSON popup if plotting fails
+                        pass
+
+                    # Show JSON in a popup scrolled window as well
+                    w = tk.Toplevel(self.frame)
+                    w.title("Simulation Result")
+                    txt = scrolledtext.ScrolledText(w, width=120, height=30)
+                    txt.pack(fill="both", expand=True)
+                    # include config metadata
+                    meta = {
+                        "initial_soc_pct": float(self._initial_soc.get()),
+                        "generations": int(self._generations.get()),
+                    }
+                    txt.insert("1.0", json.dumps({"meta": meta, "result": out}, indent=2))
+                    txt.configure(state="disabled")
+                    self._status.set(f"Simulation finished · Net: {res.net_balance:.2f} €")
+
+                _run_async(
+                    _run_sim(),
+                    on_done=lambda r: _sim_done(r),
+                    on_error=lambda e, tb: self._on_error(e, tb),
+                )
+            except Exception as exc:
+                self._on_error(exc, None)
+
+        _run_async(
+            pred.fetch(start=start, hours=hours, dt_hours=dt),
+            on_done=lambda r: on_pred_done(r),
+            on_error=lambda e, tb: self._on_error(e, tb),
+        )
+
+    def _on_error(self, exc: Exception, tb: str | None) -> None:
+        self._status.set(f"Error: {exc}")
+        messagebox.showerror("Error", f"{exc}\n\n{(tb or '')[:1500]}", parent=self.frame)
+
+
 class App:
     def __init__(self) -> None:
         self.root = tk.Tk()
@@ -812,6 +1206,7 @@ class App:
             LoadTab(nb, self),
             PVForecastTab(nb, self),
             WeatherTab(nb, self),
+            OptimizationTab(nb, self),
         ]
 
     def _build_topbar(self) -> None:

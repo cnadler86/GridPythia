@@ -109,21 +109,11 @@ class GeneticOptimization:
             inv = self.inverters[spec.inverter_index]
             modes_list = inv.available_modes
 
-            idx_idle = next(
-                (i for i, m in enumerate(modes_list) if m == InverterMode.IDLE), 0
-            )
+            idx_idle = next((i for i, m in enumerate(modes_list) if m == InverterMode.IDLE), 0)
             idx_discharge = next(
-                (
-                    i
-                    for i, m in enumerate(modes_list)
-                    if m == InverterMode.DISCHARGE_ZERO_FEED_IN
-                ),
+                (i for i, m in enumerate(modes_list) if m == InverterMode.DISCHARGE_ZERO_FEED_IN),
                 next(
-                    (
-                        i
-                        for i, m in enumerate(modes_list)
-                        if m == InverterMode.DISCHARGE
-                    ),
+                    (i for i, m in enumerate(modes_list) if m == InverterMode.DISCHARGE),
                     idx_idle,
                 ),
             )
@@ -236,9 +226,7 @@ class GeneticOptimization:
             indpb=0.2,
         )
         self.toolbox.register("individual", self.create_individual)
-        self.toolbox.register(
-            "population", tools.initRepeat, list, self.toolbox.individual
-        )
+        self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
         self.toolbox.register("mate", tools.cxTwoPoint)
         self.toolbox.register("mutate", self.mutate)
         self.toolbox.register("select", tools.selTournament, tournsize=3)
@@ -294,9 +282,7 @@ class GeneticOptimization:
 
         return inverter_modes_all, inverter_rates_all, appliance_load, applied_starts
 
-    def _simulate(
-        self, individual: list[int], start_hour: int
-    ) -> Optional[SimulationResult]:
+    def _simulate(self, individual: list[int], start_hour: int) -> Optional[SimulationResult]:
         if self.simulation is None or self.genome_layout is None:
             return None
         inv_modes, inv_rates, appl_load, _ = self._build_simulation_arrays(individual)
@@ -305,6 +291,7 @@ class GeneticOptimization:
             inverter_ac_rates=inv_rates,
             appliance_load=appl_load,
             start_idx=start_hour,
+            dt=getattr(self.config.prediction, "dt_hours", 1.0),
         )
 
     # ------------------------------------------------------------------
@@ -346,8 +333,7 @@ class GeneticOptimization:
             if (
                 inv.battery
                 and inv.is_optimizable
-                and inv.topology
-                not in (SystemTopology.EV_CHARGE_ONLY, SystemTopology.EV_V2G)
+                and inv.topology not in (SystemTopology.EV_CHARGE_ONLY, SystemTopology.EV_V2G)
             ):
                 bat = inv.battery
                 deliverable = bat.current_deliverable_energy_content()
@@ -367,9 +353,7 @@ class GeneticOptimization:
                         soc < parameters.eauto.min_soc_percentage
                         or soc > parameters.eauto.max_soc_percentage
                     ):
-                        score += (
-                            abs(parameters.eauto.min_soc_percentage - soc) * penalty
-                        )
+                        score += abs(parameters.eauto.min_soc_percentage - soc) * penalty
 
         if not worst_case:
             for h, loss_wh in enumerate(result.losses_wh_per_dt):
@@ -466,9 +450,7 @@ class GeneticOptimization:
 
         if parameters.inverter:
             inv_params = parameters.inverter
-            if (
-                inv_params.pv_source is None or inv_params.pv_source not in pv_map
-            ) and pv_map:
+            if (inv_params.pv_source is None or inv_params.pv_source not in pv_map) and pv_map:
                 # Fix pv_source to match available PV data
                 inv_params = InverterParameters(
                     device_id=inv_params.device_id,
@@ -486,33 +468,23 @@ class GeneticOptimization:
         # EV as InverterBase
         if parameters.eauto and eauto_battery:
             max_charge_w = float(parameters.eauto.max_charge_power_w or 0.0)
-            max_discharge_w = float(
-                getattr(parameters.eauto, "max_discharge_power_w", None) or 0.0
-            )
+            max_discharge_w = float(getattr(parameters.eauto, "max_discharge_power_w", None) or 0.0)
             ev_dc_to_ac = (
                 float(parameters.eauto.discharging_efficiency)
                 if max_discharge_w > 0
-                else (
-                    parameters.inverter.dc_to_ac_efficiency
-                    if parameters.inverter
-                    else 0.95
-                )
+                else (parameters.inverter.dc_to_ac_efficiency if parameters.inverter else 0.95)
             )
             ev_inv_params = InverterParameters(
                 device_id=f"{parameters.eauto.device_id}_inverter",
                 battery_id=parameters.eauto.device_id,
                 pv_source=None,
-                max_ac_output_power_w=max_discharge_w
-                if max_discharge_w > 0
-                else max_charge_w,
+                max_ac_output_power_w=max_discharge_w if max_discharge_w > 0 else max_charge_w,
                 max_ac_charge_power_w=max_charge_w,
                 dc_to_ac_efficiency=ev_dc_to_ac,
                 ac_to_dc_efficiency=float(parameters.eauto.charging_efficiency),
                 zero_feed_in=False,
             )
-            inverters.append(
-                InverterBase(parameters=ev_inv_params, battery=eauto_battery)
-            )
+            inverters.append(InverterBase(parameters=ev_inv_params, battery=eauto_battery))
 
         self.inverters = inverters
 
@@ -563,9 +535,7 @@ class GeneticOptimization:
 
         # Run optimization
         t0 = time.time()
-        best_individual, extra_data = self.optimize(
-            parameters.start_solution, ngen=generations
-        )
+        best_individual, extra_data = self.optimize(parameters.start_solution, ngen=generations)
         logger.debug("GeneticOptimization: elapsed {:.4f} s", time.time() - t0)
 
         # Final simulation
@@ -577,6 +547,7 @@ class GeneticOptimization:
             inverter_ac_rates=inv_rates,
             appliance_load=appl_load,
             start_idx=start_hour,
+            dt=getattr(self.config.prediction, "dt_hours", 1.0),
         )
         decoded = self.genome_layout.decode(best_individual, self.inverters)
 
@@ -585,9 +556,7 @@ class GeneticOptimization:
         for seg_idx, spec in enumerate(self.genome_layout.inverter_specs):
             inv = self.inverters[spec.inverter_index]
             modes_h = (
-                decoded.inverter_modes[seg_idx]
-                if seg_idx < len(decoded.inverter_modes)
-                else []
+                decoded.inverter_modes[seg_idx] if seg_idx < len(decoded.inverter_modes) else []
             )
             rates_h = (
                 decoded.inverter_ac_rates[seg_idx]

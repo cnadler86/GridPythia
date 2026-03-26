@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Optional
 
+from loguru import logger
+
 from src.simulation.devices import (
     EnergyFlowResult,
     InverterMode,
@@ -82,10 +84,7 @@ class InverterBase:
 
     def _setup(self) -> None:
         self.device_id = self.parameters.device_id
-        if (
-            self.battery
-            and self.parameters.battery_id != self.battery.parameters.device_id
-        ):
+        if self.battery and self.parameters.battery_id != self.battery.parameters.device_id:
             raise ValueError(
                 f"Battery ID mismatch - {self.parameters.battery_id} is configured; "
                 f"got {self.battery.parameters.device_id}."
@@ -104,9 +103,7 @@ class InverterBase:
 
         self.topology = self._resolve_topology()
         self.available_modes = self._resolve_available_modes()
-        self._available_modes_set: frozenset[InverterMode] = frozenset(
-            self.available_modes
-        )
+        self._available_modes_set: frozenset[InverterMode] = frozenset(self.available_modes)
         self._is_optimizable: bool = (
             self.topology != SystemTopology.PV_ONLY and len(self.available_modes) > 1
         )
@@ -118,18 +115,15 @@ class InverterBase:
             InverterMode.AC_CHARGE: self._process_ac_charge,
             InverterMode.AC_CHARGE_ZERO_FEED_IN: self._process_ac_charge,
         }
+        logger.info("Inverter '{}' initialized with topology {}", self.device_id, self.topology)
 
     def _resolve_topology(self) -> SystemTopology:
         has_pv = self._has_pv
         has_bat = self.battery is not None
         can_ac_charge = (
-            self._ac_to_dc_efficiency > 0
-            and self._max_ac_charge_power_w > 0
-            and has_bat
+            self._ac_to_dc_efficiency > 0 and self._max_ac_charge_power_w > 0 and has_bat
         )
-        can_discharge = (
-            self._dc_to_ac_efficiency > 0 and self._max_ac_output_power_w > 0
-        )
+        can_discharge = self._dc_to_ac_efficiency > 0 and self._max_ac_output_power_w > 0
 
         if has_pv and not has_bat:
             return SystemTopology.PV_ONLY
@@ -147,22 +141,16 @@ class InverterBase:
         elif not has_pv and has_bat and not can_ac_charge and can_discharge:
             raise ValueError("Battery without input source.")
         else:
-            raise ValueError(
-                "Invalid inverter configuration: cannot determine topology."
-            )
+            raise ValueError("Invalid inverter configuration: cannot determine topology.")
 
     def _resolve_available_modes(self) -> list[InverterMode]:
         modes: list[InverterMode] = [InverterMode.IDLE]
 
         can_discharge = (
-            self._dc_to_ac_efficiency > 0
-            and self._max_ac_output_power_w > 0
-            and self.battery
+            self._dc_to_ac_efficiency > 0 and self._max_ac_output_power_w > 0 and self.battery
         )
         can_ac_charge = (
-            self._ac_to_dc_efficiency > 0
-            and self._max_ac_charge_power_w > 0
-            and self.battery
+            self._ac_to_dc_efficiency > 0 and self._max_ac_charge_power_w > 0 and self.battery
         )
 
         if can_discharge:
@@ -239,22 +227,16 @@ class InverterBase:
             dc2ac = self._dc_to_ac_efficiency
             max_ac_out_dt = self._max_ac_output_power_w * dt
             if self.battery:
-                charged_dc_wh, charge_losses = self.battery.charge_energy(
-                    wh=generation_wh, dt=dt
-                )
+                charged_dc_wh, charge_losses = self.battery.charge_energy(wh=generation_wh, dt=dt)
                 losses_wh += charge_losses
-                available_after_battery = generation_wh - (
-                    charged_dc_wh + charge_losses
-                )
+                available_after_battery = generation_wh - (charged_dc_wh + charge_losses)
                 ac_available_wh = available_after_battery * dc2ac
                 losses_wh += available_after_battery - ac_available_wh
             else:
                 ac_available_wh = generation_wh * dc2ac
                 losses_wh += generation_wh - ac_available_wh
 
-            ac_output_wh = (
-                ac_available_wh if ac_available_wh < max_ac_out_dt else max_ac_out_dt
-            )
+            ac_output_wh = ac_available_wh if ac_available_wh < max_ac_out_dt else max_ac_out_dt
             if ac_output_wh < ac_available_wh:
                 losses_wh += ac_available_wh - ac_output_wh
 
@@ -297,20 +279,14 @@ class InverterBase:
                 )
                 if ac_output_wh < ac_available_wh:
                     losses_wh += ac_available_wh - ac_output_wh
-            return EnergyFlowResult(
-                ac_output_wh, ac_input_wh, losses_wh, pv_ac_wh=ac_output_wh
-            )
+            return EnergyFlowResult(ac_output_wh, ac_input_wh, losses_wh, pv_ac_wh=ac_output_wh)
 
         battery = self.battery
 
         if energy_wh is not None:
             # Mode 1: DISCHARGE_ZERO_FEED_IN
             requested_ac = energy_wh
-            ac_budget = (
-                requested_ac
-                if requested_ac < max_discharge_ac_wh
-                else max_discharge_ac_wh
-            )
+            ac_budget = requested_ac if requested_ac < max_discharge_ac_wh else max_discharge_ac_wh
 
             pv_used_dc = 0.0
             ac_from_pv = 0.0
@@ -329,9 +305,7 @@ class InverterBase:
                 losses_wh += bat_losses_dc + (delivered_dc - bat_ac)
 
             total_ac = ac_from_pv + bat_ac
-            ac_output_wh = (
-                total_ac if total_ac < max_discharge_ac_wh else max_discharge_ac_wh
-            )
+            ac_output_wh = total_ac if total_ac < max_discharge_ac_wh else max_discharge_ac_wh
             if ac_output_wh < total_ac:
                 losses_wh += total_ac - ac_output_wh
 
@@ -352,9 +326,7 @@ class InverterBase:
                     ac_output_wh += forced_ac
                     ac_from_pv += forced_ac
 
-            return EnergyFlowResult(
-                ac_output_wh, ac_input_wh, losses_wh, pv_ac_wh=ac_from_pv
-            )
+            return EnergyFlowResult(ac_output_wh, ac_input_wh, losses_wh, pv_ac_wh=ac_from_pv)
 
         # Mode 2: DISCHARGE with ac_rate
         pv_used_dc = 0.0
@@ -374,9 +346,7 @@ class InverterBase:
             losses_wh += bat_losses_dc + (delivered_dc - bat_ac)
 
         total_ac = pv_ac + bat_ac
-        ac_output_wh = (
-            total_ac if total_ac < max_discharge_ac_wh else max_discharge_ac_wh
-        )
+        ac_output_wh = total_ac if total_ac < max_discharge_ac_wh else max_discharge_ac_wh
         if ac_output_wh < total_ac:
             losses_wh += total_ac - ac_output_wh
 
@@ -443,13 +413,9 @@ class InverterBase:
                 dc_budget = min(max_ac_charge * self._ac_to_dc_efficiency, dc_headroom)
 
                 if dc_budget > 0:
-                    charged_ac, charge_losses_ac = battery.charge_energy(
-                        wh=dc_budget, dt=dt
-                    )
+                    charged_ac, charge_losses_ac = battery.charge_energy(wh=dc_budget, dt=dt)
                     losses += charge_losses_ac
-                    ac_energy = (
-                        charged_ac + charge_losses_ac
-                    ) / self._ac_to_dc_efficiency
+                    ac_energy = (charged_ac + charge_losses_ac) / self._ac_to_dc_efficiency
                     ac_input = ac_energy
 
         return EnergyFlowResult(ac_output, ac_input, losses, pv_ac_wh=pv_ac_wh)
