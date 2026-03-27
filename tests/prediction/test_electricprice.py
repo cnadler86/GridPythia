@@ -362,7 +362,7 @@ class TestElecPriceEnergyChartsCache:
             EnergyChartsConfig,
         )
 
-        provider = ElecPriceEnergyCharts(EnergyChartsConfig(charges_kwh=0.05, vat_rate=1.19))
+        provider = ElecPriceEnergyCharts(EnergyChartsConfig(charges_kwh=0.05, vat_rate=0.19))
         now = datetime.now(timezone.utc)
 
         # Provide a constant price of 100 EUR/MWh = 1e-4 EUR/Wh

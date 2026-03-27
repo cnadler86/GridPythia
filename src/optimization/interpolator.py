@@ -37,8 +37,6 @@ def get_load_interpolator() -> SelfConsumptionProbabilityInterpolator:
     """Get or create the load interpolator singleton."""
     global _interpolator
     if _interpolator is None:
-        filepath = (
-            Path(__file__).parent.parent.resolve() / ".." / "data" / "regular_grid_interpolator.pkl"
-        )
+        filepath = Path(__file__).parent.parent.resolve() / "data" / "regular_grid_interpolator.pkl"
         _interpolator = SelfConsumptionProbabilityInterpolator(filepath)
     return _interpolator

@@ -5,7 +5,7 @@ from typing import Optional, Union
 
 
 @dataclass
-class GeneticEnergyManagementParameters:
+class EnergyManagementParameters:
     """Encapsulates energy-related forecasts and costs used in GENETIC optimization."""
 
     pv_prognose_wh: dict[str, list[float]]
@@ -17,14 +17,14 @@ class GeneticEnergyManagementParameters:
     def __post_init__(self) -> None:
         # Accept legacy list format and convert to dict
         if isinstance(self.pv_prognose_wh, list):
-            self.pv_prognose_wh = {"__global__": self.pv_prognose_wh}
+            self.pv_prognose_wh = {"default": self.pv_prognose_wh}
 
 
 @dataclass
-class GeneticOptimizationParameters:
+class OptimizationParameters:
     """Main parameter class for running the genetic energy optimization."""
 
-    ems: GeneticEnergyManagementParameters
+    ems: EnergyManagementParameters
     pv_akku: Optional[object] = None  # BatteryParameters
     inverter: Optional[object] = None  # InverterParameters
     eauto: Optional[object] = None  # ElectricVehicleParameters

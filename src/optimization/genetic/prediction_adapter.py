@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Dict
 
-from src.optimization.genetic.geneticparams import GeneticEnergyManagementParameters
+from src.optimization.geneticparams import EnergyManagementParameters
 from src.prediction.prediction import PredictionData
 
 
@@ -17,18 +17,18 @@ def prediction_to_genetic_params(
     pred: PredictionData,
     preis_euro_pro_wh_akku: float,
     einspeise_default: float | None = None,
-) -> GeneticEnergyManagementParameters:
-    """Convert PredictionData into GeneticEnergyManagementParameters.
+) -> EnergyManagementParameters:
+    """Convert PredictionData into EnergyManagementParameters.
 
     Args:
         pred: PredictionData as returned by `Prediction.fetch(...)`.
         preis_euro_pro_wh_akku: battery price in EUR/Wh required by the
-            genetic parameter object.
+            energy management parameter object.
         einspeise_default: fallback feed-in tariff (EUR/Wh) if prediction
             does not provide `feedintariff_eur_wh`.
 
     Returns:
-        GeneticEnergyManagementParameters with fields populated and units
+        EnergyManagementParameters with fields populated and units
         converted to Wh per timestep.
     """
     # dt in hours used by the prediction window
@@ -67,7 +67,7 @@ def prediction_to_genetic_params(
             # inverter.parameter.pv_source used in the simulation
             pv_map[body] = (df[c] * float(dt)).to_list()
 
-    return GeneticEnergyManagementParameters(
+    return EnergyManagementParameters(
         pv_prognose_wh=pv_map,
         strompreis_euro_pro_wh=price_eur_per_wh,
         einspeiseverguetung_euro_pro_wh=feedin,

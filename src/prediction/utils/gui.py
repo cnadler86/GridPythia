@@ -35,10 +35,10 @@ from matplotlib.figure import Figure
 
 from src.config import HEMSConfig
 from src.optimization.genetic.genetic import GeneticOptimization, GeneticSolution
-from src.optimization.genetic.geneticparams import GeneticOptimizationParameters
 
 # Genetic integration
 from src.optimization.genetic.prediction_adapter import prediction_to_genetic_params
+from src.optimization.geneticparams import OptimizationParameters
 from src.prediction.base import make_timestamps
 from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts, EnergyChartsConfig
 from src.prediction.electricprice.fixed import ElecPriceFixed
@@ -951,7 +951,7 @@ class OptimizationTab(_Tab):
                     # create battery + inverter instances
                     bat_obj, inv_obj = _make_devices(bat_params)
                     # Build genetic optimization parameter wrapper
-                    opt_params = GeneticOptimizationParameters(
+                    opt_params = OptimizationParameters(
                         ems=ems_params,
                         pv_akku=bat_params,
                         inverter=inv_obj.parameters,
@@ -1095,7 +1095,7 @@ class OptimizationTab(_Tab):
                         # Plot SoC on left axis
                         if res.battery_soc_percentage_per_dt:
                             for k, arr in (res.battery_soc_percentage_per_dt or {}).items():
-                                (h,) = ax4.plot(x, list(arr), label=f"SoC {k} (end of step %)")
+                                (h,) = ax4.plot(x, list(arr), label=f"SoC {k} (%)")
                                 handles.append(h)
                                 labels.append(f"SoC {k} (%)")
                                 plotted = True

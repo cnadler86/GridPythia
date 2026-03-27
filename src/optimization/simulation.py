@@ -4,8 +4,8 @@ from array import array
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from src.optimization.genetic.geneticparams import GeneticEnergyManagementParameters
-from src.optimization.genetic.interpolator import get_load_interpolator
+from src.optimization.geneticparams import EnergyManagementParameters
+from src.optimization.interpolator import get_load_interpolator
 from src.simulation.devices import InverterMode
 from src.simulation.devices.homeappliance import HomeAppliance
 from src.simulation.devices.inverterbase import InverterBase
@@ -291,7 +291,7 @@ class SimulationResult:
 class GeneticSimulation:
     def __init__(
         self,
-        parameters: GeneticEnergyManagementParameters,
+        parameters: EnergyManagementParameters,
         optimization_hours: int,
         inverters: Optional[list[InverterBase]] = None,
         home_appliances: Optional[list[HomeAppliance]] = None,
@@ -362,10 +362,10 @@ class GeneticSimulation:
         step_buf: list[InverterSimulationDataStep],
         load_wh: float,
         dt: float,
-    ) -> tuple[float, float, float]:
+    ) -> tuple[float, float, float, list[float]]:
         """Process all inverters for one time step.
 
-        Returns (end_load, pv_ac_wh, losses_wh).
+        Returns (end_load, pv_ac_wh, losses_wh, pv_per_inverter).
         """
         _ZFI_D = InverterMode.DISCHARGE_ZERO_FEED_IN
         _ZFI_C = InverterMode.AC_CHARGE_ZERO_FEED_IN
@@ -375,13 +375,14 @@ class GeneticSimulation:
         zfi_d = None
         zfi_c = None
         losses = 0.0
+        pv_per_inv: list[float] = [0.0] * len(step_buf)
 
-        for sb in step_buf:
+        for idx, sb in enumerate(step_buf):
             m = sb.mode
             if m == _ZFI_D:
-                zfi_d = sb
+                zfi_d = (idx, sb)
             elif m == _ZFI_C:
-                zfi_c = sb
+                zfi_c = (idx, sb)
             else:
                 res = sb.inverter.process_energy(
                     generation=sb.generation,
@@ -392,34 +393,43 @@ class GeneticSimulation:
                 static_ie += res.ac_output_wh - res.ac_input_wh
                 static_pv += res.pv_ac_wh
                 losses += res.losses_wh
+                pv_per_inv[idx] = res.pv_ac_wh
 
         gb = load_wh - static_ie
 
         if zfi_d is not None and gb >= 0.0:
-            res = zfi_d.inverter.process_energy(
-                generation=zfi_d.generation,
-                mode=zfi_d.mode,
+            idx, sb = zfi_d
+            res = sb.inverter.process_energy(
+                generation=sb.generation,
+                mode=sb.mode,
                 dt=dt,
                 energy_wh=gb,
             )
+            losses += res.losses_wh
+            pv_per_inv[idx] = res.pv_ac_wh
             return (
                 gb - (res.ac_output_wh - res.ac_input_wh),
-                static_pv,
-                losses + res.losses_wh,
+                sum(pv_per_inv),
+                losses,
+                pv_per_inv,
             )
         if zfi_c is not None and gb <= 0.0:
-            res = zfi_c.inverter.process_energy(
-                generation=zfi_c.generation,
-                mode=zfi_c.mode,
+            idx, sb = zfi_c
+            res = sb.inverter.process_energy(
+                generation=sb.generation,
+                mode=sb.mode,
                 dt=dt,
                 energy_wh=-gb,
             )
+            losses += res.losses_wh
+            pv_per_inv[idx] = res.pv_ac_wh
             return (
                 gb - (res.ac_output_wh - res.ac_input_wh),
-                static_pv,
-                losses + res.losses_wh,
+                sum(pv_per_inv),
+                losses,
+                pv_per_inv,
             )
-        return gb, static_pv, losses
+        return gb, sum(pv_per_inv), losses, pv_per_inv
 
     def simulate(
         self,
@@ -463,6 +473,11 @@ class GeneticSimulation:
                 battery_wh_per_dt[inv.device_id] = array("f", [0.0] * total_idx)
                 battery_soc_percentage_per_dt[inv.device_id] = array("f", [0.0] * total_idx)
 
+        solar_generation_wh_per_dt: Dict[str, array[float]] = {}
+        for inv in inv_list:
+            if getattr(inv, "_has_pv", False):
+                solar_generation_wh_per_dt[inv.device_id] = array("f", [0.0] * total_idx)
+
         inverter_modes_per_dt: Dict[str, array[int]] = {}
         inverter_ac_rate_per_dt: Dict[str, array[float]] = {}
         for inv in inv_list:
@@ -496,7 +511,13 @@ class GeneticSimulation:
                 inverter_modes_per_dt[inv_id][i] = inverter_modes[j][h]
                 inverter_ac_rate_per_dt[inv_id][i] = float(inverter_ac_rates[j][h])
 
-            end_load, pv_ac_wh, losses_wh_per_dt[i] = _step(step_buf, load_wh, dt)
+            end_load, pv_ac_wh, losses_wh_per_dt[i], pv_per_inv_list = _step(step_buf, load_wh, dt)
+
+            # record per-inverter PV AC generation
+            for j in range(n_inv):
+                inv_id = inv_list[j].device_id
+                if inv_id in solar_generation_wh_per_dt:
+                    solar_generation_wh_per_dt[inv_id][i] = pv_per_inv_list[j]
 
             if pv_ac_wh > 0.0:
                 SCR = clc_SCR(load_wh / dt, pv_ac_wh / dt)
@@ -533,6 +554,7 @@ class GeneticSimulation:
             self_consumption_wh_per_dt=self_consumption_wh_per_dt,
             feedin_wh_per_dt=feedin_wh_per_dt,
             losses_wh_per_dt=losses_wh_per_dt,
+            solar_generation_wh_per_dt=solar_generation_wh_per_dt or None,
             battery_wh_per_dt=battery_wh_per_dt or None,
             battery_soc_percentage_per_dt=battery_soc_percentage_per_dt or None,
             inverter_modes_per_dt=inverter_modes_per_dt or None,

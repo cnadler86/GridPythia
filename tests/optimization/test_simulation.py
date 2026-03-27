@@ -4,8 +4,8 @@ from array import array
 
 import pytest
 
-from src.optimization.genetic.geneticparams import GeneticEnergyManagementParameters
-from src.optimization.genetic.simulation import GeneticSimulation, SimulationResult
+from src.optimization.geneticparams import EnergyManagementParameters
+from src.optimization.simulation import GeneticSimulation, SimulationResult
 from src.simulation.devices import InverterMode
 from src.simulation.devices.battery import Battery, BatteryParameters
 from src.simulation.devices.homeappliance import HomeAppliance, HomeApplianceParameters
@@ -206,7 +206,7 @@ def genetic_simulation() -> GeneticSimulation:
         prediction_hours=PREDICTION_HOURS,
     )
 
-    params = GeneticEnergyManagementParameters(
+    params = EnergyManagementParameters(
         pv_prognose_wh={"__global__": PV_WH},
         strompreis_euro_pro_wh=PRICES,
         einspeiseverguetung_euro_pro_wh=0.00007,

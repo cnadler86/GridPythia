@@ -14,12 +14,12 @@ from deap import algorithms, base, creator, tools
 from loguru import logger
 
 from src.config import HEMSConfig
-from src.optimization.genetic.geneticparams import (
-    GeneticEnergyManagementParameters,
-    GeneticOptimizationParameters,
-)
 from src.optimization.genetic.genomelayout import GenomeLayout
-from src.optimization.genetic.simulation import (
+from src.optimization.geneticparams import (
+    EnergyManagementParameters,
+    OptimizationParameters,
+)
+from src.optimization.simulation import (
     GeneticSimulation,
     SimulationResult,
 )
@@ -102,6 +102,7 @@ class GeneticOptimization:
             return self._create_random_individual()
 
         expensive = _percentile(prices[:n], 60)
+        cheap = _percentile(prices[:n], 20)
 
         genome: list[int] = []
 
@@ -117,19 +118,41 @@ class GeneticOptimization:
                     idx_idle,
                 ),
             )
+            idx_ac_charge = next(
+                (i for i, m in enumerate(modes_list) if m == InverterMode.AC_CHARGE),
+                next(
+                    (
+                        i
+                        for i, m in enumerate(modes_list)
+                        if m == InverterMode.AC_CHARGE_ZERO_FEED_IN
+                    ),
+                    -1,
+                ),
+            )
 
             can_discharge = idx_discharge != idx_idle
+            can_ac_charge = idx_ac_charge >= 0
 
+            mode_genes: list[int] = []
             for hour in range(n):
                 price = prices[min(hour, len(prices) - 1)]
                 if price >= expensive and can_discharge:
-                    genome.append(idx_discharge)
+                    mode_genes.append(idx_discharge)
+                elif price <= cheap and can_ac_charge:
+                    mode_genes.append(idx_ac_charge)
                 else:
-                    genome.append(idx_idle)
+                    mode_genes.append(idx_idle)
+            genome.extend(mode_genes)
 
+            # Use max rate for AC_CHARGE hours so the cheapest slots are used at full power.
+            # Mid rate is fine for all other modes.
+            max_rate_idx = max(spec.rate_count - 1, 0)
             mid_rate = max(spec.rate_count // 2, 0)
-            for _ in range(n):
-                genome.append(mid_rate)
+            for hour in range(n):
+                if mode_genes[hour] == idx_ac_charge:
+                    genome.append(max_rate_idx)
+                else:
+                    genome.append(mid_rate)
 
             if spec.discharge_rate_count > 0:
                 mid_discharge = spec.discharge_rate_count // 2
@@ -301,7 +324,7 @@ class GeneticOptimization:
     def evaluate(
         self,
         individual: list[int],
-        parameters: GeneticOptimizationParameters,
+        parameters: OptimizationParameters,
         start_hour: int,
         worst_case: bool,
     ) -> tuple:
@@ -329,18 +352,6 @@ class GeneticOptimization:
             if gap > 0.0:
                 score += fi * gap
 
-        for inv in self.inverters:
-            if (
-                inv.battery
-                and inv.is_optimizable
-                and inv.topology not in (SystemTopology.EV_CHARGE_ONLY, SystemTopology.EV_V2G)
-            ):
-                bat = inv.battery
-                deliverable = bat.current_deliverable_energy_content()
-                if inv._dc_to_ac_efficiency > 0:
-                    deliverable *= inv._dc_to_ac_efficiency
-                score += -deliverable * parameters.ems.preis_euro_pro_wh_akku
-
         if parameters.eauto:
             penalty = self.config.optimization.genetic.penalties.get("ev_soc_miss", 10)
             for inv in self.inverters:
@@ -355,10 +366,11 @@ class GeneticOptimization:
                     ):
                         score += abs(parameters.eauto.min_soc_percentage - soc) * penalty
 
-        if not worst_case:
-            for h, loss_wh in enumerate(result.losses_wh_per_dt):
-                if loss_wh > 0.0:
-                    score += loss_wh * result.electricity_price_per_dt[h]
+        # This is a simple way to penalize losses. Deactivate since double penalty.
+        # if not worst_case:
+        #     for h, loss_wh in enumerate(result.losses_wh_per_dt):
+        #         if loss_wh > 0.0:
+        #             score += loss_wh * result.electricity_price_per_dt[h]
 
         individual.extra_data = (result.net_balance, result.total_losses)  # type: ignore[attr-defined]
         return (score,)
@@ -420,7 +432,7 @@ class GeneticOptimization:
 
     def optimierung_ems(
         self,
-        parameters: GeneticOptimizationParameters,
+        parameters: OptimizationParameters,
         start_hour: int = 0,
         worst_case: bool = False,
         ngen: Optional[int] = None,
@@ -512,7 +524,7 @@ class GeneticOptimization:
         ]
 
         # Simulation instance
-        ems_params = GeneticEnergyManagementParameters(
+        ems_params = EnergyManagementParameters(
             pv_prognose_wh=pv_map,
             strompreis_euro_pro_wh=parameters.ems.strompreis_euro_pro_wh,
             einspeiseverguetung_euro_pro_wh=parameters.ems.einspeiseverguetung_euro_pro_wh,
