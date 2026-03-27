@@ -1,34 +1,23 @@
-"""Weather provider interface and data container."""
+"""Weather provider interface."""
 
 from abc import abstractmethod
-from array import array
-from dataclasses import dataclass
-from datetime import datetime
+
+import polars as pl
 
 from src.prediction.base import PredictionProvider
 
 
-@dataclass
-class WeatherData:
-    """Multi-channel weather arrays, all of the same length (``n_steps``)."""
-
-    temperature_c: array
-    cloud_cover_pct: array
-    wind_speed_kmh: array | None = None
-    humidity_pct: array | None = None
-    precipitation_mm: array | None = None
-    pressure_hpa: array | None = None
-    ghi_wm2: array | None = None
-    dni_wm2: array | None = None
-    dhi_wm2: array | None = None
-
-
 class WeatherProvider(PredictionProvider):
-    """Returns multi-channel weather data for a time window."""
+    """Returns multi-channel weather data for a time window.
+
+    The returned ``pl.DataFrame`` contains one column per channel.  The two
+    mandatory channels are ``temperature_c`` and ``cloud_cover_pct``;
+    optional ones (``wind_speed_kmh``, ``humidity_pct``, ``precipitation_mm``,
+    ``pressure_hpa``, ``ghi_wm2``, ``dni_wm2``, ``dhi_wm2``) are only present
+    when the data source provides them.  All columns are ``Float32``.
+    """
 
     @abstractmethod
-    def fetch(
-        self, start: datetime, end: datetime, dt_hours: float = 1.0
-    ) -> WeatherData:
-        """Return a :class:`WeatherData` instance."""
+    async def fetch(self, timestamps: pl.Series) -> pl.DataFrame:
+        """Return a DataFrame with one row per timestamp."""
         ...

@@ -1,4 +1,6 @@
+from src.prediction.weather.brightsky import WeatherBrightSky
 from src.prediction.weather.import_ import WeatherImport
-from src.prediction.weather.provider import WeatherData, WeatherProvider
+from src.prediction.weather.openmeteo import WeatherOpenMeteo
+from src.prediction.weather.provider import WeatherProvider
 
-__all__ = ["WeatherData", "WeatherProvider", "WeatherImport"]
+__all__ = ["WeatherProvider", "WeatherImport", "WeatherBrightSky", "WeatherOpenMeteo"]

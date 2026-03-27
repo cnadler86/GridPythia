@@ -5,11 +5,14 @@ Endpoint: https://api.akkudoktor.net/forecast
 """
 
 import logging
-from array import array
+from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
-from src.prediction.base import make_array, n_steps, resample
+import aiohttp
+import polars as pl
+
+from src.prediction.base import resample_to_timestamps
 from src.prediction.pvforecast.provider import PVForecastProvider, PVPlaneConfig
 
 logger = logging.getLogger(__name__)
@@ -90,27 +93,46 @@ class PVForecastAkkudoktor(PVForecastProvider):
 
     # ── HTTP ─────────────────────────────────────────────────────────────
 
-    def _request(self) -> list[_ForecastValue]:
-        """Call the Akkudoktor API and return summed per-hour values."""
-        import requests
-
+    async def _request_raw(self) -> list[list[dict]]:
+        """Call the Akkudoktor API and return raw per-plane hourly values."""
         url = self._build_url()
         logger.debug("Akkudoktor request: %s", url)
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
 
-        # ``values`` is a list-of-lists: one inner list per plane, each entry is a dict
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                resp.raise_for_status()
+                data = await resp.json(content_type=None)
+
         raw_values: list[list[dict]] = data.get("values", [])
         if not raw_values:
             raise ValueError("Akkudoktor API returned no 'values'.")
+        return raw_values
 
-        # Transpose to (timestep, planes); sum power across planes
+    def _parse_plane_values(self, raw_plane: list[dict]) -> list[_ForecastValue]:
+        values: list[_ForecastValue] = []
+        for entry in raw_plane:
+            dt = datetime.fromisoformat(entry["datetime"])
+            if dt.tzinfo is None:
+                from zoneinfo import ZoneInfo
+
+                dt = dt.replace(tzinfo=ZoneInfo(self._tz))
+            values.append(
+                _ForecastValue(
+                    dt=dt,
+                    dc_power_w=float(entry.get("dcPower", 0) or 0),
+                    ac_power_w=float(entry.get("power", 0) or 0),
+                )
+            )
+        return values
+
+    async def _request(self) -> list[_ForecastValue]:
+        """Call the Akkudoktor API and return summed per-hour values."""
+        raw_values = await self._request_raw()
+
         results: list[_ForecastValue] = []
         for per_plane in zip(*raw_values):
-            # All planes share the same datetime string
             dt_str: str = per_plane[0]["datetime"]
-            # Parse ISO-8601 datetime returned by Akkudoktor
             dt = datetime.fromisoformat(dt_str)
             if dt.tzinfo is None:
                 from zoneinfo import ZoneInfo
@@ -123,23 +145,51 @@ class PVForecastAkkudoktor(PVForecastProvider):
 
         return results
 
-    # ── public API ───────────────────────────────────────────────────────
+    async def fetch_by_inverter(self, timestamps: pl.Series) -> dict[str, pl.Series]:
+        ts_list: list[datetime] = timestamps.to_list()
+        start = ts_list[0]
+        end = ts_list[-1]
 
-    def fetch(self, start: datetime, end: datetime, dt_hours: float = 1.0) -> array:
-        hours = (end - start).total_seconds() / 3600
-        steps = n_steps(hours, dt_hours)
+        def _to_utc(dt: datetime) -> datetime:
+            return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
-        values = self._request()
+        start_utc = _to_utc(start)
+        n_hourly = max(1, round((_to_utc(end) - start_utc).total_seconds() / 3600) + 2)
+        hourly_by_inverter: dict[str, list[float]] = defaultdict(lambda: [0.0] * n_hourly)
 
-        # Build hourly lookup by index
-        hourly: array = make_array(size=n_steps(hours, 1.0))
+        raw_values = await self._request_raw()
+        for plane, raw_plane in zip(self._planes, raw_values):
+            hourly = hourly_by_inverter[plane.inverter]
+            for fv in self._parse_plane_values(raw_plane):
+                fv_utc = _to_utc(fv.dt)
+                offset_h = (fv_utc - start_utc).total_seconds() / 3600.0
+                idx = round(offset_h)
+                if 0 <= idx < n_hourly:
+                    hourly[idx] += max(0.0, fv.ac_power_w)
+
+        return {
+            inverter: resample_to_timestamps(hourly, 1.0, timestamps, pad_value=0.0)
+            for inverter, hourly in hourly_by_inverter.items()
+        }
+
+    async def fetch(self, timestamps: pl.Series) -> pl.Series:
+        ts_list: list[datetime] = timestamps.to_list()
+        start = ts_list[0]
+        end = ts_list[-1]
+
+        def _to_utc(dt: datetime) -> datetime:
+            return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+        start_utc = _to_utc(start)
+        n_hourly = max(1, round((_to_utc(end) - start_utc).total_seconds() / 3600) + 2)
+        hourly = [0.0] * n_hourly
+
+        values = await self._request()
         for fv in values:
-            offset_h = (fv.dt - start).total_seconds() / 3600.0
+            fv_utc = _to_utc(fv.dt)
+            offset_h = (fv_utc - start_utc).total_seconds() / 3600.0
             idx = round(offset_h)
-            if 0 <= idx < len(hourly):
+            if 0 <= idx < n_hourly:
                 hourly[idx] = max(0.0, fv.ac_power_w)
 
-        if abs(dt_hours - 1.0) < 1e-9:
-            return hourly
-
-        return resample(hourly, 1.0, dt_hours)
+        return resample_to_timestamps(hourly, 1.0, timestamps, pad_value=0.0)
