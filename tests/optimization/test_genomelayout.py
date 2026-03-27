@@ -35,7 +35,7 @@ def pv_hybrid_inv(battery) -> InverterBase:
         ac_to_dc_efficiency=0.95,
         max_ac_charge_power_w=3000,
         zero_feed_in=True,
-        ac_rates=[0.0, 0.5, 1.0],
+        ac_rates=(0.0, 0.5, 1.0),
     )
     return InverterBase(parameters=params, battery=battery)
 
@@ -77,7 +77,7 @@ def ev_v2g_inv(battery) -> InverterBase:
         ac_to_dc_efficiency=0.95,
         max_ac_charge_power_w=7400,
         zero_feed_in=False,
-        ac_rates=[0.0, 0.5, 1.0],
+        ac_rates=(0.0, 0.5, 1.0),
     )
     return InverterBase(parameters=params, battery=battery)
 

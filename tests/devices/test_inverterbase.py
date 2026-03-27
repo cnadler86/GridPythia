@@ -35,7 +35,7 @@ def pv_hybrid_params() -> InverterParameters:
         ac_to_dc_efficiency=0.90,
         max_ac_charge_power_w=2000,
         zero_feed_in=True,
-        ac_rates=[0.0, 0.25, 0.5, 0.75, 1.0],
+        ac_rates=(0.0, 0.25, 0.5, 0.75, 1.0),
     )
 
 

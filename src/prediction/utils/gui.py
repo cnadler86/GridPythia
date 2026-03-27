@@ -38,6 +38,7 @@ from src.optimization.genetic.genetic import GeneticOptimization, GeneticSolutio
 
 # Genetic integration
 from src.optimization.genetic.prediction_adapter import prediction_to_genetic_params
+from src.optimization.linear.solver import LinearOptimizer, LinearSolution, OptimizationObjective
 from src.optimization.params import OptimizationParameters
 from src.prediction.base import make_timestamps
 from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts, EnergyChartsConfig
@@ -46,8 +47,6 @@ from src.prediction.electricprice.import_ import ElecPriceImport
 from src.prediction.feedintariff.fixed import FeedInTariffFixed
 from src.prediction.feedintariff.import_ import FeedInTariffImport
 from src.prediction.load.akkudoktor import LoadAkkudoktor, LoadAkkudoktorAdjusted
-from src.prediction.load.fixed import LoadFixed
-from src.prediction.load.import_ import LoadImport
 from src.prediction.load.profilejson import LoadProfileJSON
 from src.prediction.prediction import Prediction, PredictionSetup
 from src.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
@@ -579,8 +578,6 @@ class LoadTab(_Tab):
 
     def make_provider(self):
         p = self._prov_var.get()
-        if p == "Fixed":
-            return LoadFixed(power_w=float(self._power.get()))
         if p == "Akkudoktor":
             return LoadAkkudoktor(year_energy_kwh=float(self._year_energy.get()))
         if p == "AkkudoktorAdjusted":
@@ -590,10 +587,6 @@ class LoadTab(_Tab):
                 data_path=Path(self._profile_json_path.get()),
                 use_vacation_profile=self._vacation_profile.get(),
             )
-        return LoadImport(
-            load_w=_csv(self._ta.get("1.0", "end")),
-            source_dt_hours=float(self._srcdt.get()),
-        )
 
     def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
         ax = self._fig.add_subplot(111)
@@ -818,14 +811,40 @@ class OptimizationTab(_Tab):
 
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
-        # Battery price (EUR/Wh)
-        self._bat_price = _field(f, row, "Battery price EUR/Wh", "0.0")
+
+        # ── Optimizer selector ────────────────────────────────────────
+        ttk.Label(f, text="Optimizer", foreground="#555", font=("TkDefaultFont", 8, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 0)
+        )
         row += 1
-        # Genetic algorithm generations (optimization-level)
-        self._generations = _field(f, row, "Generations", "100")
+        self._optimizer_type = _combofield(
+            f, row, "Optimizer", ["Genetic", "Linear (CVXPY)"], "Linear (CVXPY)"
+        )
+        self._optimizer_type.trace_add("write", lambda *_: self._rebuild())
         row += 1
 
-        # Battery configuration (separate section)
+        opt = self._optimizer_type.get()
+        if opt == "Genetic":
+            self._generations = _field(f, row, "Generations", "100")
+            row += 1
+        else:
+            # Linear-specific settings
+            self._linear_objective = _combofield(
+                f,
+                row,
+                "Objective",
+                ["Minimize Cost", "Maximize Self-consumption"],
+                "Minimize Cost",
+            )
+            row += 1
+            self._bat_end_value = _field(f, row, "Battery end value EUR/Wh", "0.0")
+            row += 1
+
+        # Battery price (EUR/Wh) — used by genetic adapter
+        self._bat_price = _field(f, row, "Battery price EUR/Wh", "0.0")
+        row += 1
+
+        # ── Battery configuration ─────────────────────────────────────
         ttk.Label(f, text="Battery", foreground="#555", font=("TkDefaultFont", 8, "bold")).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 0)
         )
@@ -841,7 +860,7 @@ class OptimizationTab(_Tab):
         self._max_soc = _field(f, row, "Max SoC (%)", "100")
         row += 1
 
-        # Inverter configuration
+        # ── Inverter configuration ────────────────────────────────────
         ttk.Label(f, text="Inverter", foreground="#555", font=("TkDefaultFont", 8, "bold")).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 0)
         )
@@ -913,11 +932,11 @@ class OptimizationTab(_Tab):
                 except Exception:
                     self._last_ts = None
                 self._last_dt = getattr(pdata, "dt_hours", None)
-                # Convert and run simulation in background thread
+
                 bat_price = float(self._bat_price.get())
                 feedin_default = float(self._feedin_default.get())
 
-                # Build battery + inverter objects from GUI config
+                # ── Build battery + inverter from GUI config ──────────────────
                 bat_params = BatteryParameters(
                     device_id=self._bat_id.get(),
                     capacity_wh=int(float(self._bat_capacity.get())),
@@ -929,7 +948,6 @@ class OptimizationTab(_Tab):
                 )
 
                 def _make_devices(params):
-                    # instantiate battery and inverter
                     bat = Battery(params, prediction_hours=int(hours))
                     inv_params = InverterParameters(
                         device_id=self._inv_id.get(),
@@ -943,49 +961,98 @@ class OptimizationTab(_Tab):
                     inv = InverterBase(inv_params, battery=bat)
                     return bat, inv
 
-                async def _run_sim():
-                    # Convert prediction -> genetic EMS params
-                    ems_params = prediction_to_genetic_params(
-                        pdata, preis_euro_pro_wh_akku=bat_price, einspeise_default=feedin_default
-                    )
-                    # create battery + inverter instances
-                    bat_obj, inv_obj = _make_devices(bat_params)
-                    # Build genetic optimization parameter wrapper
-                    opt_params = OptimizationParameters(
-                        ems=ems_params,
-                        pv_akku=bat_params,
-                        inverter=inv_obj.parameters,
-                    )
-                    # Build a minimal HEMSConfig matching the requested horizon
-                    cfg = HEMSConfig()
-                    # prediction.hours in GeneticOptimization should be number of timesteps
-                    try:
-                        dt_val = float(self.app._dt.get())
-                    except Exception:
-                        dt_val = float(dt)
-                    steps = max(1, int(float(hours) / dt_val))
-                    cfg.prediction.hours = steps
-                    cfg.prediction.dt_hours = float(dt_val)
-                    cfg.optimization.horizon_hours = float(hours)
+                optimizer_choice = getattr(self, "_optimizer_type", None)
+                use_linear = (
+                    optimizer_choice is not None and optimizer_choice.get() == "Linear (CVXPY)"
+                )
 
-                    genopt = GeneticOptimization(cfg, verbose=False)
-                    logger.info("Starting genetic optimization thread")
-                    # run optimization in thread and return the GeneticSolution
-                    sol: GeneticSolution = await asyncio.to_thread(
-                        lambda: genopt.optimierung_ems(
-                            opt_params,
-                            start_hour=0,
-                            worst_case=False,
-                            ngen=int(self._generations.get()),
+                async def _run_sim():
+                    if use_linear:
+                        # ── Linear (CVXPY + HiGHS) path ──────────────────────
+                        _, inv_obj = _make_devices(bat_params)
+                        obj_str = getattr(self, "_linear_objective", None)
+                        if obj_str is not None and "Self" in obj_str.get():
+                            objective = OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
+                        else:
+                            objective = OptimizationObjective.MINIMIZE_COST
+                        bat_end_val = 0.0
+                        bat_end_field = getattr(self, "_bat_end_value", None)
+                        if bat_end_field is not None:
+                            try:
+                                bat_end_val = float(bat_end_field.get())
+                            except ValueError:
+                                bat_end_val = 0.0
+                        optimizer = LinearOptimizer(
+                            inverters=[inv_obj],
+                            prediction=pdata,
+                            battery_end_value_eur_wh=bat_end_val,
                         )
-                    )
-                    return sol
+                        logger.info("Starting LinearOptimizer with objective={}", objective.value)
+                        sol: LinearSolution = await asyncio.to_thread(
+                            lambda: optimizer.solve(objective=objective)
+                        )
+                        return sol
+                    else:
+                        # ── Genetic path ──────────────────────────────────────
+                        ems_params = prediction_to_genetic_params(
+                            pdata,
+                            preis_euro_pro_wh_akku=bat_price,
+                            einspeise_default=feedin_default,
+                        )
+                        _, inv_obj = _make_devices(bat_params)
+                        opt_params = OptimizationParameters(
+                            ems=ems_params,
+                            pv_akku=bat_params,
+                            inverter=inv_obj.parameters,
+                        )
+                        cfg = HEMSConfig()
+                        try:
+                            dt_val = float(self.app._dt.get())
+                        except Exception:
+                            dt_val = float(dt)
+                        steps = max(1, int(float(hours) / dt_val))
+                        cfg.prediction.hours = steps
+                        cfg.prediction.dt_hours = float(dt_val)
+                        cfg.optimization.horizon_hours = float(hours)
+                        genopt = GeneticOptimization(cfg, verbose=False)
+                        logger.info("Starting genetic optimization thread")
+                        sol: GeneticSolution = await asyncio.to_thread(
+                            lambda: genopt.optimierung_ems(
+                                opt_params,
+                                start_hour=0,
+                                worst_case=False,
+                                ngen=int(self._generations.get()),
+                            )
+                        )
+                        return sol
 
                 def _sim_done(res_tuple):
-                    # res_tuple may be a SimulationResult tuple or a GeneticSolution
+                    # res_tuple may be a LinearSolution, GeneticSolution, or legacy tuple
                     inv_modes_arrs = None
                     inv_ac_rates_arrs = None
-                    if isinstance(res_tuple, GeneticSolution):
+                    solve_meta: str | None = None
+
+                    if isinstance(res_tuple, LinearSolution):
+                        sol = res_tuple
+                        res = sol.result
+                        solve_meta = (
+                            f"Linear ({sol.objective.value}) · "
+                            f"status={sol.solver_status} · "
+                            f"{sol.solve_time_s:.2f}s"
+                        )
+                        if sol.inverter_plans:
+                            plan = sol.inverter_plans[0]
+                            try:
+                                inv_modes_arrs = [
+                                    array("i", [int(x) for x in plan.get("modes", [])])
+                                ]
+                                inv_ac_rates_arrs = [
+                                    array("f", [float(x) for x in plan.get("rates", [])])
+                                ]
+                            except Exception:
+                                inv_modes_arrs = None
+                                inv_ac_rates_arrs = None
+                    elif isinstance(res_tuple, GeneticSolution):
                         sol = res_tuple
                         res = sol.result
                         # extract modes/rates arrays from inverter_plans if present
@@ -1165,13 +1232,19 @@ class OptimizationTab(_Tab):
                     txt = scrolledtext.ScrolledText(w, width=120, height=30)
                     txt.pack(fill="both", expand=True)
                     # include config metadata
-                    meta = {
+                    meta: dict = {
+                        "optimizer": getattr(self, "_optimizer_type", None)
+                        and self._optimizer_type.get(),
                         "initial_soc_pct": float(self._initial_soc.get()),
-                        "generations": int(self._generations.get()),
                     }
+                    if solve_meta:
+                        meta["solve_info"] = solve_meta
+                    elif hasattr(self, "_generations"):
+                        meta["generations"] = int(self._generations.get())
                     txt.insert("1.0", json.dumps({"meta": meta, "result": out}, indent=2))
                     txt.configure(state="disabled")
-                    self._status.set(f"Simulation finished · Net: {res.net_balance:.2f} €")
+                    suffix = f" · {solve_meta}" if solve_meta else ""
+                    self._status.set(f"Done · Net: {res.net_balance:.2f} €{suffix}")
 
                 _run_async(
                     _run_sim(),

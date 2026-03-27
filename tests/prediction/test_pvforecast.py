@@ -31,14 +31,14 @@ class TestPVPlaneConfig:
         assert p.inverter.startswith("inverter")
 
     def test_custom(self):
-        p = PVPlaneConfig(peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=[10, 20, 30])
+        p = PVPlaneConfig(peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30))
         assert p.peak_kw == 4.0
         assert p.azimuth == 90.0
         assert p.userhorizon == (10, 20, 30)
 
     def test_userhorizon_is_normalized_for_hashing(self):
         p1 = PVPlaneConfig(
-            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=[10, 20, 30], inverter="inverter1"
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inverter1"
         )
         p2 = PVPlaneConfig(
             peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inverter1"
@@ -48,7 +48,7 @@ class TestPVPlaneConfig:
 
     def test_can_be_used_as_dict_key(self):
         p1 = PVPlaneConfig(
-            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=[10, 20, 30], inverter="inv-a"
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inv-a"
         )
         p2 = PVPlaneConfig(
             peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inv-a"
@@ -314,7 +314,7 @@ class TestPVForecastOpenMeteo:
         mock_fetch.return_value = plane_data
 
         plane1 = PVPlaneConfig(
-            peak_kw=5.0, tilt=30.0, azimuth=180.0, userhorizon=[0.0, 5.0], inverter="inv-a"
+            peak_kw=5.0, tilt=30.0, azimuth=180.0, userhorizon=(0.0, 5.0), inverter="inv-a"
         )
         plane2 = PVPlaneConfig(
             peak_kw=5.0, tilt=30.0, azimuth=180.0, userhorizon=(0.0, 5.0), inverter="inv-a"
