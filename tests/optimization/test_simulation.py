@@ -225,11 +225,16 @@ def genetic_simulation() -> GridSimulation:
 def test_simulation(genetic_simulation: GridSimulation) -> None:
     """Simulate from START_IDX and validate the result structure."""
     sim = genetic_simulation
-    n_inv = len(sim._inv_list)
     n_hours = sim.optimization_hours
 
-    inverter_modes = [array("i", [InverterMode.IDLE] * n_hours) for _ in range(n_inv)]
-    inverter_ac_rates = [array("f", [0.0] * n_hours) for _ in range(n_inv)]
+    inverter_modes = {
+        inv.device_id: array("i", [InverterMode.IDLE] * n_hours)
+        for inv in sim._inv_list
+    }
+    inverter_ac_rates = {
+        inv.device_id: array("f", [0.0] * n_hours)
+        for inv in sim._inv_list
+    }
     appliance_load = array("f", [0.0] * n_hours)
 
     result = sim.simulate(
@@ -264,15 +269,20 @@ def test_simulation_discharge_reduces_grid_draw(
 ) -> None:
     """Battery discharge should reduce grid import compared to IDLE mode."""
     sim = genetic_simulation
-    n_inv = len(sim._inv_list)
     n_hours = sim.optimization_hours
 
-    idle_modes = [array("i", [InverterMode.IDLE] * n_hours) for _ in range(n_inv)]
-    discharge_modes = [
-        array("i", [InverterMode.DISCHARGE_ZERO_FEED_IN] * n_hours)
-        for _ in range(n_inv)
-    ]
-    rates = [array("f", [0.0] * n_hours) for _ in range(n_inv)]
+    idle_modes = {
+        inv.device_id: array("i", [InverterMode.IDLE] * n_hours)
+        for inv in sim._inv_list
+    }
+    discharge_modes = {
+        inv.device_id: array("i", [InverterMode.DISCHARGE_ZERO_FEED_IN] * n_hours)
+        for inv in sim._inv_list
+    }
+    rates = {
+        inv.device_id: array("f", [0.0] * n_hours)
+        for inv in sim._inv_list
+    }
     appliance_load = array("f", [0.0] * n_hours)
 
     r_idle = sim.simulate(idle_modes, rates, appliance_load, start_idx=START_IDX)
@@ -287,14 +297,16 @@ def test_simulation_discharge_reduces_grid_draw(
 def test_simulation_reset(genetic_simulation: GridSimulation) -> None:
     """simulate() calls reset() so two identical runs produce identical results."""
     sim = genetic_simulation
-    n_inv = len(sim._inv_list)
     n_hours = sim.optimization_hours
 
-    modes = [
-        array("i", [InverterMode.DISCHARGE_ZERO_FEED_IN] * n_hours)
-        for _ in range(n_inv)
-    ]
-    rates = [array("f", [0.0] * n_hours) for _ in range(n_inv)]
+    modes = {
+        inv.device_id: array("i", [InverterMode.DISCHARGE_ZERO_FEED_IN] * n_hours)
+        for inv in sim._inv_list
+    }
+    rates = {
+        inv.device_id: array("f", [0.0] * n_hours)
+        for inv in sim._inv_list
+    }
     appliance_load = array("f", [0.0] * n_hours)
 
     r1 = sim.simulate(modes, rates, appliance_load, start_idx=START_IDX)

@@ -263,24 +263,25 @@ class GeneticOptimization:
         individual: list[int],
     ) -> tuple:
         if self.genome_layout is None:
-            return [], [], None, []
+            return {}, {}, None, []
 
         layout = self.genome_layout
         n = self.config.prediction.hours
-        n_inv = len(self.inverters)
         decoded = layout.decode(individual, self.inverters)
 
-        inverter_modes_all: list[array] = [
-            array("i", [int(InverterMode.IDLE)] * n) for _ in range(n_inv)
-        ]
-        inverter_rates_all: list[array] = [array("f", [1.0] * n) for _ in range(n_inv)]
+        inverter_modes_all: dict[str, array] = {
+            inv.device_id: array("i", [int(InverterMode.IDLE)] * n) for inv in self.inverters
+        }
+        inverter_rates_all: dict[str, array] = {
+            inv.device_id: array("f", [1.0] * n) for inv in self.inverters
+        }
 
         for seg_idx, spec in enumerate(layout.inverter_specs):
-            j = spec.inverter_index
+            inv = self.inverters[spec.inverter_index]
             modes_h = decoded.inverter_modes[seg_idx]
             rates_h = decoded.inverter_ac_rates[seg_idx]
-            inverter_modes_all[j] = array("i", [int(m) for m in modes_h[:n]])
-            inverter_rates_all[j] = array("f", [float(r) for r in rates_h[:n]])
+            inverter_modes_all[inv.device_id] = array("i", [int(m) for m in modes_h[:n]])
+            inverter_rates_all[inv.device_id] = array("f", [float(r) for r in rates_h[:n]])
 
         appliance_load: Optional[array] = None
         applied_starts: list[Optional[int]] = list(decoded.home_appliance_starts)

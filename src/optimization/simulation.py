@@ -440,8 +440,8 @@ class GridSimulation:
 
     def simulate(
         self,
-        inverter_modes: list[array[InverterMode]],
-        inverter_ac_rates: list[array[float]],
+        inverter_modes: Dict[str, array[InverterMode]],
+        inverter_ac_rates: Dict[str, array[float]],
         appliance_load: Optional[array[float]] = None,
         start_idx: int = 0,
         dt: float = 1.0,
@@ -461,6 +461,10 @@ class GridSimulation:
         step_buf = self._step_buf
         n_inv = len(inv_list)
         clc_SCR = self.SCR_calc_fn
+
+        # Extract ordered arrays for the hot loop (avoids per-step dict lookups)
+        modes_arrs = [inverter_modes.get(inv.device_id, array("i", [])) for inv in inv_list]
+        rates_arrs = [inverter_ac_rates.get(inv.device_id, array("f", [])) for inv in inv_list]
 
         _step = self._simulate_step
         pv_lens = [len(a) for a in pv_arrs]
@@ -485,12 +489,6 @@ class GridSimulation:
             if getattr(inv, "_has_pv", False):
                 solar_generation_wh_per_dt[inv.device_id] = array("f", [0.0] * total_idx)
 
-        inverter_modes_per_dt: Dict[str, array[int]] = {}
-        inverter_ac_rate_per_dt: Dict[str, array[float]] = {}
-        for inv in inv_list:
-            inverter_modes_per_dt[inv.device_id] = array("b", [0] * total_idx)
-            inverter_ac_rate_per_dt[inv.device_id] = array("f", [0.0] * total_idx)
-
         _bat_tracking = [
             (
                 battery_wh_per_dt[inv.device_id],
@@ -509,14 +507,9 @@ class GridSimulation:
 
             for j in range(n_inv):
                 step = step_buf[j]
-                step.mode = inverter_modes[j][h]
+                step.mode = modes_arrs[j][h]
                 step.generation = pv_arrs[j][h] if h < pv_lens[j] else 0.0
-                step.ac_rate = inverter_ac_rates[j][h]
-
-                # record inverter mode and ac_rate for output
-                inv_id = inv_list[j].device_id
-                inverter_modes_per_dt[inv_id][i] = inverter_modes[j][h]
-                inverter_ac_rate_per_dt[inv_id][i] = float(inverter_ac_rates[j][h])
+                step.ac_rate = rates_arrs[j][h]
 
             end_load, pv_ac_wh, losses_wh_per_dt[i], pv_per_inv_list = _step(step_buf, load_wh, dt)
 
@@ -548,6 +541,22 @@ class GridSimulation:
                 _soc = _bat.soc_wh
                 _wh_arr[i] = _soc
                 _pct_arr[i] = _soc * _pct_f
+
+        # Build inverter mode/rate output dicts from the input arrays (no per-step copy)
+        inverter_modes_per_dt: Dict[str, array] = {
+            inv.device_id: array(
+                "b", inverter_modes[inv.device_id][start_idx : start_idx + total_idx]
+            )
+            for inv in inv_list
+            if inv.device_id in inverter_modes
+        }
+        inverter_ac_rate_per_dt: Dict[str, array] = {
+            inv.device_id: array(
+                "f", inverter_ac_rates[inv.device_id][start_idx : start_idx + total_idx]
+            )
+            for inv in inv_list
+            if inv.device_id in inverter_ac_rates
+        }
 
         elec_price_series = array(
             "f",
