@@ -29,7 +29,7 @@ class PVPlaneConfig(BaseModel):
         damping_morning: Morning shading damping factor.  Open-Meteo only.
         damping_evening: Evening shading damping factor.  Open-Meteo only.
         partial_shading: Enable partial-shading model.  Open-Meteo only.
-        inverter:        Inverter model name. Default is "default".
+        inverter:        Inverter model name. Default is "inverter1".
     """
 
     peak_kw: float = Field(..., gt=0.0)
@@ -40,7 +40,7 @@ class PVPlaneConfig(BaseModel):
     damping_morning: float = 0.0
     damping_evening: float = 0.0
     partial_shading: bool = False
-    inverter: str = "default"
+    inverter: str = "inverter1"
 
     model_config = ConfigDict(frozen=True)
 
@@ -68,9 +68,9 @@ class PVForecastProvider(PredictionProvider):
         """Return watt series keyed by inverter name.
 
         Providers without inverter-specific information fall back to a single
-        synthetic inverter named ``default``.
+        synthetic inverter named ``inverter1``.
         """
-        return {"default": await self.fetch(timestamps)}
+        return {"inverter1": await self.fetch(timestamps)}
 
     @abstractmethod
     async def fetch(self, timestamps: pl.Series) -> pl.Series:

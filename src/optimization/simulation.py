@@ -317,9 +317,16 @@ class GridSimulation:
                 k: array("f", map(float, v)) for k, v in parameters.pv_prognose_wh.items()
             }
 
-        self.inverters: Dict[str, InverterBase] = (
-            {inv.device_id: inv for inv in inverters} if inverters else {}
-        )
+        # Build mapping of inverter id -> inverter and ensure uniqueness
+        self.inverters: Dict[str, InverterBase] = {}
+        if inverters:
+            for inv in inverters:
+                inv_id = inv.device_id
+                if inv_id in self.inverters:
+                    raise ValueError(
+                        f"Duplicate inverter device_id '{inv_id}' provided to GridSimulation"
+                    )
+                self.inverters[inv_id] = inv
 
         self._inv_list: list[InverterBase] = list(self.inverters.values())
 

@@ -28,7 +28,7 @@ class TestPVPlaneConfig:
         p = PVPlaneConfig(peak_kw=3.0, tilt=30.0, azimuth=180.0)
         assert p.loss_pct == 2.0
         assert p.userhorizon is None
-        assert p.inverter.startswith("default")
+        assert p.inverter.startswith("inverter")
 
     def test_custom(self):
         p = PVPlaneConfig(peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=[10, 20, 30])
@@ -38,10 +38,10 @@ class TestPVPlaneConfig:
 
     def test_userhorizon_is_normalized_for_hashing(self):
         p1 = PVPlaneConfig(
-            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=[10, 20, 30], inverter="inv-a"
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=[10, 20, 30], inverter="inverter1"
         )
         p2 = PVPlaneConfig(
-            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inv-a"
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inverter1"
         )
         assert p1 == p2
         assert hash(p1) == hash(p2)
@@ -95,8 +95,8 @@ class TestPVForecastImport:
     async def test_fetch_by_inverter_uses_default(self):
         provider = PVForecastImport(power_w=[0.0] * 24)
         result = await provider.fetch_by_inverter(_ts())
-        assert set(result) == {"default"}
-        assert result["default"].dtype == pl.Float32
+        assert set(result) == {"inverter1"}
+        assert result["inverter1"].dtype == pl.Float32
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

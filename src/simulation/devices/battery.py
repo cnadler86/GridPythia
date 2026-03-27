@@ -1,16 +1,19 @@
 """Battery device simulation."""
 
 from dataclasses import dataclass, field
+from itertools import count
 from typing import Any
 
 from loguru import logger
+
+_BATTERY_COUNTER = count(1)  # default auto-incrementing device id
 
 
 @dataclass
 class BatteryParameters:
     """Battery configuration parameters."""
 
-    device_id: str = "battery1"
+    device_id: str = field(default_factory=lambda: f"battery{next(_BATTERY_COUNTER)}")
     capacity_wh: int = 8000
     charging_efficiency: float = 0.98
     discharging_efficiency: float = 0.98

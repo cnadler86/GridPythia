@@ -848,7 +848,7 @@ class OptimizationTab(_Tab):
         row += 1
         self._inv_id = _field(f, row, "Device ID", "inverter1")
         row += 1
-        self._pv_source = _field(f, row, "PV source key", "default")
+        self._pv_source = _field(f, row, "PV source key", "inverter1")
         row += 1
         self._inv_max_out = _field(f, row, "Max AC output W", "800")
         row += 1

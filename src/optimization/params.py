@@ -17,7 +17,7 @@ class EnergyManagementParameters:
     def __post_init__(self) -> None:
         # Accept legacy list format and convert to dict
         if isinstance(self.pv_prognose_wh, list):
-            self.pv_prognose_wh = {"default": self.pv_prognose_wh}
+            self.pv_prognose_wh = {"inverter1": self.pv_prognose_wh}
 
 
 @dataclass

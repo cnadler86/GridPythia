@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import count
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 from loguru import logger
@@ -18,15 +19,18 @@ if TYPE_CHECKING:
 
     from src.simulation.devices.battery import Battery
 
+# inverter id counter
+_INVERTER_COUNTER = count(1)
+
 # Default charge rates
-DEFAULT_AC_RATES: list[float] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+DEFAULT_AC_RATES: list[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 
 
 @dataclass
 class InverterParameters:
     """Inverter device configuration."""
 
-    device_id: str = "inverter1"
+    device_id: str = field(default_factory=lambda: f"inverter{next(_INVERTER_COUNTER)}")
     battery_id: str | None = None
     pv_source: str | None = None
     max_ac_output_power_w: float = 5000
@@ -88,6 +92,10 @@ class InverterBase:
             raise ValueError(
                 f"Battery ID mismatch - {self.parameters.battery_id} is configured; "
                 f"got {self.battery.parameters.device_id}."
+            )
+        if self.battery is None and self.parameters.battery_id is not None:
+            raise ValueError(
+                f"Inverter '{self.device_id}' has battery_id '{self.parameters.battery_id}' but no battery provided."
             )
 
         self._max_ac_output_power_w = self.parameters.max_ac_output_power_w

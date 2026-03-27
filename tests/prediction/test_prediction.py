@@ -42,8 +42,8 @@ class TestPrediction:
         assert len(data["electricprice_eur_wh"]) == 24
         assert len(data["feedintariff_eur_wh"]) == 24
         assert len(data["load_w"]) == 24
-        assert "pv_roof_default_w" in data.df.columns
-        assert len(data["pv_roof_default_w"]) == 24
+        assert "pv_roof_inverter1_w" in data.df.columns
+        assert len(data["pv_roof_inverter1_w"]) == 24
         assert "weather_temperature_c" in data.df.columns
 
     async def test_fetch_quarter_hour(self):
@@ -59,8 +59,8 @@ class TestPrediction:
         assert data["electricprice_eur_wh"][0] == pytest.approx(0.0003)
         assert data["feedintariff_eur_wh"][0] == pytest.approx(0.000082)
         assert data["load_w"][0] == pytest.approx(500.0)
-        assert data["pv_roof_default_w"][0] == pytest.approx(0.0)
-        assert data["pv_roof_default_w"][10] == pytest.approx(1000.0)
+        assert data["pv_roof_inverter1_w"][0] == pytest.approx(0.0)
+        assert data["pv_roof_inverter1_w"][10] == pytest.approx(1000.0)
 
     async def test_multiple_pv_plants(self):
         setup = PredictionSetup(
@@ -71,10 +71,10 @@ class TestPrediction:
         )
         pred = Prediction(setup)
         data = await pred.fetch(start=START, hours=24)
-        assert "pv_east_default_w" in data.df.columns
-        assert "pv_west_default_w" in data.df.columns
-        assert data["pv_east_default_w"][0] == pytest.approx(500.0)
-        assert data["pv_west_default_w"][0] == pytest.approx(300.0)
+        assert "pv_east_inverter1_w" in data.df.columns
+        assert "pv_west_inverter1_w" in data.df.columns
+        assert data["pv_east_inverter1_w"][0] == pytest.approx(500.0)
+        assert data["pv_west_inverter1_w"][0] == pytest.approx(300.0)
 
     async def test_no_providers_gives_zeros(self):
         pred = Prediction(PredictionSetup())
@@ -99,7 +99,7 @@ class TestPrediction:
             }
         )
         data = await Prediction(setup).fetch(start=START, hours=24)
-        assert set(data.pv_names) == {"north_default", "south_default"}
+        assert set(data.pv_names) == {"north_inverter1", "south_inverter1"}
 
     async def test_multiple_inverters_per_provider(self):
         class MultiInverterPV(PVForecastProvider):
