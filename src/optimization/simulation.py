@@ -1,7 +1,7 @@
 """Grid simulation engine."""
 
 from array import array
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from src.optimization.interpolator import get_load_interpolator
@@ -30,11 +30,12 @@ class SimulationResult:
     feedin_wh_per_dt: array[float]
     losses_wh_per_dt: array[float]
     electricity_price_per_dt: array[float]
-    solar_generation_wh_per_dt: Optional[Dict[str, array[float]]] = None
-    battery_wh_per_dt: Optional[Dict[str, array[float]]] = None
-    battery_soc_percentage_per_dt: Optional[Dict[str, array[float]]] = None
-    inverter_modes_per_dt: Optional[Dict[str, array[int]]] = None
-    inverter_ac_rate_per_dt: Optional[Dict[str, array[float]]] = None
+    inverter_modes_per_dt: Dict[str, array[int]]
+    inverter_ac_rate_per_dt: Dict[str, array[float]] = field(default_factory=dict)
+    solar_generation_wh_per_dt: Dict[str, array[float]] = field(default_factory=dict)
+    battery_wh_per_dt: Dict[str, array[float]] = field(default_factory=dict)
+    battery_soc_percentage_per_dt: Dict[str, array[float]] = field(default_factory=dict)
+
     home_appliance_load_per_dt: Optional[array[float]] = None
 
     @property
@@ -570,11 +571,11 @@ class GridSimulation:
             self_consumption_wh_per_dt=self_consumption_wh_per_dt,
             feedin_wh_per_dt=feedin_wh_per_dt,
             losses_wh_per_dt=losses_wh_per_dt,
-            solar_generation_wh_per_dt=solar_generation_wh_per_dt or None,
-            battery_wh_per_dt=battery_wh_per_dt or None,
-            battery_soc_percentage_per_dt=battery_soc_percentage_per_dt or None,
-            inverter_modes_per_dt=inverter_modes_per_dt or None,
-            inverter_ac_rate_per_dt=inverter_ac_rate_per_dt or None,
+            solar_generation_wh_per_dt=solar_generation_wh_per_dt,
+            battery_wh_per_dt=battery_wh_per_dt,
+            battery_soc_percentage_per_dt=battery_soc_percentage_per_dt,
+            inverter_modes_per_dt=inverter_modes_per_dt,
+            inverter_ac_rate_per_dt=inverter_ac_rate_per_dt,
             electricity_price_per_dt=elec_price_series,
-            home_appliance_load_per_dt=appliance_load,
+            home_appliance_load_per_dt=appliance_load or None,
         )
