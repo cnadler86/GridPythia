@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 _INVERTER_COUNTER = count(1)
 
 # Default charge rates
-DEFAULT_AC_RATES: list[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+DEFAULT_AC_RATES: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 
 
 @dataclass
@@ -38,7 +38,7 @@ class InverterParameters:
     dc_to_ac_efficiency: float = 0.95
     ac_to_dc_efficiency: float = 0.95
     zero_feed_in: bool = True
-    ac_rates: list[float] = field(default_factory=lambda: list(DEFAULT_AC_RATES))
+    ac_rates: tuple[float, ...] = field(default_factory=lambda: DEFAULT_AC_RATES)
 
     def __post_init__(self) -> None:
         if self.battery_id is None and self.pv_source is None:
@@ -109,15 +109,18 @@ class InverterBase:
 
         self.charge_rates = tuple()
         self.discharge_rates = tuple()
+
         # if any of the rate-required modes are available, populate rates
-        if set(self.available_modes) & self._RATE_REQUIRED_MODES:
-            default_rates = tuple(float(r) for r in DEFAULT_AC_RATES)
-            self.charge_rates = default_rates
-            self.discharge_rates = default_rates
+        if InverterMode.AC_CHARGE in self.available_modes:
+            self.charge_rates = DEFAULT_AC_RATES
             if self.parameters.ac_rates:
-                unique_sorted = tuple(sorted({float(r) for r in self.parameters.ac_rates}))
-                self.charge_rates = unique_sorted
-                self.discharge_rates = unique_sorted
+                self.charge_rates = tuple(sorted({float(r) for r in self.parameters.ac_rates}))
+        if InverterMode.DISCHARGE in self.available_modes:
+            self.discharge_rates = DEFAULT_AC_RATES
+            if self.parameters.ac_rates:
+                self.discharge_rates = tuple(
+                    sorted({float(r) for r in self.parameters.ac_rates if 0 < r <= 1})
+                )
 
         self.is_optimizable: bool = (
             self.topology != SystemTopology.PV_ONLY and len(self.available_modes) > 1
@@ -169,6 +172,7 @@ class InverterBase:
         )
 
         if can_discharge:
+            # if zero feed-in is allowed, include the zero feed-in variant of DISCHARGE; otherwise just DISCHARGE
             if self._zero_feed_in:
                 modes.append(InverterMode.DISCHARGE_ZERO_FEED_IN)
             else:
