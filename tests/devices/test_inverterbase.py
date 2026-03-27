@@ -100,7 +100,7 @@ class TestTopologyResolution:
 class TestAvailableModes:
     def test_pv_only_has_idle_only(self, pv_only_params):
         inv = InverterBase(pv_only_params, battery=None)
-        assert inv.available_modes == [InverterMode.IDLE]
+        assert inv.available_modes == (InverterMode.IDLE,)
 
     def test_pv_battery_has_discharge(self, pv_battery_no_ac_params, battery):
         inv = InverterBase(pv_battery_no_ac_params, battery=battery)

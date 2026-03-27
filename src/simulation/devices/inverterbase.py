@@ -69,11 +69,11 @@ class InverterBase:
         "_zero_feed_in",
         "_has_pv",
         "charge_rates",
+        "discharge_rates",
         "topology",
         "available_modes",
-        "_available_modes_set",
         "_mode_dispatch",
-        "_is_optimizable",
+        "is_optimizable",
     )
 
     def __init__(
@@ -84,10 +84,8 @@ class InverterBase:
         self.parameters: InverterParameters = parameters
         self.battery: Optional[Battery] = battery
         self.current_state: InverterMode = InverterMode.IDLE
-        self._setup()
-
-    def _setup(self) -> None:
         self.device_id = self.parameters.device_id
+
         if self.battery and self.parameters.battery_id != self.battery.parameters.device_id:
             raise ValueError(
                 f"Battery ID mismatch - {self.parameters.battery_id} is configured; "
@@ -105,14 +103,23 @@ class InverterBase:
         self._zero_feed_in = self.parameters.zero_feed_in
         self._has_pv = self.parameters.pv_source is not None
 
-        self.charge_rates = [float(r) for r in DEFAULT_AC_RATES]
-        if self.parameters.ac_rates:
-            self.charge_rates = sorted({float(r) for r in self.parameters.ac_rates})
-
         self.topology = self._resolve_topology()
+        # store available modes as an immutable, ordered tuple (no duplicates)
         self.available_modes = self._resolve_available_modes()
-        self._available_modes_set: frozenset[InverterMode] = frozenset(self.available_modes)
-        self._is_optimizable: bool = (
+
+        self.charge_rates = tuple()
+        self.discharge_rates = tuple()
+        # if any of the rate-required modes are available, populate rates
+        if set(self.available_modes) & self._RATE_REQUIRED_MODES:
+            default_rates = tuple(float(r) for r in DEFAULT_AC_RATES)
+            self.charge_rates = default_rates
+            self.discharge_rates = default_rates
+            if self.parameters.ac_rates:
+                unique_sorted = tuple(sorted({float(r) for r in self.parameters.ac_rates}))
+                self.charge_rates = unique_sorted
+                self.discharge_rates = unique_sorted
+
+        self.is_optimizable: bool = (
             self.topology != SystemTopology.PV_ONLY and len(self.available_modes) > 1
         )
 
@@ -151,7 +158,7 @@ class InverterBase:
         else:
             raise ValueError("Invalid inverter configuration: cannot determine topology.")
 
-    def _resolve_available_modes(self) -> list[InverterMode]:
+    def _resolve_available_modes(self) -> tuple[InverterMode, ...]:
         modes: list[InverterMode] = [InverterMode.IDLE]
 
         can_discharge = (
@@ -172,22 +179,8 @@ class InverterBase:
             if self._zero_feed_in and not self._has_pv:
                 modes.append(InverterMode.AC_CHARGE_ZERO_FEED_IN)
 
-        return modes
-
-    @property
-    def is_optimizable(self) -> bool:
-        return self._is_optimizable
-
-    @property
-    def efficiency_round_trip(self) -> float:
-        if self.battery is not None:
-            return (
-                self._ac_to_dc_efficiency
-                * self._dc_to_ac_efficiency
-                * self.battery.charging_efficiency
-                * self.battery.discharging_efficiency
-            )
-        return 0.0
+        # preserve order as determined by the logic above, remove duplicates
+        return tuple(dict.fromkeys(modes))
 
     def process_energy(
         self,
@@ -203,7 +196,7 @@ class InverterBase:
             raise ValueError(
                 f"Inverter '{self.parameters.device_id}': generation={generation} > 0 but no PV source"
             )
-        if mode not in self._available_modes_set:
+        if mode not in self.available_modes:
             raise ValueError(
                 f"Inverter '{self.parameters.device_id}': mode {mode} not in available_modes {self.available_modes}"
             )
