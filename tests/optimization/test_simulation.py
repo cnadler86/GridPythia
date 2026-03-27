@@ -1,11 +1,11 @@
-"""Tests for the GeneticSimulation engine."""
+"""Tests for the GridSimulation engine."""
 
 from array import array
 
 import pytest
 
-from src.optimization.geneticparams import EnergyManagementParameters
-from src.optimization.simulation import GeneticSimulation, SimulationResult
+from src.optimization.params import EnergyManagementParameters
+from src.optimization.simulation import GridSimulation, SimulationResult
 from src.simulation.devices import InverterMode
 from src.simulation.devices.battery import Battery, BatteryParameters
 from src.simulation.devices.homeappliance import HomeAppliance, HomeApplianceParameters
@@ -171,8 +171,8 @@ OPTIMIZATION_HOURS = 24
 
 
 @pytest.fixture
-def genetic_simulation() -> GeneticSimulation:
-    """GeneticSimulation fixture with a PV_BATTERY inverter."""
+def genetic_simulation() -> GridSimulation:
+    """GridSimulation fixture with a PV_BATTERY inverter."""
     akku = Battery(
         BatteryParameters(
             device_id="battery1",
@@ -214,7 +214,7 @@ def genetic_simulation() -> GeneticSimulation:
         gesamtlast=LOAD,
     )
 
-    return GeneticSimulation(
+    return GridSimulation(
         parameters=params,
         optimization_hours=OPTIMIZATION_HOURS,
         inverters=[inverter],
@@ -222,7 +222,7 @@ def genetic_simulation() -> GeneticSimulation:
     )
 
 
-def test_simulation(genetic_simulation: GeneticSimulation) -> None:
+def test_simulation(genetic_simulation: GridSimulation) -> None:
     """Simulate from START_IDX and validate the result structure."""
     sim = genetic_simulation
     n_inv = len(sim._inv_list)
@@ -260,7 +260,7 @@ def test_simulation(genetic_simulation: GeneticSimulation) -> None:
 
 
 def test_simulation_discharge_reduces_grid_draw(
-    genetic_simulation: GeneticSimulation,
+    genetic_simulation: GridSimulation,
 ) -> None:
     """Battery discharge should reduce grid import compared to IDLE mode."""
     sim = genetic_simulation
@@ -284,7 +284,7 @@ def test_simulation_discharge_reduces_grid_draw(
     assert r_discharge.total_cost <= r_idle.total_cost + 1e-4
 
 
-def test_simulation_reset(genetic_simulation: GeneticSimulation) -> None:
+def test_simulation_reset(genetic_simulation: GridSimulation) -> None:
     """simulate() calls reset() so two identical runs produce identical results."""
     sim = genetic_simulation
     n_inv = len(sim._inv_list)

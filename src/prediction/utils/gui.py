@@ -38,7 +38,7 @@ from src.optimization.genetic.genetic import GeneticOptimization, GeneticSolutio
 
 # Genetic integration
 from src.optimization.genetic.prediction_adapter import prediction_to_genetic_params
-from src.optimization.geneticparams import OptimizationParameters
+from src.optimization.params import OptimizationParameters
 from src.prediction.base import make_timestamps
 from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts, EnergyChartsConfig
 from src.prediction.electricprice.fixed import ElecPriceFixed

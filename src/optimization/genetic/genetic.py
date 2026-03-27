@@ -15,12 +15,12 @@ from loguru import logger
 
 from src.config import HEMSConfig
 from src.optimization.genetic.genomelayout import GenomeLayout
-from src.optimization.geneticparams import (
+from src.optimization.params import (
     EnergyManagementParameters,
     OptimizationParameters,
 )
 from src.optimization.simulation import (
-    GeneticSimulation,
+    GridSimulation,
     SimulationResult,
 )
 from src.simulation.devices import InverterMode, SystemTopology
@@ -73,7 +73,7 @@ class GeneticOptimization:
         self.inverters: list[InverterBase] = []
         self.home_appliances: list[HomeAppliance] = []
         self.genome_layout: Optional[GenomeLayout] = None
-        self.simulation: Optional[GeneticSimulation] = None
+        self.simulation: Optional[GridSimulation] = None
         self._prices_for_init: list[float] = []
         self._pv_for_init: list[float] = []
 
@@ -531,7 +531,7 @@ class GeneticOptimization:
             preis_euro_pro_wh_akku=parameters.ems.preis_euro_pro_wh_akku,
             gesamtlast=parameters.ems.gesamtlast,
         )
-        self.simulation = GeneticSimulation(
+        self.simulation = GridSimulation(
             parameters=ems_params,
             optimization_hours=self.config.optimization.horizon_hours,
             inverters=inverters,

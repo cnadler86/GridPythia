@@ -1,11 +1,11 @@
-"""Genetic algorithm simulation engine."""
+"""Grid simulation engine."""
 
 from array import array
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from src.optimization.geneticparams import EnergyManagementParameters
 from src.optimization.interpolator import get_load_interpolator
+from src.optimization.params import EnergyManagementParameters
 from src.simulation.devices import InverterMode
 from src.simulation.devices.homeappliance import HomeAppliance
 from src.simulation.devices.inverterbase import InverterBase
@@ -288,7 +288,7 @@ class SimulationResult:
         return layout
 
 
-class GeneticSimulation:
+class GridSimulation:
     def __init__(
         self,
         parameters: EnergyManagementParameters,
