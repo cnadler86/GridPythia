@@ -5,7 +5,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from src.optimization.linear import LinearOptimizer, OptimizationObjective
+from src.optimization.linear.solver import LinearOptimizer, OptimizationObjective
 from src.prediction.prediction import PredictionData
 from src.simulation.devices import InverterMode
 from src.simulation.devices.battery import Battery, BatteryParameters

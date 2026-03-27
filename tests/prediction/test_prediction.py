@@ -8,7 +8,6 @@ import pytest
 from src.prediction.base import make_timestamps
 from src.prediction.electricprice.fixed import ElecPriceFixed
 from src.prediction.feedintariff.fixed import FeedInTariffFixed
-from src.prediction.load.fixed import LoadFixed
 from src.prediction.prediction import Prediction, PredictionData, PredictionSetup
 from src.prediction.pvforecast.import_ import PVForecastImport
 from src.prediction.pvforecast.provider import PVForecastProvider
@@ -27,7 +26,6 @@ class TestPrediction:
         setup = PredictionSetup(
             electricprice=ElecPriceFixed(price_kwh=0.30),
             feedintariff=FeedInTariffFixed(tariff_kwh=0.082),
-            load=LoadFixed(power_w=500.0),
             pv={"roof": PVForecastImport(power_w=pv_profile)},
             weather=WeatherImport(data=weather_data),
         )
@@ -58,7 +56,6 @@ class TestPrediction:
         data = await pred.fetch(start=START, hours=24, dt_hours=1.0)
         assert data["electricprice_eur_wh"][0] == pytest.approx(0.0003)
         assert data["feedintariff_eur_wh"][0] == pytest.approx(0.000082)
-        assert data["load_w"][0] == pytest.approx(500.0)
         assert data["pv_roof_inverter1_w"][0] == pytest.approx(0.0)
         assert data["pv_roof_inverter1_w"][10] == pytest.approx(1000.0)
 
