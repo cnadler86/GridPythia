@@ -187,7 +187,7 @@ def _make_prediction(steps: int) -> PredictionData:
 
 
 @pytest.fixture
-def genetic_simulation() -> GridSimulation:
+def grid_simulation() -> GridSimulation:
     """GridSimulation fixture with a PV_BATTERY inverter."""
     akku = Battery(
         BatteryParameters(
@@ -229,9 +229,9 @@ def genetic_simulation() -> GridSimulation:
     )
 
 
-def test_simulation(genetic_simulation: GridSimulation) -> None:
+def test_simulation(grid_simulation: GridSimulation) -> None:
     """Simulate from START_IDX and validate the result structure."""
-    sim = genetic_simulation
+    sim = grid_simulation
     n_hours = sim.simulation_steps
 
     inverter_modes = {
@@ -267,10 +267,10 @@ def test_simulation(genetic_simulation: GridSimulation) -> None:
 
 
 def test_simulation_discharge_reduces_grid_draw(
-    genetic_simulation: GridSimulation,
+    grid_simulation: GridSimulation,
 ) -> None:
     """Battery discharge should reduce grid import compared to IDLE mode."""
-    sim = genetic_simulation
+    sim = grid_simulation
     n_hours = sim.simulation_steps
 
     idle_modes = {
@@ -296,9 +296,9 @@ def test_simulation_discharge_reduces_grid_draw(
     assert r_discharge.total_cost <= r_idle.total_cost + 1e-4
 
 
-def test_simulation_reset(genetic_simulation: GridSimulation) -> None:
+def test_simulation_reset(grid_simulation: GridSimulation) -> None:
     """simulate() calls reset() so two identical runs produce identical results."""
-    sim = genetic_simulation
+    sim = grid_simulation
     n_hours = sim.simulation_steps
 
     modes = {

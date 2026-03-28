@@ -5,7 +5,7 @@ from enum import IntEnum, StrEnum
 
 
 class InverterMode(IntEnum):
-    """Inverter operation modes used by the genetic algorithm."""
+    """Inverter operation modes."""
 
     IDLE = 0
     DISCHARGE = 1

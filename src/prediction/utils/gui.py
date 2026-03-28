@@ -40,7 +40,6 @@ from src.prediction.electricprice.fixed import ElecPriceFixed
 from src.prediction.electricprice.import_ import ElecPriceImport
 from src.prediction.feedintariff.fixed import FeedInTariffFixed
 from src.prediction.feedintariff.import_ import FeedInTariffImport
-from src.prediction.load.akkudoktor import LoadAkkudoktor, LoadAkkudoktorAdjusted
 from src.prediction.load.profilejson import LoadProfileJSON
 from src.prediction.prediction import Prediction, PredictionSetup
 from src.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
@@ -548,49 +547,31 @@ class FeedInTariffTab(_Tab):
 
 class LoadTab(_Tab):
     TITLE = "Load"
-    PROVIDERS = ["ProfileJSON", "Fixed", "Import", "Akkudoktor", "AkkudoktorAdjusted"]
+    PROVIDERS = ["ProfileJSON"]
 
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
-        p = self._prov_var.get()
-        if p == "Fixed":
-            self._power = _field(f, row, "Power [W]", "500.0")
-        elif p in ("Akkudoktor", "AkkudoktorAdjusted"):
-            self._year_energy = _field(f, row, "Year energy [kWh]", "4500.0")
-        elif p == "ProfileJSON":
-            self._profile_json_path = _field(
-                f,
-                row,
-                "Profile JSON",
-                str(Path("src/prediction/load/data/load_profiles.json")),
-            )
-            row += 1
-            self._vacation_profile = tk.BooleanVar(value=False)
-            ttk.Checkbutton(
-                f,
-                text="Use vacation profile",
-                variable=self._vacation_profile,
-            ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
-        else:  # Import
-            ttk.Label(f, text="Values (W, CSV):").grid(
-                row=row, column=0, columnspan=2, sticky="w", **_PAD
-            )
-            row += 1
-            self._ta = _textarea(f, row)
-            row += 1
-            self._srcdt = _field(f, row, "Source dt [h]", "1.0")
+        # Only ProfileJSON provider is supported here (other providers were removed)
+        self._profile_json_path = _field(
+            f,
+            row,
+            "Profile JSON",
+            str(Path("src/prediction/load/data/load_profiles.json")),
+        )
+        row += 1
+        self._vacation_profile = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            f,
+            text="Use vacation profile",
+            variable=self._vacation_profile,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
 
     def make_provider(self):
-        p = self._prov_var.get()
-        if p == "Akkudoktor":
-            return LoadAkkudoktor(year_energy_kwh=float(self._year_energy.get()))
-        if p == "AkkudoktorAdjusted":
-            return LoadAkkudoktorAdjusted(year_energy_kwh=float(self._year_energy.get()))
-        if p == "ProfileJSON":
-            return LoadProfileJSON(
-                data_path=Path(self._profile_json_path.get()),
-                use_vacation_profile=self._vacation_profile.get(),
-            )
+        # Only ProfileJSON provider supported in cleaned GUI
+        return LoadProfileJSON(
+            data_path=Path(self._profile_json_path.get()),
+            use_vacation_profile=self._vacation_profile.get(),
+        )
 
     def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
         ax = _setup_plot_axes(self._fig)
