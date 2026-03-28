@@ -17,11 +17,11 @@ import cvxpy as cp
 import numpy as np
 from loguru import logger
 
-from src.optimization.simulation import GridSimulation, SimulationResult
 from src.prediction.prediction import PredictionData
 from src.simulation.devices import InverterMode
 from src.simulation.devices.inverterbase import InverterBase
 from src.simulation.grid_interpolator import FraunhoferSCModel
+from src.simulation.grid_simulation import GridSimulation, SimulationResult
 
 
 class OptimizationObjective(str, Enum):

@@ -2,9 +2,9 @@
 
 Usage::
 
-    uv run python -m src.prediction.utils.gui
+    uv run python -m utils.gui
     # or
-    python src/prediction/utils/gui.py
+    python utils/gui.py
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from loguru import logger
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from src.optimization.linear.solver import LinearOptimizer, LinearSolution, OptimizationObjective
+from src.optimization.solver import LinearOptimizer, LinearSolution, OptimizationObjective
 from src.prediction.base import make_timestamps
 from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts, EnergyChartsConfig
 from src.prediction.electricprice.fixed import ElecPriceFixed

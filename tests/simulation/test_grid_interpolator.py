@@ -3,9 +3,9 @@
 import polars as pl
 import pytest
 
-from src.optimization.simulation import GridSimulation
 from src.prediction.prediction import PredictionData
 from src.simulation.grid_interpolator import FraunhoferSCModel
+from src.simulation.grid_simulation import GridSimulation
 
 
 def test_sc_ratio_near_one_for_small_pv_at_baseload() -> None:
