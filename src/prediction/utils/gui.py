@@ -35,11 +35,11 @@ from matplotlib.figure import Figure
 
 from src.config import HEMSConfig
 from src.optimization.genetic.genetic import GeneticOptimization, GeneticSolution
+from src.optimization.genetic.params import OptimizationParameters
 
 # Genetic integration
 from src.optimization.genetic.prediction_adapter import prediction_to_genetic_params
 from src.optimization.linear.solver import LinearOptimizer, LinearSolution, OptimizationObjective
-from src.optimization.params import OptimizationParameters
 from src.prediction.base import make_timestamps
 from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts, EnergyChartsConfig
 from src.prediction.electricprice.fixed import ElecPriceFixed
@@ -1288,10 +1288,10 @@ class OptimizationTab(_Tab):
                                     if rates_arr is not None and i < len(rates_arr)
                                     else 1.0
                                 )
-                                if mode_int in (
-                                    int(InverterMode.DISCHARGE),
-                                    int(InverterMode.DISCHARGE_ZERO_FEED_IN),
-                                ):
+                                if mode_int == int(InverterMode.DISCHARGE_ZERO_FEED_IN):
+                                    # Zero-feed discharge is energy-target based; visualize as full discharge state.
+                                    mode_vals.append(+1.0)
+                                elif mode_int == int(InverterMode.DISCHARGE):
                                     mode_vals.append(+rate)
                                 elif mode_int in (
                                     int(InverterMode.AC_CHARGE),

@@ -1,66 +1,9 @@
 """Linear (MILP) energy-management optimizer using CVXPY + HiGHS.
 
-Formulation
------------
-Decision variables (per optimisable inverter *i*, timestep *t*):
-
-* ``p_ch[i,t]`` ≥ 0 — AC energy consumed for battery charging (Wh)
-* ``p_dc[i,t]`` ≥ 0 — AC energy delivered by battery discharging (Wh)
-* ``b_ch[i,t]`` ∈ {0,1} — charging binary (Big-M bound)
-* ``b_dc[i,t]`` ∈ {0,1} — discharging binary (Big-M bound)
-* ``soc[i,t]`` ≥ 0 — battery state of charge at end of step *t* (Wh)
-
-Grid variables (per timestep):
-
-* ``g_import[t]`` ≥ 0 — energy imported from grid (Wh)
-* ``g_feedin[t]`` ≥ 0 — energy exported to grid (Wh)
-
-Constraints
------------
-Battery dynamics::
-
-    soc[i,0]  = soc_initial[i] + p_ch[i,0]*η_c[i] - p_dc[i,0]/η_d[i]
-    soc[i,t]  = soc[i,t-1]    + p_ch[i,t]*η_c[i] - p_dc[i,t]/η_d[i]
-
-    η_c[i] = ac_to_dc_efficiency × charging_efficiency
-    η_d[i] = discharging_efficiency × dc_to_ac_efficiency
-
-Power bounds (Big-M)::
-
-    p_ch[i,t] ≤ max_charge_power_w[i] × dt × b_ch[i,t]
-    p_dc[i,t] ≤ max_discharge_power_w[i] × dt × b_dc[i,t]
-    b_ch[i,t] + b_dc[i,t] ≤ 1          # no simultaneous charge + discharge
-
-Energy balance (per timestep)::
-
-    g_import[t] − g_feedin[t] = load_wh[t] − pv_total_wh[t]
-                                 + Σ_i p_ch[i,t] − Σ_i p_dc[i,t]
-
-Objectives
-----------
-``MINIMIZE_COST``::
-
-    min  Σ_t [g_import[t]·price[t] − g_feedin[t]·feedin_tariff[t]]
-         − battery_end_value_eur_wh · Σ_i soc[i, T-1]
-
-``MAXIMIZE_SELF_CONSUMPTION``::
-
-    min  Σ_t g_feedin[t]
-         − battery_end_value_eur_wh · Σ_i soc[i, T-1]
-
-The ``battery_end_value_eur_wh`` terminal reward prevents the solver
-from draining batteries at the horizon just to maximise revenue or
-self-consumption in the final steps.
-
-Note on zero-feed-in
---------------------
-The ``zero_feed_in`` flag on an inverter is *not* enforced as a hard LP
-constraint (doing so would require knowing which inverter's discharge
-causes grid export, which depends on all inverters simultaneously).
-Instead, the derived inverter modes are mapped to the
-``DISCHARGE_ZERO_FEED_IN`` / ``AC_CHARGE_ZERO_FEED_IN`` variants when the
-flag is set, so the returned ``SimulationResult`` accurately reflects the
-hardware topology.
+This module builds a topology-aware mathematical model from the same
+core signals that drive GridSimulation (load, PV, battery, prices) and
+solves it with HiGHS. Home appliances are intentionally excluded from
+this LP model for now.
 """
 
 from __future__ import annotations
@@ -69,22 +12,16 @@ import time
 from array import array
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
 
 import cvxpy as cp
 import numpy as np
 from loguru import logger
 
-from src.optimization.simulation import SimulationResult
+from src.optimization.simulation import GridSimulation, SimulationResult
 from src.prediction.prediction import PredictionData
 from src.simulation.devices import InverterMode
 from src.simulation.devices.inverterbase import InverterBase
-
-if TYPE_CHECKING:
-    pass
-
-
-# ── Public types ──────────────────────────────────────────────────────────────
+from src.simulation.grid_interpolator import FraunhoferSCModel
 
 
 class OptimizationObjective(str, Enum):
@@ -95,25 +32,27 @@ class OptimizationObjective(str, Enum):
 
 
 @dataclass
-class LinearSolution:
-    """Solution produced by :class:`LinearOptimizer`.
+class SimulationParityReport:
+    """Difference report between LP result and GridSimulation replay."""
 
-    Attributes:
-        result: Full :class:`~src.optimization.simulation.SimulationResult`
-            reconstructed from the LP optimal values.
-        objective: Which objective was optimised.
-        solver_status: CVXPY solver status string (e.g. ``"optimal"``).
-        solve_time_s: Wall-clock solve time in seconds.
-        inverter_plans: One dict per optimisable inverter with keys
-            ``device_id``, ``modes`` (list of :class:`InverterMode` ints),
-            and ``rates`` (list of floats in [0, 1]).
-    """
+    ok: bool
+    max_abs_soc_error_wh: float
+    max_abs_grid_import_error_wh: float
+    max_abs_feedin_error_wh: float
+    max_abs_cost_error_eur: float
+
+
+@dataclass
+class LinearSolution:
+    """Solution produced by :class:`LinearOptimizer`."""
 
     result: SimulationResult
     objective: OptimizationObjective
     solver_status: str
     solve_time_s: float
     inverter_plans: list[dict]
+    parity_report: SimulationParityReport | None = None
+    simulation_result: SimulationResult | None = None
 
 
 @dataclass
@@ -126,22 +65,40 @@ class _RateSelector:
     y_dc: cp.Variable | None
 
 
-# ── Optimizer ─────────────────────────────────────────────────────────────────
+@dataclass
+class _PreparedInputs:
+    """Numerical input series for one optimization horizon."""
+
+    T: int
+    dt: float
+    load_wh: np.ndarray
+    price: np.ndarray
+    feedin_tariff: np.ndarray
+    pv_by_source: dict[str, np.ndarray]
+
+
+@dataclass
+class _InverterModelBlock:
+    """Decision and helper expressions for one inverter block."""
+
+    inverter: InverterBase
+    p_ch: cp.Expression
+    p_dc: cp.Expression
+    pv_ac: cp.Expression
+    pv_to_bat: cp.Expression
+    soc: cp.Variable | None
+    selector: _RateSelector | None
+    zero_feed_discharge_continuous: bool = False
 
 
 class LinearOptimizer:
-    """MILP energy-management optimizer using CVXPY with the HiGHS backend.
+    """MILP optimizer that builds a modular math model from system topology.
 
     Args:
-        inverters: All :class:`InverterBase` instances in the system.
-            PV-only inverters contribute fixed generation; only inverters
-            with batteries are decision variables.
-        prediction: Fetched :class:`PredictionData` covering the
-            optimisation horizon.
-        battery_end_value_eur_wh: EUR value assigned to each Wh remaining
-            in every battery at the end of the horizon.  A positive value
-            prevents the solver from gaming the objective by unnecessarily
-            draining batteries in the final steps.  Defaults to ``0.0``.
+        inverters: All inverters in the system. Topology determines which
+            variables and constraints are instantiated per inverter.
+        prediction: Aligned prediction channels for the horizon.
+        battery_end_value_eur_wh: Terminal value for battery SoC.
     """
 
     def __init__(
@@ -153,67 +110,197 @@ class LinearOptimizer:
         self.inverters = inverters
         self.prediction = prediction
         self.battery_end_value_eur_wh = battery_end_value_eur_wh
-        self._opt_inverters: list[InverterBase] = [
-            inv for inv in inverters if inv.is_optimizable and inv.battery is not None
-        ]
 
-    # ── Public API ────────────────────────────────────────────────────────
+        min_load_wh = float(min(prediction.load_wh)) if prediction.steps > 0 else 1.0
+        self._sc_model = FraunhoferSCModel(
+            baseload_wh=max(min_load_wh, 1e-6),
+            dt=prediction.dt_hours,
+        )
 
     def solve(
         self,
         objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
         solver_opts: dict | None = None,
+        validate_with_simulation: bool = False,
     ) -> LinearSolution:
-        """Build the MILP, solve it with HiGHS, and return a :class:`LinearSolution`.
+        """Build MILP, solve with HiGHS, and return a :class:`LinearSolution`."""
+        prep = self._prepare_inputs()
+        blocks, g_import, g_feedin, pv_self = self._build_problem(prep)
 
-        Args:
-            objective: Which objective function to optimise.
-            solver_opts: Optional keyword arguments forwarded to CVXPY's
-                ``solve()`` call (e.g. ``{"time_limit": 60}``).
-                By default a practical ``time_limit`` and ``mip_rel_gap``
-                are applied to avoid GUI stalls on larger MILP instances.
+        terminal_reward = self._terminal_reward(blocks)
+        if objective == OptimizationObjective.MINIMIZE_COST:
+            obj_expr = (
+                cp.sum(
+                    cp.multiply(g_import, prep.price) - cp.multiply(g_feedin, prep.feedin_tariff)
+                )
+                - terminal_reward
+            )
+        else:
+            obj_expr = cp.sum(g_feedin) - terminal_reward
 
-        Returns:
-            A :class:`LinearSolution` containing the full simulation result
-            and optimisation metadata.
+        problem = cp.Problem(cp.Minimize(obj_expr), self._constraints)
+        size = problem.size_metrics
+        logger.info(
+            "Solving modular linear problem with objective '{}' and {} scalar variables ({} constraints)",
+            objective.value,
+            size.num_scalar_variables,
+            size.num_scalar_eq_constr + size.num_scalar_leq_constr,
+        )
 
-        Raises:
-            RuntimeError: If the solver fails to find an optimal solution.
-        """
-        T = self.prediction.steps
-        dt = self.prediction.dt_hours
+        opts = {
+            "verbose": False,
+            "time_limit": 30,
+            "mip_rel_gap": 0.02,
+            **(solver_opts or {}),
+        }
+
+        t0 = time.perf_counter()
+        try:
+            problem.solve(solver=cp.HIGHS, **opts)
+        except cp.SolverError as exc:
+            raise RuntimeError(f"CVXPY/HiGHS solver error: {exc}") from exc
+        solve_time = time.perf_counter() - t0
+
+        status = problem.status
+        accepted_statuses = {cp.OPTIMAL, cp.OPTIMAL_INACCURATE}
+        if status == "user_limit" and g_import.value is not None and g_feedin.value is not None:
+            accepted_statuses.add("user_limit")
+
+        if status not in accepted_statuses:
+            raise RuntimeError(
+                f"Optimisation did not converge: solver status='{status}'. "
+                "Check feasibility (battery bounds, rates, and capacities)."
+            )
+
+        if g_import.value is None or g_feedin.value is None:
+            raise RuntimeError("Solver returned no values for grid variables")
+
+        solution = self._build_solution(
+            prep=prep,
+            blocks=blocks,
+            g_import_val=np.asarray(g_import.value, dtype=float),
+            g_feedin_val=np.asarray(g_feedin.value, dtype=float),
+            pv_self_val=np.asarray(pv_self.value, dtype=float),
+            objective=objective,
+            solver_status=status,
+            solve_time=solve_time,
+        )
+
+        if validate_with_simulation:
+            parity, sim_res = self._validate_with_simulation(solution, prep)
+            solution.parity_report = parity
+            solution.simulation_result = sim_res
+
+        return solution
+
+    def _prepare_inputs(self) -> _PreparedInputs:
         pred = self.prediction
+        T = pred.steps
+        dt = pred.dt_hours
 
-        # ── Extract fixed parameters from PredictionData ──────────────
-        price = np.array(pred.electricprice.to_list(), dtype=float)
-        feedin_tariff = np.array(pred.feedintariff.to_list(), dtype=float)
-        # Load is already in Wh (no conversion needed)
+        price_series = pred.electricprice
+        if price_series is None:
+            price = np.zeros(T, dtype=float)
+        else:
+            price = np.array(price_series.to_list(), dtype=float)
+
+        tariff_series = pred.feedintariff
+        if tariff_series is None:
+            feedin_tariff = np.zeros(T, dtype=float)
+        else:
+            feedin_tariff = np.array(tariff_series.to_list(), dtype=float)
+
         load_wh = np.array(pred.load_wh.to_list(), dtype=float)
+        pv_by_source = {
+            k: np.array(v.to_list(), dtype=float) for k, v in pred.pv_by_inverter.items()
+        }
 
-        # Aggregate PV generation: already in Wh per step (no conversion needed)
-        pv_total_wh = np.zeros(T, dtype=float)
-        pv_per_inverter: dict[str, np.ndarray] = {}
-        for inverter_id, pv_series in pred.pv_by_inverter.items():
-            arr = np.array(pv_series.to_list(), dtype=float)
-            pv_total_wh += arr
-            pv_per_inverter[inverter_id] = arr
+        return _PreparedInputs(
+            T=T,
+            dt=dt,
+            load_wh=load_wh,
+            price=price,
+            feedin_tariff=feedin_tariff,
+            pv_by_source=pv_by_source,
+        )
 
-        # ── Decision variables ────────────────────────────────────────
-        # Discrete sub-states per inverter:
-        #   IDLE + one of charge-rate states + one of discharge-rate states.
-        p_ch: dict[str, cp.Expression] = {}
-        p_dc: dict[str, cp.Expression] = {}
-        soc: dict[str, cp.Variable] = {}
-        mode_selectors: dict[str, _RateSelector] = {}
+    def _build_problem(
+        self,
+        prep: _PreparedInputs,
+    ) -> tuple[list[_InverterModelBlock], cp.Variable, cp.Variable, cp.Variable]:
+        T = prep.T
+        dt = prep.dt
 
-        for inv in self._opt_inverters:
-            inv_id = inv.device_id
-            bat = inv.battery
-            if bat is None:
-                raise RuntimeError(f"Optimizable inverter '{inv_id}' has no battery")
-            max_ch_wh = bat.max_charge_power_w * dt
-            max_dc_wh = bat.max_discharge_power_w * dt
+        self._constraints: list[cp.Constraint] = []
+        blocks: list[_InverterModelBlock] = []
 
+        g_import = cp.Variable(T, nonneg=True, name="g_import")
+        g_feedin = cp.Variable(T, nonneg=True, name="g_feedin")
+        pv_self = cp.Variable(T, nonneg=True, name="pv_self")
+
+        total_p_ch_terms: list[cp.Expression] = []
+        total_p_dc_terms: list[cp.Expression] = []
+        total_pv_ac_terms: list[cp.Expression] = []
+
+        mapped_pv_sources: set[str] = set()
+
+        for inv in self.inverters:
+            block = self._build_inverter_block(inv, prep)
+            blocks.append(block)
+
+            total_p_ch_terms.append(block.p_ch)
+            total_p_dc_terms.append(block.p_dc)
+            total_pv_ac_terms.append(block.pv_ac)
+
+            pv_src = inv.parameters.pv_source
+            if pv_src:
+                mapped_pv_sources.add(pv_src)
+
+        for src, arr in prep.pv_by_source.items():
+            if src not in mapped_pv_sources:
+                total_pv_ac_terms.append(cp.Constant(arr))
+
+        total_p_ch = self._sum_terms(total_p_ch_terms, prep.T)
+        total_p_dc = self._sum_terms(total_p_dc_terms, prep.T)
+        total_pv_ac = self._sum_terms(total_pv_ac_terms, prep.T)
+
+        for t in range(T):
+            pv0 = max(
+                float(total_pv_ac.value[t]) if total_pv_ac.value is not None else prep.load_wh[t],
+                1e-6,
+            )
+            load0 = max(float(prep.load_wh[t]), 1e-6)
+            lc = self._sc_model.linearize(pv_0=pv0, load_0=load0)
+            rhs_fixed = lc.rhs_fixed_load(load=load0)
+
+            self._constraints.append(pv_self[t] - lc.c_pv * total_pv_ac[t] <= rhs_fixed)
+            self._constraints.append(pv_self[t] <= total_pv_ac[t])
+            self._constraints.append(pv_self[t] <= prep.load_wh[t])
+
+        # Mirrors current simulation correction logic:
+        # corrected_end_load = load + p_ch - p_dc + pv_ac - pv_self
+        self._constraints.append(
+            g_import - g_feedin == prep.load_wh + total_p_ch - total_p_dc + total_pv_ac - pv_self
+        )
+
+        return blocks, g_import, g_feedin, pv_self
+
+    def _build_inverter_block(
+        self, inv: InverterBase, prep: _PreparedInputs
+    ) -> _InverterModelBlock:
+        T = prep.T
+        dt = prep.dt
+        inv_id = inv.device_id
+
+        has_battery = inv.battery is not None
+        has_pv = inv.parameters.pv_source is not None
+        has_zero_feed_discharge = InverterMode.DISCHARGE_ZERO_FEED_IN in inv.available_modes
+        has_rate_discharge = InverterMode.DISCHARGE in inv.available_modes
+
+        selector: _RateSelector | None = None
+        zero_feed_discharge_continuous = False
+
+        if has_battery and inv.is_optimizable:
             charge_rates = self._get_charge_rates(inv)
             discharge_rates = self._get_discharge_rates(inv)
 
@@ -228,235 +315,174 @@ class LinearOptimizer:
                 else None
             )
 
-            if y_ch is not None:
-                p_ch_expr: cp.Expression = max_ch_wh * (np.array(charge_rates, dtype=float) @ y_ch)
-            else:
-                p_ch_expr = cp.Constant(np.zeros(T, dtype=float))
-            if y_dc is not None:
-                p_dc_expr: cp.Expression = max_dc_wh * (
-                    np.array(discharge_rates, dtype=float) @ y_dc
-                )
-            else:
-                p_dc_expr = cp.Constant(np.zeros(T, dtype=float))
+            max_ch_wh = inv.battery.max_charge_power_w * dt
+            max_dc_wh = inv.battery.max_discharge_power_w * dt
 
-            p_ch[inv_id] = p_ch_expr
-            p_dc[inv_id] = p_dc_expr
-            soc[inv_id] = cp.Variable(T, nonneg=True, name=f"soc_{inv_id}")
-            mode_selectors[inv_id] = _RateSelector(
+            if y_ch is not None:
+                p_ch = max_ch_wh * (np.array(charge_rates, dtype=float) @ y_ch)
+            else:
+                p_ch = cp.Constant(np.zeros(T, dtype=float))
+
+            if y_dc is not None:
+                p_dc = max_dc_wh * (np.array(discharge_rates, dtype=float) @ y_dc)
+            elif has_zero_feed_discharge and not has_rate_discharge:
+                # Zero-feed discharge is energy-target driven in simulation,
+                # so model discharge continuously (bounded only by physics).
+                p_dc = cp.Variable(T, nonneg=True, name=f"p_dc_{inv_id}")
+                self._constraints.append(p_dc <= max_dc_wh)
+                zero_feed_discharge_continuous = True
+            else:
+                p_dc = cp.Constant(np.zeros(T, dtype=float))
+
+            selector = _RateSelector(
                 charge_rates=charge_rates,
                 discharge_rates=discharge_rates,
                 y_ch=y_ch,
                 y_dc=y_dc,
             )
 
-        g_import = cp.Variable(T, nonneg=True, name="g_import")
-        g_feedin = cp.Variable(T, nonneg=True, name="g_feedin")
+            if y_ch is not None and y_dc is not None:
+                self._constraints.extend(
+                    [
+                        cp.sum(y_ch, axis=0) <= 1,
+                        cp.sum(y_dc, axis=0) <= 1,
+                        cp.sum(y_ch, axis=0) + cp.sum(y_dc, axis=0) <= 1,
+                    ]
+                )
+            elif y_ch is not None:
+                self._constraints.append(cp.sum(y_ch, axis=0) <= 1)
+                if zero_feed_discharge_continuous:
+                    # Prevent simultaneous AC-charge and discharge.
+                    self._constraints.append(p_dc <= max_dc_wh * (1 - cp.sum(y_ch, axis=0)))
+            elif y_dc is not None:
+                self._constraints.append(cp.sum(y_dc, axis=0) <= 1)
 
-        # ── Constraints ───────────────────────────────────────────────
-        constraints: list[cp.Constraint] = []
-
-        if self._opt_inverters:
-            total_p_ch: cp.Expression = cp.sum(
-                cp.vstack([p_ch[inv.device_id] for inv in self._opt_inverters]), axis=0
-            )
-            total_p_dc: cp.Expression = cp.sum(
-                cp.vstack([p_dc[inv.device_id] for inv in self._opt_inverters]), axis=0
-            )
         else:
-            total_p_ch = np.zeros(T)
-            total_p_dc = np.zeros(T)
+            p_ch = cp.Constant(np.zeros(T, dtype=float))
+            p_dc = cp.Constant(np.zeros(T, dtype=float))
 
-        for inv in self._opt_inverters:
-            inv_id = inv.device_id
+        if has_pv:
+            pv_src = inv.parameters.pv_source
+            pv_pred = prep.pv_by_source.get(pv_src, np.zeros(T, dtype=float))
+            pv_ac = cp.Variable(T, nonneg=True, name=f"pv_ac_{inv_id}")
+            if has_battery:
+                pv_to_bat = cp.Variable(T, nonneg=True, name=f"pv_to_bat_{inv_id}")
+                self._constraints.append(pv_ac + pv_to_bat <= pv_pred)
+            else:
+                pv_to_bat = cp.Constant(np.zeros(T, dtype=float))
+                self._constraints.append(pv_ac <= pv_pred)
+        else:
+            pv_ac = cp.Constant(np.zeros(T, dtype=float))
+            pv_to_bat = cp.Constant(np.zeros(T, dtype=float))
+
+        max_ac_out = inv.parameters.max_ac_output_power_w * dt
+        self._constraints.append(pv_ac + p_dc <= max_ac_out)
+
+        if has_battery:
             bat = inv.battery
             if bat is None:
-                raise RuntimeError(f"Optimizable inverter '{inv_id}' has no battery")
-            # Cascade efficiencies
-            eta_c = inv.parameters.ac_to_dc_efficiency * bat.charging_efficiency
+                raise RuntimeError(f"Battery block build failed for inverter '{inv_id}'")
+
+            soc = cp.Variable(T, nonneg=True, name=f"soc_{inv_id}")
+            eta_c_ac = inv.parameters.ac_to_dc_efficiency * bat.charging_efficiency
+            eta_c_pv = bat.charging_efficiency
             eta_d = bat.discharging_efficiency * inv.parameters.dc_to_ac_efficiency
 
-            selector = mode_selectors[inv_id]
-            y_ch = selector.y_ch
-            y_dc = selector.y_dc
-
-            # At each step: at most one sub-state active (charge or discharge), else IDLE.
-            if y_ch is not None and y_dc is not None:
-                constraints += [
-                    cp.sum(y_ch, axis=0) <= 1,
-                    cp.sum(y_dc, axis=0) <= 1,
-                    cp.sum(y_ch, axis=0) + cp.sum(y_dc, axis=0) <= 1,
-                ]
-            elif y_ch is not None:
-                constraints += [cp.sum(y_ch, axis=0) <= 1]
-            elif y_dc is not None:
-                constraints += [cp.sum(y_dc, axis=0) <= 1]
-
-            # Battery dynamics (vectorised difference constraint)
-            delta = p_ch[inv_id] * eta_c - p_dc[inv_id] / eta_d
+            delta = p_ch * eta_c_ac + pv_to_bat * eta_c_pv - p_dc / eta_d
             soc_init = float(bat.soc_wh)
-            constraints.append(soc[inv_id][0] == soc_init + delta[0])
+
+            self._constraints.append(soc[0] == soc_init + delta[0])
             if T > 1:
-                constraints.append(soc[inv_id][1:] == soc[inv_id][:-1] + delta[1:])
+                self._constraints.append(soc[1:] == soc[:-1] + delta[1:])
+            self._constraints.extend([soc >= bat.min_soc_wh, soc <= bat.max_soc_wh])
+        else:
+            soc = None
 
-            # SoC bounds
-            constraints += [
-                soc[inv_id] >= bat.min_soc_wh,
-                soc[inv_id] <= bat.max_soc_wh,
-            ]
-
-        # Energy balance (vectorised over all T timesteps)
-        constraints.append(g_import - g_feedin == load_wh - pv_total_wh + total_p_ch - total_p_dc)
-
-        # ── Objective ─────────────────────────────────────────────────
-        bat_terminal_reward: cp.Expression | float = 0.0
-        if self.battery_end_value_eur_wh != 0.0 and self._opt_inverters:
-            bat_terminal_reward = self.battery_end_value_eur_wh * sum(
-                soc[inv.device_id][-1] for inv in self._opt_inverters
-            )
-
-        if objective == OptimizationObjective.MINIMIZE_COST:
-            cost_term = cp.sum(cp.multiply(g_import, price) - cp.multiply(g_feedin, feedin_tariff))
-            obj_expr = cost_term - bat_terminal_reward
-        else:  # MAXIMIZE_SELF_CONSUMPTION: minimise grid feed-in
-            obj_expr = cp.sum(g_feedin) - bat_terminal_reward
-
-        prob = cp.Problem(cp.Minimize(obj_expr), constraints)
-        size = prob.size_metrics
-        logger.info(
-            "Solving linear optimisation problem with objective '{}' and {} scalar variables ({} constraints)...",
-            objective.value,
-            size.num_scalar_variables,
-            size.num_scalar_eq_constr + size.num_scalar_leq_constr,
-        )
-
-        # ── Solve ─────────────────────────────────────────────────────
-        t0 = time.perf_counter()
-        # Practical defaults for interactive usage (GUI): bound runtime and
-        # allow a small MIP gap so an incumbent is returned quickly.
-        opts: dict = {
-            "verbose": False,
-            "time_limit": 30,
-            "mip_rel_gap": 0.02,
-            **(solver_opts or {}),
-        }
-        try:
-            prob.solve(solver=cp.HIGHS, **opts)
-        except cp.SolverError as exc:
-            raise RuntimeError(f"CVXPY/HiGHS solver error: {exc}") from exc
-        solve_time = time.perf_counter() - t0
-
-        status = prob.status
-        logger.info(
-            "LinearOptimizer: status={} objective={} time={:.2f}s value={}",
-            status,
-            objective.value,
-            solve_time,
-            prob.value,
-        )
-
-        accepted_statuses = {
-            cp.OPTIMAL,
-            cp.OPTIMAL_INACCURATE,
-        }
-        # HiGHS may stop at time/gap limits with a valid incumbent solution.
-        if status == "user_limit" and g_import.value is not None and g_feedin.value is not None:
-            logger.warning(
-                "LinearOptimizer reached user_limit; returning incumbent solution. "
-                "Consider increasing 'time_limit' for higher optimality guarantees."
-            )
-            accepted_statuses.add("user_limit")
-
-        if status not in accepted_statuses:
-            raise RuntimeError(
-                f"Optimisation did not converge: solver status='{status}'. "
-                "Check that the problem is feasible (battery capacity and SoC bounds)."
-            )
-
-        if g_import.value is None or g_feedin.value is None:
-            raise RuntimeError("Solver returned no values for grid variables")
-
-        # ── Build result ───────────────────────────────────────────────
-        return self._build_solution(
-            T=T,
-            dt=dt,
-            load_wh=load_wh,
-            pv_total_wh=pv_total_wh,
-            pv_per_inverter=pv_per_inverter,
-            price=price,
-            feedin_tariff=feedin_tariff,
+        return _InverterModelBlock(
+            inverter=inv,
             p_ch=p_ch,
             p_dc=p_dc,
+            pv_ac=pv_ac,
+            pv_to_bat=pv_to_bat,
             soc=soc,
-            mode_selectors=mode_selectors,
-            g_import_val=g_import.value,
-            g_feedin_val=g_feedin.value,
-            objective=objective,
-            solver_status=status,
-            solve_time=solve_time,
+            selector=selector,
+            zero_feed_discharge_continuous=zero_feed_discharge_continuous,
         )
 
+    def _terminal_reward(self, blocks: list[_InverterModelBlock]) -> cp.Expression | float:
+        if self.battery_end_value_eur_wh == 0.0:
+            return 0.0
+
+        terminal_terms: list[cp.Expression] = []
+        for block in blocks:
+            if block.soc is not None:
+                terminal_terms.append(block.soc[-1])
+
+        if not terminal_terms:
+            return 0.0
+
+        return self.battery_end_value_eur_wh * cp.sum(cp.hstack(terminal_terms))
+
+    @staticmethod
+    def _sum_terms(terms: list[cp.Expression], T: int) -> cp.Expression:
+        if not terms:
+            return cp.Constant(np.zeros(T, dtype=float))
+        if len(terms) == 1:
+            return terms[0]
+        return cp.sum(cp.vstack(terms), axis=0)
+
     def _get_charge_rates(self, inv: InverterBase) -> tuple[float, ...]:
-        """Return supported discrete AC-charge rates in (0, 1]."""
         if InverterMode.AC_CHARGE not in inv.available_modes:
             return tuple()
-
-        raw_rates = tuple(getattr(inv, "charge_rates", tuple()))
-        if not raw_rates:
-            raw_rates = tuple(getattr(inv.parameters, "ac_rates", tuple()))
-
-        rates = tuple(sorted({float(r) for r in raw_rates if 0.0 < float(r) <= 1.0}))
+        raw = tuple(getattr(inv, "charge_rates", tuple())) or tuple(
+            getattr(inv.parameters, "ac_rates", tuple())
+        )
+        rates = tuple(sorted({float(r) for r in raw if 0.0 < float(r) <= 1.0}))
         return rates or (1.0,)
 
     def _get_discharge_rates(self, inv: InverterBase) -> tuple[float, ...]:
-        """Return supported discrete AC-discharge rates in (0, 1]."""
-        has_discharge_mode = (
-            InverterMode.DISCHARGE in inv.available_modes
-            or InverterMode.DISCHARGE_ZERO_FEED_IN in inv.available_modes
-        )
-        if not has_discharge_mode:
+        # DISCHARGE_ZERO_FEED_IN is handled as continuous discharge variable,
+        # not as discrete-rate states.
+        if InverterMode.DISCHARGE not in inv.available_modes:
             return tuple()
 
-        raw_rates = tuple(getattr(inv, "discharge_rates", tuple()))
-        if not raw_rates:
-            raw_rates = tuple(getattr(inv.parameters, "ac_rates", tuple()))
-
-        rates = tuple(sorted({float(r) for r in raw_rates if 0.0 < float(r) <= 1.0}))
+        raw = tuple(getattr(inv, "discharge_rates", tuple())) or tuple(
+            getattr(inv.parameters, "ac_rates", tuple())
+        )
+        rates = tuple(sorted({float(r) for r in raw if 0.0 < float(r) <= 1.0}))
         return rates or (1.0,)
 
-    # ── Internal helpers ───────────────────────────────────────────────────
+    @staticmethod
+    def _expr_to_vec(expr: cp.Expression, T: int) -> np.ndarray:
+        val = expr.value
+        if val is None:
+            return np.zeros(T, dtype=float)
+        arr = np.asarray(val, dtype=float)
+        if arr.ndim == 0:
+            return np.full(T, float(arr), dtype=float)
+        return np.maximum(arr, 0.0)
 
     def _build_solution(
         self,
         *,
-        T: int,
-        dt: float,
-        load_wh: np.ndarray,
-        pv_total_wh: np.ndarray,
-        pv_per_inverter: dict[str, np.ndarray],
-        price: np.ndarray,
-        feedin_tariff: np.ndarray,
-        p_ch: dict[str, cp.Expression],
-        p_dc: dict[str, cp.Expression],
-        soc: dict[str, cp.Variable],
-        mode_selectors: dict[str, _RateSelector],
+        prep: _PreparedInputs,
+        blocks: list[_InverterModelBlock],
         g_import_val: np.ndarray,
         g_feedin_val: np.ndarray,
+        pv_self_val: np.ndarray,
         objective: OptimizationObjective,
         solver_status: str,
         solve_time: float,
     ) -> LinearSolution:
-        _EPS = 1e-4  # threshold for treating power as non-zero
+        T = prep.T
+        dt = prep.dt
 
-        # Clamp numerical noise to non-negative
-        gi = np.maximum(np.asarray(g_import_val, dtype=float), 0.0)
-        gf = np.maximum(np.asarray(g_feedin_val, dtype=float), 0.0)
+        gi = np.maximum(g_import_val, 0.0)
+        gf = np.maximum(g_feedin_val, 0.0)
+        pv_self = np.maximum(pv_self_val, 0.0)
 
-        costs_per_dt = array("f", (gi * price).tolist())
-        revenue_per_dt = array("f", (gf * feedin_tariff).tolist())
-        grid_import_wh = array("f", gi.tolist())
-        feedin_wh = array("f", gf.tolist())
-        self_cons_wh = array("f", np.maximum(load_wh - gi, 0.0).tolist())
-        elec_price_series = array("f", price.tolist())
+        costs = gi * prep.price
+        revenue = gf * prep.feedin_tariff
 
         losses_arr = np.zeros(T, dtype=float)
         battery_wh_per_dt: dict[str, array] = {}
@@ -466,96 +492,47 @@ class LinearOptimizer:
         inv_rates_per_dt: dict[str, array] = {}
         inverter_plans: list[dict] = []
 
-        # PV generation per inverter (fixed, from PredictionData)
-        for inv in self.inverters:
-            pv_src = inv.parameters.pv_source
-            if pv_src and pv_src in pv_per_inverter:
-                solar_gen_per_dt[inv.device_id] = array("f", pv_per_inverter[pv_src].tolist())
-
-        # Per-inverter battery and mode extraction
-        for inv in self._opt_inverters:
+        for block in blocks:
+            inv = block.inverter
             inv_id = inv.device_id
-            bat = inv.battery
-            if bat is None:
-                raise RuntimeError(f"Optimizable inverter '{inv_id}' has no battery")
-            eta_c = inv.parameters.ac_to_dc_efficiency * bat.charging_efficiency
-            eta_d = bat.discharging_efficiency * inv.parameters.dc_to_ac_efficiency
 
-            ch_vals = np.maximum(np.asarray(p_ch[inv_id].value, dtype=float), 0.0)
-            dc_vals = np.maximum(np.asarray(p_dc[inv_id].value, dtype=float), 0.0)
-            soc_vals = np.maximum(np.asarray(soc[inv_id].value, dtype=float), 0.0)
+            p_ch = self._expr_to_vec(block.p_ch, T)
+            p_dc = self._expr_to_vec(block.p_dc, T)
+            pv_ac = self._expr_to_vec(block.pv_ac, T)
+            pv_to_bat = self._expr_to_vec(block.pv_to_bat, T)
 
-            # Accumulate losses
-            losses_arr += ch_vals * (1.0 - eta_c) + dc_vals * (1.0 / eta_d - 1.0)
+            if np.any(pv_ac > 1e-9):
+                solar_gen_per_dt[inv_id] = array("f", pv_ac.tolist())
 
-            battery_wh_per_dt[inv_id] = array("f", soc_vals.tolist())
-            battery_soc_pct[inv_id] = array("f", (soc_vals * (100.0 / bat.capacity_wh)).tolist())
+            if inv.battery is not None and block.soc is not None:
+                bat = inv.battery
+                soc_vals = np.maximum(np.asarray(block.soc.value, dtype=float), 0.0)
+                battery_wh_per_dt[inv_id] = array("f", soc_vals.tolist())
+                battery_soc_pct[inv_id] = array(
+                    "f", (soc_vals * (100.0 / bat.capacity_wh)).tolist()
+                )
 
-            # Derive inverter modes and normalised AC rate from selected sub-states
-            zero_feed_in = inv.parameters.zero_feed_in
-            max_ch_wh = bat.max_charge_power_w * dt
-            max_dc_wh = bat.max_discharge_power_w * dt
+                eta_c_ac = inv.parameters.ac_to_dc_efficiency * bat.charging_efficiency
+                eta_c_pv = bat.charging_efficiency
+                eta_d = bat.discharging_efficiency * inv.parameters.dc_to_ac_efficiency
+                losses_arr += p_ch * (1.0 - eta_c_ac)
+                losses_arr += pv_to_bat * (1.0 - eta_c_pv)
+                losses_arr += p_dc * (1.0 / eta_d - 1.0)
 
-            selector = mode_selectors[inv_id]
-            ch_rate_levels = selector.charge_rates
-            dc_rate_levels = selector.discharge_rates
-            y_ch = selector.y_ch
-            y_dc = selector.y_dc
-
-            y_ch_vals = np.asarray(y_ch.value, dtype=float) if y_ch is not None else None
-            y_dc_vals = np.asarray(y_dc.value, dtype=float) if y_dc is not None else None
-
-            modes: list[int] = []
-            rates: list[float] = []
-
-            for t in range(T):
-                ch = float(ch_vals[t])
-                dc = float(dc_vals[t])
-                if ch > _EPS:
-                    if InverterMode.AC_CHARGE in inv.available_modes:
-                        mode = int(InverterMode.AC_CHARGE)
-                    else:
-                        mode = int(InverterMode.AC_CHARGE_ZERO_FEED_IN)
-
-                    if y_ch_vals is not None and y_ch_vals.shape[1] > t and ch_rate_levels:
-                        k = int(np.argmax(y_ch_vals[:, t]))
-                        rate = float(ch_rate_levels[k])
-                    else:
-                        rate = min(ch / max_ch_wh, 1.0) if max_ch_wh > _EPS else 1.0
-                elif dc > _EPS:
-                    if InverterMode.DISCHARGE in inv.available_modes:
-                        mode = int(InverterMode.DISCHARGE)
-                    else:
-                        mode = (
-                            int(InverterMode.DISCHARGE_ZERO_FEED_IN)
-                            if zero_feed_in
-                            else int(InverterMode.DISCHARGE)
-                        )
-
-                    if y_dc_vals is not None and y_dc_vals.shape[1] > t and dc_rate_levels:
-                        k = int(np.argmax(y_dc_vals[:, t]))
-                        rate = float(dc_rate_levels[k])
-                    else:
-                        rate = min(dc / max_dc_wh, 1.0) if max_dc_wh > _EPS else 1.0
-                else:
-                    mode = int(InverterMode.IDLE)
-                    rate = 0.0
-
-                modes.append(mode)
-                rates.append(rate)
-
+            # Build mode/rate series for simulation replay and UI output.
+            modes, rates = self._extract_modes_and_rates(block, p_ch, p_dc, dt)
             inv_modes_per_dt[inv_id] = array("b", modes)
             inv_rates_per_dt[inv_id] = array("f", rates)
             inverter_plans.append({"device_id": inv_id, "modes": modes, "rates": rates})
 
         result = SimulationResult(
-            costs_per_dt=costs_per_dt,
-            revenue_per_dt=revenue_per_dt,
-            grid_import_wh_per_dt=grid_import_wh,
-            self_consumption_wh_per_dt=self_cons_wh,
-            feedin_wh_per_dt=feedin_wh,
+            costs_per_dt=array("f", costs.tolist()),
+            revenue_per_dt=array("f", revenue.tolist()),
+            grid_import_wh_per_dt=array("f", gi.tolist()),
+            self_consumption_wh_per_dt=array("f", pv_self.tolist()),
+            feedin_wh_per_dt=array("f", gf.tolist()),
             losses_wh_per_dt=array("f", losses_arr.tolist()),
-            electricity_price_per_dt=elec_price_series,
+            electricity_price_per_dt=array("f", prep.price.tolist()),
             inverter_modes_per_dt=inv_modes_per_dt,
             inverter_ac_rate_per_dt=inv_rates_per_dt,
             solar_generation_wh_per_dt=solar_gen_per_dt,
@@ -570,3 +547,154 @@ class LinearOptimizer:
             solve_time_s=solve_time,
             inverter_plans=inverter_plans,
         )
+
+    def _extract_modes_and_rates(
+        self,
+        block: _InverterModelBlock,
+        p_ch: np.ndarray,
+        p_dc: np.ndarray,
+        dt: float,
+    ) -> tuple[list[int], list[float]]:
+        inv = block.inverter
+        T = len(p_ch)
+        eps = 1e-4
+        modes: list[int] = []
+        rates: list[float] = []
+
+        bat = inv.battery
+        max_ch_wh = bat.max_charge_power_w * dt if bat is not None else 0.0
+        max_dc_wh = bat.max_discharge_power_w * dt if bat is not None else 0.0
+
+        y_ch_vals = None
+        y_dc_vals = None
+        ch_rate_levels: tuple[float, ...] = tuple()
+        dc_rate_levels: tuple[float, ...] = tuple()
+        if block.selector is not None:
+            ch_rate_levels = block.selector.charge_rates
+            dc_rate_levels = block.selector.discharge_rates
+            if block.selector.y_ch is not None:
+                y_ch_vals = np.asarray(block.selector.y_ch.value, dtype=float)
+            if block.selector.y_dc is not None:
+                y_dc_vals = np.asarray(block.selector.y_dc.value, dtype=float)
+
+        for t in range(T):
+            ch = float(p_ch[t])
+            dc = float(p_dc[t])
+
+            if ch > eps:
+                mode = (
+                    int(InverterMode.AC_CHARGE)
+                    if InverterMode.AC_CHARGE in inv.available_modes
+                    else int(InverterMode.AC_CHARGE_ZERO_FEED_IN)
+                )
+                if y_ch_vals is not None and y_ch_vals.shape[1] > t and ch_rate_levels:
+                    k = int(np.argmax(y_ch_vals[:, t]))
+                    rate = float(ch_rate_levels[k])
+                else:
+                    rate = min(ch / max_ch_wh, 1.0) if max_ch_wh > eps else 1.0
+            elif dc > eps:
+                if InverterMode.DISCHARGE in inv.available_modes:
+                    mode = int(InverterMode.DISCHARGE)
+                else:
+                    mode = (
+                        int(InverterMode.DISCHARGE_ZERO_FEED_IN)
+                        if inv.parameters.zero_feed_in
+                        else int(InverterMode.DISCHARGE)
+                    )
+                if mode == int(InverterMode.DISCHARGE_ZERO_FEED_IN):
+                    # Zero-feed discharge uses energy_wh in simulation; no ac_rate.
+                    rate = 0.0
+                elif y_dc_vals is not None and y_dc_vals.shape[1] > t and dc_rate_levels:
+                    k = int(np.argmax(y_dc_vals[:, t]))
+                    rate = float(dc_rate_levels[k])
+                else:
+                    rate = min(dc / max_dc_wh, 1.0) if max_dc_wh > eps else 1.0
+            else:
+                mode = int(InverterMode.IDLE)
+                rate = 0.0
+
+            modes.append(mode)
+            rates.append(rate)
+
+        return modes, rates
+
+    def _validate_with_simulation(
+        self,
+        solution: LinearSolution,
+        prep: _PreparedInputs,
+    ) -> tuple[SimulationParityReport, SimulationResult | None]:
+        sim = GridSimulation(
+            prediction=self.prediction, inverters=self.inverters, home_appliances=None
+        )
+
+        modes: dict[str, array] = {}
+        rates: dict[str, array] = {}
+
+        for inv in self.inverters:
+            inv_id = inv.device_id
+            plan = next((p for p in solution.inverter_plans if p["device_id"] == inv_id), None)
+            if plan is None:
+                modes[inv_id] = array("i", [int(InverterMode.IDLE)] * prep.T)
+                rates[inv_id] = array("f", [0.0] * prep.T)
+            else:
+                modes[inv_id] = array("i", plan["modes"])
+                rates[inv_id] = array("f", plan["rates"])
+
+        sim_result = sim.simulate(
+            inverter_modes=modes,
+            inverter_ac_rates=rates,
+            appliance_load=None,
+            start_idx=0,
+            dt=prep.dt,
+        )
+        if sim_result is None:
+            return (
+                SimulationParityReport(
+                    ok=False,
+                    max_abs_soc_error_wh=float("inf"),
+                    max_abs_grid_import_error_wh=float("inf"),
+                    max_abs_feedin_error_wh=float("inf"),
+                    max_abs_cost_error_eur=float("inf"),
+                ),
+                None,
+            )
+
+        lp = solution.result
+        gi_err = float(
+            np.max(
+                np.abs(
+                    np.asarray(lp.grid_import_wh_per_dt)
+                    - np.asarray(sim_result.grid_import_wh_per_dt)
+                )
+            )
+        )
+        gf_err = float(
+            np.max(
+                np.abs(np.asarray(lp.feedin_wh_per_dt) - np.asarray(sim_result.feedin_wh_per_dt))
+            )
+        )
+        cost_err = float(
+            np.max(np.abs(np.asarray(lp.costs_per_dt) - np.asarray(sim_result.costs_per_dt)))
+        )
+
+        soc_err = 0.0
+        shared_ids = set(lp.battery_wh_per_dt).intersection(sim_result.battery_wh_per_dt)
+        for inv_id in shared_ids:
+            cur = float(
+                np.max(
+                    np.abs(
+                        np.asarray(lp.battery_wh_per_dt[inv_id])
+                        - np.asarray(sim_result.battery_wh_per_dt[inv_id])
+                    )
+                )
+            )
+            soc_err = max(soc_err, cur)
+
+        report = SimulationParityReport(
+            ok=(soc_err <= 1e-2 and gi_err <= 1e-2 and gf_err <= 1e-2 and cost_err <= 1e-4),
+            max_abs_soc_error_wh=soc_err,
+            max_abs_grid_import_error_wh=gi_err,
+            max_abs_feedin_error_wh=gf_err,
+            max_abs_cost_error_eur=cost_err,
+        )
+        return report, sim_result

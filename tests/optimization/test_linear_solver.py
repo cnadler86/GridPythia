@@ -95,7 +95,7 @@ class TestLinearSolverHybridEconomics:
 
         # High-price period should discharge in zero-feed-in mode.
         assert plan["modes"][2] == int(InverterMode.DISCHARGE_ZERO_FEED_IN)
-        assert plan["rates"][2] > 0.0
+        assert plan["rates"][2] == pytest.approx(0.0, abs=1e-6)
 
     def test_charge_when_low_period_is_profitable_after_roundtrip(self) -> None:
         """If high > low/roundtrip, solver should charge in low period before discharging at high."""
@@ -153,3 +153,66 @@ class TestLinearSolverHybridEconomics:
         plan = sol.inverter_plans[0]
         assert plan["modes"][0] != int(InverterMode.DISCHARGE_ZERO_FEED_IN)
         assert plan["modes"][0] != int(InverterMode.DISCHARGE)
+
+    def test_zero_feed_discharge_can_compensate_full_load_without_rate(self) -> None:
+        """Zero-feed discharge should be energy-target driven, not rate driven."""
+        pred = _make_prediction(
+            load_w=[400.0],
+            price_eur_wh=[0.00060],
+        )
+        inv = _make_hybrid_inverter(roundtrip_efficiency=0.8)
+
+        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        plan = sol.inverter_plans[0]
+
+        assert plan["modes"][0] == int(InverterMode.DISCHARGE_ZERO_FEED_IN)
+        assert plan["rates"][0] == pytest.approx(0.0, abs=1e-6)
+        assert float(sol.result.grid_import_wh_per_dt[0]) == pytest.approx(0.0, abs=1e-3)
+
+    def test_simulation_parity_report_for_no_pv_case(self) -> None:
+        """With no PV signal, LP replay should match simulation very closely."""
+        pred = _make_prediction(
+            load_w=[250.0, 250.0, 1200.0],
+            price_eur_wh=[0.00031, 0.00029, 0.00060],
+        )
+        eta = 0.8**0.5
+        battery = Battery(
+            BatteryParameters(
+                device_id="battery_v2g",
+                capacity_wh=1000,
+                charging_efficiency=eta,
+                discharging_efficiency=eta,
+                max_charge_power_w=500,
+                max_discharge_power_w=1000,
+                initial_soc_percentage=50,
+                min_soc_percentage=0,
+                max_soc_percentage=100,
+            ),
+            prediction_hours=3,
+        )
+        inv = InverterBase(
+            InverterParameters(
+                device_id="hybrid_v2g",
+                battery_id="battery_v2g",
+                pv_source="hybrid_v2g",
+                max_ac_output_power_w=1000,
+                max_ac_charge_power_w=500,
+                dc_to_ac_efficiency=1.0,
+                ac_to_dc_efficiency=1.0,
+                zero_feed_in=False,
+                ac_rates=(0.5, 1.0),
+            ),
+            battery=battery,
+        )
+
+        sol = LinearOptimizer([inv], pred).solve(
+            OptimizationObjective.MINIMIZE_COST,
+            validate_with_simulation=True,
+        )
+
+        assert sol.parity_report is not None
+        assert sol.simulation_result is not None
+        assert sol.parity_report.ok
+        assert sol.parity_report.max_abs_soc_error_wh <= 1e-2
+        assert sol.parity_report.max_abs_grid_import_error_wh <= 1e-2
+        assert sol.parity_report.max_abs_feedin_error_wh <= 1e-2
