@@ -180,6 +180,7 @@ class TestPVForecastAkkudoktor:
         mock_req.return_value = _make_akkudoktor_response(START, n_hours=48)
         result = await self._make_provider().fetch(_ts(dt=0.25))
         assert len(result) == 96
+        assert result[40] == pytest.approx(250.0)
 
     @patch.object(PVForecastAkkudoktor, "_request", new_callable=AsyncMock)
     async def test_no_negative_power(self, mock_req):
@@ -271,7 +272,7 @@ class TestPVForecastOpenMeteo:
         mock_fetch.return_value = plane_data
         result = await self._make_provider().fetch(_ts(dt=0.25))
         assert len(result) == 96
-        assert result[0] == pytest.approx(100.0)
+        assert result[0] == pytest.approx(25.0)
 
     @patch.object(PVForecastOpenMeteo, "_fetch_plane", new_callable=AsyncMock)
     async def test_planes_summed(self, mock_fetch):

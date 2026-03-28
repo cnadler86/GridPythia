@@ -369,7 +369,7 @@ class TestElecPriceEnergyChartsCache:
         raw_price_wh = 100.0 / 1_000_000.0  # 1e-4 EUR/Wh
         raw = [(now + timedelta(minutes=15 * i), raw_price_wh) for i in range(200)]
         # Inject already-processed prices (bypass _request_prices conversion)
-        provider._request_prices = AsyncMock(return_value=raw)
+        provider._request_prices = AsyncMock(return_value=raw)  # type: ignore[assignment]
 
         ts = make_timestamps(now, hours=2, dt_hours=0.25)
         result = await provider.fetch(ts)

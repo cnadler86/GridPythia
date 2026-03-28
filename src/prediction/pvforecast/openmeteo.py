@@ -96,6 +96,13 @@ class PVForecastOpenMeteo(PVForecastProvider):
     def provider_id(self) -> str:
         return "PVForecastOpenMeteo"
 
+    @staticmethod
+    def _target_dt_hours(timestamps: pl.Series) -> float:
+        ts_list: list[datetime] = timestamps.to_list()
+        if len(ts_list) >= 2:
+            return (ts_list[1] - ts_list[0]).total_seconds() / 3600.0
+        return 1.0
+
     # ── internal helpers ──────────────────────────────────────────────
 
     @staticmethod
@@ -171,6 +178,7 @@ class PVForecastOpenMeteo(PVForecastProvider):
 
     async def fetch_by_inverter(self, timestamps: pl.Series) -> dict[str, pl.Series]:
         ts_list: list[datetime] = timestamps.to_list()
+        target_dt_hours = self._target_dt_hours(timestamps)
 
         def _to_utc(dt: datetime) -> datetime:
             return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -210,7 +218,9 @@ class PVForecastOpenMeteo(PVForecastProvider):
                     idx = round((slot_utc - start_utc).total_seconds() / 900)
                     if 0 <= idx < n_slots:
                         quarterly[idx] += max(0.0, watts)
-            result[inverter] = resample_to_timestamps(quarterly, 0.25, timestamps, pad_value=0.0)
+            result[inverter] = (
+                resample_to_timestamps(quarterly, 0.25, timestamps, pad_value=0.0) * target_dt_hours
+            )
 
         return result
 

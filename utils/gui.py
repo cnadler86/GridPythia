@@ -231,23 +231,22 @@ def _wire_pv_hover(
     ys: list,
     dt_hours: float,
 ) -> int:
-    """PV-specific hover: power value + daily total + remaining for that day."""
+    """PV-specific hover: step energy + daily total + remaining for that day."""
     if not xs_dt:
         return -1
 
-    # Precompute daily total energy (Wh) per date
+    # Values are already energy per step (Wh), so daily aggregation is a plain sum.
     day_total_wh: dict = {}
     for ti, wi in zip(xs_dt, ys):
         d = ti.date()
-        day_total_wh[d] = day_total_wh.get(d, 0.0) + wi * dt_hours
+        day_total_wh[d] = day_total_wh.get(d, 0.0) + float(wi)
 
-    # Precompute remaining energy from each slot to end-of-day (Wh)
+    # Precompute remaining energy from each slot to end-of-day (Wh).
     remaining_wh: list[float] = [0.0] * len(xs_dt)
-    # Iterate in reverse so we can accumulate from the back
     running: dict = {}
     for i in range(len(xs_dt) - 1, -1, -1):
         d = xs_dt[i].date()
-        running[d] = running.get(d, 0.0) + float(ys[i]) * dt_hours
+        running[d] = running.get(d, 0.0) + float(ys[i])
         remaining_wh[i] = running[d]
 
     xs_num = np.array(mdates.date2num(xs_dt), dtype=float)
@@ -288,7 +287,7 @@ def _wire_pv_hover(
         _place_hover_annotation(ax, annot, xs_num[idx], yi)
         annot.set_text(
             f"{xi:%Y-%m-%d %H:%M}\n"
-            f"{yi:.0f} W\n"
+            f"{yi:.0f} Wh\n"
             f"Day total:  {total_kwh:.2f} kWh\n"
             f"Remaining:  {rem_kwh:.2f} kWh"
         )
@@ -591,8 +590,8 @@ class LoadTab(_Tab):
         v = s.to_list()
         ax.step(t, v, color="#E65100", linewidth=1.5, where="post")
         ax.fill_between(t, v, alpha=0.12, color="#E65100", step="post")
-        _finalize_plot(ax, ylabel="Power [W]", title="Load")
-        self._hover_cids.append(_wire_hover(self._canvas, ax, t, v, fmt_y="{:.1f}", unit="W"))
+        _finalize_plot(ax, ylabel="Energy [Wh / step]", title="Load")
+        self._hover_cids.append(_wire_hover(self._canvas, ax, t, v, fmt_y="{:.1f}", unit="Wh"))
 
 
 # ── PV Forecast ───────────────────────────────────────────────────────────
@@ -707,7 +706,7 @@ class PVForecastTab(_Tab):
         dt_hours = ((t[1] - t[0]).total_seconds() / 3600) if len(t) > 1 else 1.0
         ax.plot(t, v, color="#F57F17", linewidth=1.5)
         ax.fill_between(t, v, alpha=0.20, color="#FDD835")
-        _finalize_plot(ax, ylabel="Power [W]", title="PV Forecast")
+        _finalize_plot(ax, ylabel="Energy [Wh / step]", title="PV Forecast")
         self._hover_cids.append(_wire_pv_hover(self._canvas, ax, t, v, dt_hours))
 
 
@@ -947,7 +946,7 @@ class OptimizationTab(_Tab):
                                 logger.exception("Failed to update feed-in tariff tab")
                         if load_tab is not None:
                             try:
-                                load_tab._done(pdata["load_w"], ts)
+                                load_tab._done(pdata["load_wh"], ts)
                             except Exception:
                                 logger.exception("Failed to update load tab")
                         if pv_tab is not None:
