@@ -83,6 +83,8 @@ class TestPVForecastImport:
         provider = PVForecastImport(power_w=power, source_dt_hours=1.0)
         result = await provider.fetch(ts)
         assert len(result) == 8
+        # At t=1h the source power is 100 W -> 25 Wh for a 15-minute timestep.
+        assert result[4] == pytest.approx(25.0)
 
     async def test_provider_id(self):
         assert PVForecastImport(power_w=[]).provider_id == "PVForecastImport"
@@ -269,6 +271,7 @@ class TestPVForecastOpenMeteo:
         mock_fetch.return_value = plane_data
         result = await self._make_provider().fetch(_ts(dt=0.25))
         assert len(result) == 96
+        assert result[0] == pytest.approx(100.0)
 
     @patch.object(PVForecastOpenMeteo, "_fetch_plane", new_callable=AsyncMock)
     async def test_planes_summed(self, mock_fetch):

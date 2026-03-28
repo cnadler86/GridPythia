@@ -13,7 +13,12 @@ from src.simulation.devices.inverterbase import InverterBase, InverterParameters
 
 
 def _make_prediction(load_w: list[float], price_eur_wh: list[float]) -> PredictionData:
-    """Create a minimal PredictionData with aligned timestamp/load/price arrays."""
+    """Create a minimal PredictionData with aligned timestamp/load/price arrays.
+    
+    Args:
+        load_w: Load values in Wh (energy, not power)
+        price_eur_wh: Prices in EUR/Wh
+    """
     n = len(load_w)
     assert n == len(price_eur_wh)
 
@@ -24,7 +29,7 @@ def _make_prediction(load_w: list[float], price_eur_wh: list[float]) -> Predicti
             "timestamp": pl.Series(range(n), dtype=pl.Int64),
             "electricprice_eur_wh": pl.Series(price_eur_wh, dtype=pl.Float32),
             "feedintariff_eur_wh": pl.Series([0.0] * n, dtype=pl.Float32),
-            "load_w": pl.Series(load_w, dtype=pl.Float32),
+            "load_wh": pl.Series(load_w, dtype=pl.Float32),
         }
     )
     return PredictionData(_df=df, dt_hours=1.0)

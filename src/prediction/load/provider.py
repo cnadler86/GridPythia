@@ -8,9 +8,9 @@ from src.prediction.base import PredictionProvider
 
 
 class LoadProvider(PredictionProvider):
-    """Returns electrical load power in W per time step."""
+    """Returns electrical load energy in Wh per time step."""
 
     @abstractmethod
     async def fetch(self, timestamps: pl.Series) -> pl.Series:
-        """Return Float32 Series of watts, same length as *timestamps*."""
+        """Return Float32 Series of Wh, same length as *timestamps*."""
         ...

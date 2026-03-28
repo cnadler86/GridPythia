@@ -50,11 +50,11 @@ class PVPlaneConfig(BaseModel):
 
 
 class PVForecastProvider(PredictionProvider):
-    """Returns PV power output in W per time step."""
+    """Returns PV energy output in Wh per time step."""
 
     @staticmethod
     def _sum_series_by_key(series_by_key: Mapping[str, pl.Series]) -> pl.Series:
-        """Sum a mapping of aligned power series into one total series."""
+        """Sum a mapping of aligned energy series into one total series."""
         if not series_by_key:
             return pl.Series([], dtype=pl.Float32)
 
@@ -65,7 +65,7 @@ class PVForecastProvider(PredictionProvider):
         return pl.Series(total, dtype=pl.Float32)
 
     async def fetch_by_inverter(self, timestamps: pl.Series) -> dict[str, pl.Series]:
-        """Return watt series keyed by inverter name.
+        """Return Wh series keyed by inverter name.
 
         Providers without inverter-specific information fall back to a single
         synthetic inverter named ``inverter1``.
@@ -74,5 +74,5 @@ class PVForecastProvider(PredictionProvider):
 
     @abstractmethod
     async def fetch(self, timestamps: pl.Series) -> pl.Series:
-        """Return Float32 Series of watts, same length as *timestamps*."""
+        """Return Float32 Series of Wh, same length as *timestamps*."""
         ...

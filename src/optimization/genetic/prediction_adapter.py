@@ -28,15 +28,12 @@ def prediction_to_genetic_params(
             does not provide `feedintariff_eur_wh`.
 
     Returns:
-        EnergyManagementParameters with fields populated and units
-        converted to Wh per timestep.
+        EnergyManagementParameters with fields populated in Wh per timestep.
     """
-    # dt in hours used by the prediction window
-    dt = pred.dt_hours
     n_steps = pred.steps
 
-    # Load: convert W -> Wh for each timestep (power * hours)
-    load_wh = (pred["load_w"] * float(dt)).to_list()
+    # Load is already in Wh (no conversion needed)
+    load_wh = pred.load_wh.to_list()
 
     # Electricity price per Wh (prediction already stores EUR/Wh)
     if pred.electricprice is not None:
@@ -53,10 +50,10 @@ def prediction_to_genetic_params(
         else:
             feedin = [float(einspeise_default)] * n_steps
 
-    # PV columns are named pv_{inverter_id}_w; map by inverter_id
+    # PV columns are named pv_{inverter_id}_wh; already in Wh (no conversion needed)
     pv_map: Dict[str, list[float]] = {}
     for inverter_id, series in pred.pv_by_inverter.items():
-        pv_map[inverter_id] = (series * float(dt)).to_list()
+        pv_map[inverter_id] = series.to_list()
 
     return EnergyManagementParameters(
         pv_prognose_wh=pv_map,

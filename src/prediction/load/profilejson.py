@@ -23,8 +23,9 @@ class LoadProfileJSON(LoadProvider):
     """Build load forecast from JSON profile data and a hashed weekly cache.
 
     The input JSON is expected to include profile curves under ``profiles``.
-    ``mean_wh`` values are interpreted as energy per source interval and converted
-    to average power (W) using ``profile_dt_hours`` (or ``source_dt_hours``).
+    ``mean_wh`` values are interpreted as energy per source interval. Internally,
+    interpolation operates on average power, but :meth:`fetch` returns energy in
+    Wh per requested target timestep.
     """
 
     def __init__(
@@ -167,5 +168,9 @@ class LoadProfileJSON(LoadProvider):
     async def fetch(self, timestamps: pl.Series) -> pl.Series:
         self._ensure_cache()
         ts_list: list[datetime] = timestamps.to_list()
-        values = [self._from_cache(ts) for ts in ts_list]
-        return pl.Series(values, dtype=pl.Float32)
+        if len(ts_list) >= 2:
+            dt_hours = (ts_list[1] - ts_list[0]).total_seconds() / 3600.0
+        else:
+            dt_hours = 1.0
+        values_wh = [self._from_cache(ts) * dt_hours for ts in ts_list]
+        return pl.Series(values_wh, dtype=pl.Float32)

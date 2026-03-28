@@ -21,10 +21,10 @@ class PredictionData:
     The internal :attr:`_df` has the following columns:
 
     * ``timestamp`` — ``pl.Datetime``
-    * ``electricprice_eur_wh`` — ``pl.Float32``
-    * ``feedintariff_eur_wh`` — ``pl.Float32``
-    * ``load_w`` — ``pl.Float32``
-    * ``pv_{inverter_id}_w`` — ``pl.Float32`` for each registered inverter with PV
+    * ``electricprice_eur_wh`` — ``pl.Float32`` (EUR/Wh)
+    * ``feedintariff_eur_wh`` — ``pl.Float32`` (EUR/Wh)
+    * ``load_wh`` — ``pl.Float32`` (Wh, energy per timestep)
+    * ``pv_{inverter_id}_wh`` — ``pl.Float32`` (Wh, energy per timestep) for each registered inverter with PV
     * ``weather_{channel}`` — ``pl.Float32`` for each weather channel delivered
       by the weather provider (e.g. ``weather_temperature_c``)
 
@@ -62,50 +62,63 @@ class PredictionData:
 
     @property
     def load_wh(self) -> pl.Series:
-        """Load power in Wh (integrated over dt_hours)."""
-        return self._df["load_w"]
+        """Load energy in Wh (integrated over dt_hours)."""
+        return self._df["load_wh"]
 
     @property
-    def electricprice(self) -> pl.Series:
-        """Electricity price in EUR/Wh."""
+    def electricprice(self) -> pl.Series | None:
+        """Electricity price in EUR/Wh.
+
+        Returns None if the column is not present in the prediction data.
+        """
         try:
             return self._df["electricprice_eur_wh"]
-        except Exception:
+        except pl.exceptions.ColumnNotFoundError:
             return None
 
     @property
-    def feedintariff(self) -> pl.Series:
-        """Feed-in tariff in EUR/Wh."""
+    def feedintariff(self) -> pl.Series | None:
+        """Feed-in tariff in EUR/Wh.
+
+        Returns None if the column is not present in the prediction data.
+        """
         try:
             return self._df["feedintariff_eur_wh"]
-        except Exception:
+        except pl.exceptions.ColumnNotFoundError:
             return None
 
     @property
     def pv_by_inverter(self) -> dict[str, pl.Series]:
-        """Return dict mapping inverter_id to corresponding PV Series.
+        """Return dict mapping inverter_id to corresponding PV Series (in Wh).
 
         Useful for looking up PV forecast by inverter device ID.
         Returns empty dict if no PV columns present.
         """
         result = {}
         for col in self._df.columns:
-            if col.startswith("pv_") and col.endswith("_w"):
-                inverter_id = col[len("pv_") : -len("_w")]
+            if col.startswith("pv_") and col.endswith("_wh"):
+                inverter_id = col[len("pv_") : -len("_wh")]
                 result[inverter_id] = self._df[col]
         return result
 
     def get_pv_series(self, inverter_id: str) -> pl.Series | None:
-        """Get PV forecast Series for a specific inverter, or None if not found."""
-        col_name = f"pv_{inverter_id}_w"
+        """Get PV forecast Series in Wh for a specific inverter, or None if not found.
+
+        Args:
+            inverter_id: The inverter identifier.
+
+        Returns:
+            pl.Series with PV energy in Wh, or None if the inverter is not in the prediction.
+        """
+        col_name = f"pv_{inverter_id}_wh"
         try:
             return self._df[col_name]
-        except Exception:
+        except pl.exceptions.ColumnNotFoundError:
             return None
 
     @property
     def pv_names(self) -> list[str]:
-        """PV inverter IDs extracted from ``pv_{inverter_id}_w`` columns.
+        """PV inverter IDs extracted from ``pv_{inverter_id}_wh`` columns.
 
         Deprecated: use pv_by_inverter.keys() instead.
         """
@@ -139,7 +152,7 @@ class Prediction:
             pv={"roof": PVForecastImport(power_w=[0]*6 + [500]*12 + [0]*6)},
         ))
         data = await pred.fetch(start=datetime.now(), hours=24, dt_hours=1.0)
-        data["load_w"]  # → pl.Series
+        data.load_wh  # → pl.Series with energy in Wh
     """
 
     def __init__(self, setup: PredictionSetup) -> None:
@@ -178,7 +191,7 @@ class Prediction:
         results = await asyncio.gather(*all_coros)
 
         # Unpack results
-        eprice, ftariff, load_w, *rest = results
+        eprice, ftariff, load_wh, *rest = results
         if weather_coro is not None:
             pv_series = rest[: len(pv_names)]
             weather_df: pl.DataFrame | None = rest[len(pv_names)]
@@ -191,14 +204,14 @@ class Prediction:
             "timestamp": timestamps,
             "electricprice_eur_wh": eprice,
             "feedintariff_eur_wh": ftariff,
-            "load_w": load_w,
+            "load_wh": load_wh,
         }
 
-        # Add PV data: column format is pv_{inverter_id}_w (not including provider name)
+        # Add PV data: column format is pv_{inverter_id}_wh (energy)
         for name, series_by_inverter in zip(pv_names, pv_series):
             for inverter, series in series_by_inverter.items():
-                # Only use inverter as key, not the provider name
-                data[f"pv_{inverter}_w"] = series
+                # Only use inverter as key, not the provider name.
+                data[f"pv_{inverter}_wh"] = series
 
         if weather_df is not None:
             for col_name in weather_df.columns:

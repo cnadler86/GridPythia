@@ -187,13 +187,14 @@ class LinearOptimizer:
         # ── Extract fixed parameters from PredictionData ──────────────
         price = np.array(pred.electricprice.to_list(), dtype=float)
         feedin_tariff = np.array(pred.feedintariff.to_list(), dtype=float)
-        load_wh = np.array(pred["load_w"].to_list(), dtype=float) * dt
+        # Load is already in Wh (no conversion needed)
+        load_wh = np.array(pred.load_wh.to_list(), dtype=float)
 
-        # Aggregate PV generation: W → Wh per step
+        # Aggregate PV generation: already in Wh per step (no conversion needed)
         pv_total_wh = np.zeros(T, dtype=float)
         pv_per_inverter: dict[str, np.ndarray] = {}
         for inverter_id, pv_series in pred.pv_by_inverter.items():
-            arr = np.array(pv_series.to_list(), dtype=float) * dt
+            arr = np.array(pv_series.to_list(), dtype=float)
             pv_total_wh += arr
             pv_per_inverter[inverter_id] = arr
 

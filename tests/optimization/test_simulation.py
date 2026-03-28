@@ -2,10 +2,11 @@
 
 from array import array
 
+import polars as pl
 import pytest
 
-from src.optimization.params import EnergyManagementParameters
 from src.optimization.simulation import GridSimulation, SimulationResult
+from src.prediction.prediction import PredictionData
 from src.simulation.devices import InverterMode
 from src.simulation.devices.battery import Battery, BatteryParameters
 from src.simulation.devices.homeappliance import HomeAppliance, HomeApplianceParameters
@@ -170,6 +171,21 @@ PREDICTION_HOURS = 48
 OPTIMIZATION_HOURS = 24
 
 
+def _make_prediction(steps: int) -> PredictionData:
+    """Build PredictionData from the test constants (first *steps* entries)."""
+    n = steps
+    df = pl.DataFrame(
+        {
+            "timestamp": pl.Series(range(n), dtype=pl.Int64),
+            "electricprice_eur_wh": pl.Series(PRICES[:n], dtype=pl.Float32),
+            "feedintariff_eur_wh": pl.Series([0.00007] * n, dtype=pl.Float32),
+            "load_wh": pl.Series(LOAD[:n], dtype=pl.Float32),
+            "pv_inverter1_wh": pl.Series(PV_WH[:n], dtype=pl.Float32),
+        }
+    )
+    return PredictionData(_df=df, dt_hours=1.0)
+
+
 @pytest.fixture
 def genetic_simulation() -> GridSimulation:
     """GridSimulation fixture with a PV_BATTERY inverter."""
@@ -206,17 +222,8 @@ def genetic_simulation() -> GridSimulation:
         prediction_hours=PREDICTION_HOURS,
     )
 
-    params = EnergyManagementParameters(
-        pv_prognose_wh={"inverter1": PV_WH},
-        strompreis_euro_pro_wh=PRICES,
-        einspeiseverguetung_euro_pro_wh=0.00007,
-        preis_euro_pro_wh_akku=0.0001,
-        gesamtlast=LOAD,
-    )
-
     return GridSimulation(
-        parameters=params,
-        optimization_hours=OPTIMIZATION_HOURS,
+        prediction=_make_prediction(OPTIMIZATION_HOURS),
         inverters=[inverter],
         home_appliances=[home_appliance],
     )
@@ -225,7 +232,7 @@ def genetic_simulation() -> GridSimulation:
 def test_simulation(genetic_simulation: GridSimulation) -> None:
     """Simulate from START_IDX and validate the result structure."""
     sim = genetic_simulation
-    n_hours = sim.optimization_hours
+    n_hours = sim.simulation_steps
 
     inverter_modes = {
         inv.device_id: array("i", [InverterMode.IDLE] * n_hours)
@@ -269,7 +276,7 @@ def test_simulation_discharge_reduces_grid_draw(
 ) -> None:
     """Battery discharge should reduce grid import compared to IDLE mode."""
     sim = genetic_simulation
-    n_hours = sim.optimization_hours
+    n_hours = sim.simulation_steps
 
     idle_modes = {
         inv.device_id: array("i", [InverterMode.IDLE] * n_hours)
@@ -297,7 +304,7 @@ def test_simulation_discharge_reduces_grid_draw(
 def test_simulation_reset(genetic_simulation: GridSimulation) -> None:
     """simulate() calls reset() so two identical runs produce identical results."""
     sim = genetic_simulation
-    n_hours = sim.optimization_hours
+    n_hours = sim.simulation_steps
 
     modes = {
         inv.device_id: array("i", [InverterMode.DISCHARGE_ZERO_FEED_IN] * n_hours)

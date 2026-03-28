@@ -7,7 +7,7 @@ from src.prediction.pvforecast.provider import PVForecastProvider
 
 
 class PVForecastImport(PVForecastProvider):
-    """Provide PV power output from an explicit list of watt values.
+    """Provide PV forecast from an explicit list of watt values.
 
     Missing trailing steps default to 0 (night-time assumption).
     """
@@ -21,5 +21,11 @@ class PVForecastImport(PVForecastProvider):
         return "PVForecastImport"
 
     async def fetch(self, timestamps: pl.Series) -> pl.Series:
-        # PV pads with 0 (night) beyond the provided data
-        return resample_to_timestamps(self._power, self._source_dt, timestamps, pad_value=0.0)
+        # Resample in power-space and convert to Wh per target step.
+        power_w = resample_to_timestamps(self._power, self._source_dt, timestamps, pad_value=0.0)
+        ts_list: list = timestamps.to_list()
+        if len(ts_list) >= 2:
+            dt_hours = (ts_list[1] - ts_list[0]).total_seconds() / 3600.0
+        else:
+            dt_hours = 1.0
+        return power_w * float(dt_hours)

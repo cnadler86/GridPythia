@@ -36,11 +36,13 @@ class TestLoadProfileJSON:
 
         ts_weekday = make_timestamps(datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc), 24, 0.25)
         weekday_values = (await provider.fetch(ts_weekday)).to_list()
-        assert all(v == pytest.approx(100.0) for v in weekday_values)
+        # Source profile is hourly mean_wh=100, so each 15-minute slot is 25 Wh.
+        assert all(v == pytest.approx(25.0) for v in weekday_values)
 
         ts_weekend = make_timestamps(datetime(2025, 6, 21, 0, 0, tzinfo=timezone.utc), 24, 0.25)
         weekend_values = (await provider.fetch(ts_weekend)).to_list()
-        assert all(v == pytest.approx(200.0) for v in weekend_values)
+        # Source profile is hourly mean_wh=200, so each 15-minute slot is 50 Wh.
+        assert all(v == pytest.approx(50.0) for v in weekend_values)
 
     async def test_hourly_profile_interpolates_to_15min(self, tmp_path):
         p = tmp_path / "profiles.json"
@@ -50,7 +52,8 @@ class TestLoadProfileJSON:
 
         ts = make_timestamps(datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc), 1.25, 0.25)
         values = (await provider.fetch(ts)).to_list()
-        assert values == pytest.approx([0.0, 25.0, 50.0, 75.0, 100.0], abs=1e-6)
+        # Interpolation runs in power-space, then converts to Wh for 15-minute slots.
+        assert values == pytest.approx([0.0, 6.25, 12.5, 18.75, 25.0], abs=1e-6)
 
     async def test_cache_file_created_and_reused(self, tmp_path):
         p = tmp_path / "profiles.json"

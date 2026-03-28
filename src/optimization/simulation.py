@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from src.optimization.interpolator import get_load_interpolator
-from src.optimization.params import EnergyManagementParameters
+from src.prediction.prediction import PredictionData
 from src.simulation.devices import InverterMode
 from src.simulation.devices.homeappliance import HomeAppliance
 from src.simulation.devices.inverterbase import InverterBase
@@ -292,30 +292,28 @@ class SimulationResult:
 class GridSimulation:
     def __init__(
         self,
-        parameters: EnergyManagementParameters,
-        optimization_hours: int,
+        prediction: PredictionData,
         inverters: Optional[list[InverterBase]] = None,
         home_appliances: Optional[list[HomeAppliance]] = None,
     ) -> None:
-        self.optimization_hours = optimization_hours
+        dt = prediction.dt_hours
+        self.simulation_steps = prediction.steps  # number of simulation steps
 
-        self.load_energy_array = array("f", map(float, parameters.gesamtlast))
-        self.electricity_price = array("f", map(float, parameters.strompreis_euro_pro_wh))
-        if isinstance(parameters.einspeiseverguetung_euro_pro_wh, list):
-            self.electricity_revenue = array(
-                "f", map(float, parameters.einspeiseverguetung_euro_pro_wh)
-            )
+        # Load is already in Wh (no conversion needed)
+        self.load_energy_array = array("f", prediction.load_wh.to_list())
+        self.electricity_price = array("f", prediction.electricprice.to_list())
+        feedintariff = prediction.feedintariff
+        if feedintariff is not None:
+            self.electricity_revenue = array("f", feedintariff.to_list())
         else:
-            self.electricity_revenue = array(
-                "f",
-                [float(parameters.einspeiseverguetung_euro_pro_wh)] * len(self.load_energy_array),
-            )
-        self.price_per_wh_akku = parameters.preis_euro_pro_wh_akku
+            self.electricity_revenue = array("f", [0.0] * prediction.steps)
 
-        self.pv_prediction_map: Optional[Dict[str, array[float]]] = None
-        if isinstance(parameters.pv_prognose_wh, dict):
+        self.pv_prediction_map: Optional[Dict[str, array]] = None
+        pv_by_inv = prediction.pv_by_inverter
+        if pv_by_inv:
+            # PV is already in Wh (no conversion needed)
             self.pv_prediction_map = {
-                k: array("f", map(float, v)) for k, v in parameters.pv_prognose_wh.items()
+                k: array("f", v.to_list()) for k, v in pv_by_inv.items()
             }
 
         # Build mapping of inverter id -> inverter and ensure uniqueness
@@ -448,7 +446,7 @@ class GridSimulation:
         dt: float = 1.0,
     ) -> Optional[SimulationResult]:
         """Simulate energy flows and costs for a contiguous time window."""
-        total_idx = int(self.optimization_hours / dt) - start_idx
+        total_idx = self.simulation_steps - start_idx
         if total_idx <= 0:
             return None
 
