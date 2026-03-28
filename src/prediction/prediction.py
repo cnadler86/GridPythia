@@ -47,7 +47,7 @@ class PredictionData:
     @property
     def df(self) -> pl.DataFrame:
         """Read-only access to internal DataFrame for iteration/inspection only.
-        
+
         Prefer using typed properties (load_wh, electricprice, etc) for direct access.
         """
         return self._df
@@ -84,7 +84,7 @@ class PredictionData:
     @property
     def pv_by_inverter(self) -> dict[str, pl.Series]:
         """Return dict mapping inverter_id to corresponding PV Series.
-        
+
         Useful for looking up PV forecast by inverter device ID.
         Returns empty dict if no PV columns present.
         """
@@ -106,7 +106,7 @@ class PredictionData:
     @property
     def pv_names(self) -> list[str]:
         """PV inverter IDs extracted from ``pv_{inverter_id}_w`` columns.
-        
+
         Deprecated: use pv_by_inverter.keys() instead.
         """
         return list(self.pv_by_inverter.keys())
@@ -193,7 +193,7 @@ class Prediction:
             "feedintariff_eur_wh": ftariff,
             "load_w": load_w,
         }
-        
+
         # Add PV data: column format is pv_{inverter_id}_w (not including provider name)
         for name, series_by_inverter in zip(pv_names, pv_series):
             for inverter, series in series_by_inverter.items():

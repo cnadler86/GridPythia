@@ -1157,7 +1157,7 @@ class OptimizationTab(_Tab):
                     try:
                         self._fig.clear()
                         n = len(res.costs_per_dt)
-                        
+
                         # Convert timestamps to matplotlib-compatible format if available
                         ts = getattr(self, "_last_ts", None)
                         if ts and len(ts) >= n:
@@ -1183,7 +1183,14 @@ class OptimizationTab(_Tab):
                             # Add hover to energy flows
                             try:
                                 grid_import_data = list(res.grid_import_wh_per_dt)
-                                _wire_hover(self._canvas, ax, x, grid_import_data, fmt_y="{:.1f}", unit=" Wh")
+                                _wire_hover(
+                                    self._canvas,
+                                    ax,
+                                    x,
+                                    grid_import_data,
+                                    fmt_y="{:.1f}",
+                                    unit=" Wh",
+                                )
                             except Exception:
                                 pass
 
@@ -1234,7 +1241,7 @@ class OptimizationTab(_Tab):
                         lines, labels = ax2.get_legend_handles_labels()
                         lines2, labels2 = ax3.get_legend_handles_labels()
                         ax2.legend(lines + lines2, labels + labels2, loc="upper right", fontsize=8)
-                        
+
                         # Add hover annotation for ax2 and ax3
                         if isinstance(x[0], (int, float)):
                             # numeric x: datetime hover not applicable
@@ -1242,7 +1249,9 @@ class OptimizationTab(_Tab):
                         else:
                             # Add datetime hover to energy plot
                             try:
-                                _wire_hover(self._canvas, ax2, x, load_wh, fmt_y="{:.1f}", unit=" Wh")
+                                _wire_hover(
+                                    self._canvas, ax2, x, load_wh, fmt_y="{:.1f}", unit=" Wh"
+                                )
                             except Exception:
                                 pass
 
@@ -1313,7 +1322,7 @@ class OptimizationTab(_Tab):
                                 handles=handles, labels=labels, loc="upper right", fontsize=8
                             )
                         ax4.grid(alpha=0.2)
-                        
+
                         # Add hover to battery SoC plot if timestamps available
                         if isinstance(x[0], (int, float)):
                             # numeric x: don't add hover
@@ -1327,10 +1336,12 @@ class OptimizationTab(_Tab):
                                     break
                             if soc_data:
                                 try:
-                                    _wire_hover(self._canvas, ax4, x, soc_data, fmt_y="{:.1f}", unit="%")
+                                    _wire_hover(
+                                        self._canvas, ax4, x, soc_data, fmt_y="{:.1f}", unit="%"
+                                    )
                                 except Exception:
                                     pass
-                        
+
                         # Date formatting for all subplots with timestamps
                         if not isinstance(x[0], (int, float)):
                             self._fig.autofmt_xdate(rotation=25)
