@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Dict
 
-from src.optimization.params import EnergyManagementParameters
+from src.optimization.genetic.params import EnergyManagementParameters
 from src.prediction.prediction import PredictionData
 
 

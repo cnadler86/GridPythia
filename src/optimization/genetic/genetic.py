@@ -15,7 +15,7 @@ from loguru import logger
 
 from src.config import HEMSConfig
 from src.optimization.genetic.genomelayout import GenomeLayout
-from src.optimization.params import (
+from src.optimization.genetic.params import (
     EnergyManagementParameters,
     OptimizationParameters,
 )
