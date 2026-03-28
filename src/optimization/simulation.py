@@ -4,11 +4,11 @@ from array import array
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from src.optimization.interpolator import get_load_interpolator
 from src.prediction.prediction import PredictionData
 from src.simulation.devices import InverterMode
 from src.simulation.devices.homeappliance import HomeAppliance
 from src.simulation.devices.inverterbase import InverterBase
+from src.simulation.grid_interpolator import FraunhoferSCModel
 
 
 @dataclass(slots=True)
@@ -312,9 +312,7 @@ class GridSimulation:
         pv_by_inv = prediction.pv_by_inverter
         if pv_by_inv:
             # PV is already in Wh (no conversion needed)
-            self.pv_prediction_map = {
-                k: array("f", v.to_list()) for k, v in pv_by_inv.items()
-            }
+            self.pv_prediction_map = {k: array("f", v.to_list()) for k, v in pv_by_inv.items()}
 
         # Build mapping of inverter id -> inverter and ensure uniqueness
         self.inverters: Dict[str, InverterBase] = {}
@@ -344,7 +342,11 @@ class GridSimulation:
         self.home_appliance_start_hours = [None] * len(self.home_appliances)
         self.home_appliance_start_hour = None
 
-        self.SCR_calc_fn = get_load_interpolator().calculate_self_consumption
+        min_load_wh = min(self.load_energy_array) if self.load_energy_array else 0.0
+        self._fraunhofer_sc_model = FraunhoferSCModel(
+            baseload_wh=max(float(min_load_wh), 1e-6),
+            dt=dt,
+        )
 
     def reset(self) -> None:
         """Reset all battery states to their initial SoC."""
@@ -459,7 +461,7 @@ class GridSimulation:
         pv_arrs = self._pv_per_inv
         step_buf = self._step_buf
         n_inv = len(inv_list)
-        clc_SCR = self.SCR_calc_fn
+        calc_sc_ratio = self._fraunhofer_sc_model.sc_ratio
 
         # Extract ordered arrays for the hot loop (avoids per-step dict lookups)
         modes_arrs = [inverter_modes.get(inv.device_id, array("i", [])) for inv in inv_list]
@@ -519,7 +521,7 @@ class GridSimulation:
                     solar_generation_wh_per_dt[inv_id][i] = pv_per_inv_list[j]
 
             if pv_ac_wh > 0.0:
-                SCR = clc_SCR(load_wh / dt, pv_ac_wh / dt)
+                SCR = calc_sc_ratio(pv_ac_wh, load_wh)
                 pv_feedin = pv_ac_wh * (1.0 - SCR)
                 corrected_end_load = end_load + pv_feedin
                 _gi = corrected_end_load if corrected_end_load > 0.0 else 0.0
