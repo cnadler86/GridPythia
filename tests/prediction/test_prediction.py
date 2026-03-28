@@ -37,6 +37,8 @@ class TestPrediction:
         assert isinstance(data, PredictionData)
         assert data.steps == 24
         assert data.dt_hours == 1.0
+        assert data.electricprice is not None
+        assert data.feedintariff is not None
         assert len(data.electricprice) == 24
         assert len(data.feedintariff) == 24
         assert len(data["load_wh"]) == 24
@@ -55,6 +57,8 @@ class TestPrediction:
     async def test_values_correct(self):
         pred = self._make_prediction()
         data = await pred.fetch(start=START, hours=24, dt_hours=1.0)
+        assert data.electricprice is not None
+        assert data.feedintariff is not None
         assert data.electricprice[0] == pytest.approx(0.0003)
         assert data.feedintariff[0] == pytest.approx(0.000082)
         # With dt_hours=1.0, energy is 0 Wh and 1000 Wh respectively

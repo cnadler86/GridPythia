@@ -32,13 +32,8 @@ class PredictionData:
     For PV: ``data.get_pv_series(inverter_id)`` or ``data.pv_by_inverter``.
     """
 
-    _df: pl.DataFrame = None
+    _df: pl.DataFrame
     dt_hours: float = 0.0
-
-    def __post_init__(self) -> None:
-        """Validate internal state after dataclass initialization."""
-        if self._df is None:
-            raise ValueError("_df must not be None")
 
     def __getitem__(self, key: str) -> pl.Series:
         """Direct column access for internal use; prefer properties for public API."""

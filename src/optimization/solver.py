@@ -292,15 +292,13 @@ class LinearOptimizer:
         dt = prep.dt
         inv_id = inv.device_id
 
-        has_battery = inv.battery is not None
-        has_pv = inv.parameters.pv_source is not None
         has_zero_feed_discharge = InverterMode.DISCHARGE_ZERO_FEED_IN in inv.available_modes
         has_rate_discharge = InverterMode.DISCHARGE in inv.available_modes
 
         selector: _RateSelector | None = None
         zero_feed_discharge_continuous = False
 
-        if has_battery and inv.is_optimizable:
+        if inv.battery is not None and inv.is_optimizable:
             charge_rates = self._get_charge_rates(inv)
             discharge_rates = self._get_discharge_rates(inv)
 
@@ -314,7 +312,6 @@ class LinearOptimizer:
                 if discharge_rates
                 else None
             )
-
             max_ch_wh = inv.battery.max_charge_power_w * dt
             max_dc_wh = inv.battery.max_discharge_power_w * dt
 
@@ -361,11 +358,11 @@ class LinearOptimizer:
             p_ch = cp.Constant(np.zeros(T, dtype=float))
             p_dc = cp.Constant(np.zeros(T, dtype=float))
 
-        if has_pv:
+        if inv.parameters.pv_source is not None:
             pv_src = inv.parameters.pv_source
             pv_pred = prep.pv_by_source.get(pv_src, np.zeros(T, dtype=float))
             pv_ac = cp.Variable(T, nonneg=True, name=f"pv_ac_{inv_id}")
-            if has_battery:
+            if inv.battery is not None:
                 pv_to_bat = cp.Variable(T, nonneg=True, name=f"pv_to_bat_{inv_id}")
                 self._constraints.append(pv_ac + pv_to_bat <= pv_pred)
             else:
@@ -378,7 +375,7 @@ class LinearOptimizer:
         max_ac_out = inv.parameters.max_ac_output_power_w * dt
         self._constraints.append(pv_ac + p_dc <= max_ac_out)
 
-        if has_battery:
+        if inv.battery is not None:
             bat = inv.battery
             if bat is None:
                 raise RuntimeError(f"Battery block build failed for inverter '{inv_id}'")

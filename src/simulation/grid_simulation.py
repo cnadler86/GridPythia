@@ -4,6 +4,8 @@ from array import array
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from loguru import logger
+
 from src.prediction.prediction import PredictionData
 from src.simulation.devices import InverterMode
 from src.simulation.devices.homeappliance import HomeAppliance
@@ -79,7 +81,7 @@ class SimulationResult:
                 try:
                     return obj.tolist()
                 except Exception:
-                    pass
+                    logger.warning("Failed to convert object with tolist(): {}", obj)
             try:
                 return list(obj)
             except Exception:
@@ -106,162 +108,6 @@ class SimulationResult:
             "home_appliance_load_per_dt": _conv(self.home_appliance_load_per_dt),
         }
 
-    def make_figure(self):
-        """Create a Bokeh visualization of the simulation results."""
-        try:
-            from bokeh.layouts import column
-            from bokeh.models import ColumnDataSource, HoverTool, LinearAxis, Range1d
-            from bokeh.palettes import Category10
-            from bokeh.plotting import figure
-        except Exception as exc:
-            raise RuntimeError(
-                "Bokeh is required for visualization. Install with 'pip install bokeh'"
-            ) from exc
-
-        n = len(self.costs_per_dt)
-        x = list(range(n))
-
-        data = {
-            "x": x,
-            "costs": list(self.costs_per_dt),
-            "revenue": list(self.revenue_per_dt),
-            "grid_import": list(self.grid_import_wh_per_dt),
-            "self_consumption": list(self.self_consumption_wh_per_dt),
-            "feedin": list(self.feedin_wh_per_dt),
-            "losses": list(self.losses_wh_per_dt),
-            "price": list(self.electricity_price_per_dt),
-        }
-        if self.home_appliance_load_per_dt is not None:
-            data["home_load"] = list(self.home_appliance_load_per_dt)
-
-        battery_keys = []
-        if self.battery_wh_per_dt:
-            for k, arr in (self.battery_wh_per_dt or {}).items():
-                data[f"bat_{k}"] = list(arr)
-                battery_keys.append(k)
-        if self.battery_soc_percentage_per_dt:
-            for k, arr in (self.battery_soc_percentage_per_dt or {}).items():
-                data[f"batpct_{k}"] = list(arr)
-
-        src = ColumnDataSource(data)
-        try:
-            colors = Category10[10]
-        except Exception:
-            colors = Category10[3]
-
-        p = figure(
-            title="Simulation — Energieflüsse",
-            tools="pan,wheel_zoom,box_zoom,reset,save",
-            x_axis_label="Timestep",
-            sizing_mode="stretch_width",
-            height=360,
-        )
-
-        p.line(
-            "x",
-            "grid_import",
-            source=src,
-            legend_label="Grid import (Wh)",
-            color=colors[0],
-            line_width=2,
-        )
-        p.line(
-            "x",
-            "self_consumption",
-            source=src,
-            legend_label="Self-consumption (Wh)",
-            color=colors[1],
-            line_width=2,
-        )
-        p.line(
-            "x",
-            "feedin",
-            source=src,
-            legend_label="Feed-in (Wh)",
-            color=colors[2],
-            line_width=2,
-        )
-        p.line(
-            "x",
-            "losses",
-            source=src,
-            legend_label="Losses (Wh)",
-            color=colors[3],
-            line_width=2,
-        )
-        if "home_load" in data:
-            p.line(
-                "x",
-                "home_load",
-                source=src,
-                legend_label="Home load (Wh)",
-                color=colors[4],
-                line_width=2,
-            )
-
-        for idx, k in enumerate(battery_keys):
-            col = colors[(5 + idx) % len(colors)]
-            p.line(
-                "x",
-                f"bat_{k}",
-                source=src,
-                legend_label=f"Battery {k} (Wh)",
-                color=col,
-                line_width=2,
-            )
-
-        costs = data.get("costs", [0.0] * n)
-        revenue = data.get("revenue", [0.0] * n)
-        money_vals = costs + revenue
-        if money_vals:
-            minm = min(money_vals)
-            maxm = max(money_vals)
-            if minm == maxm:
-                minm -= 1.0
-                maxm += 1.0
-        else:
-            minm, maxm = -1.0, 1.0
-
-        p.extra_y_ranges = {"euro": Range1d(start=minm, end=maxm)}
-        p.add_layout(LinearAxis(y_range_name="euro", axis_label="Euro"), "right")
-        p.line(
-            "x",
-            "costs",
-            source=src,
-            color="firebrick",
-            y_range_name="euro",
-            legend_label="Costs (€)",
-            line_dash="dashed",
-        )
-        p.line(
-            "x",
-            "revenue",
-            source=src,
-            color="seagreen",
-            y_range_name="euro",
-            legend_label="Revenue (€)",
-            line_dash="dotted",
-        )
-
-        p2 = figure(
-            title="Electricity price (€/Wh)",
-            x_range=p.x_range,
-            tools="pan,wheel_zoom,box_zoom,reset,save",
-            height=160,
-            sizing_mode="stretch_width",
-        )
-        p2.line("x", "price", source=src, color="orange", legend_label="Price (€/Wh)")
-
-        hover = HoverTool(tooltips=[("t", "@x"), ("value", "$y")])
-        p.add_tools(hover)
-        p.legend.click_policy = "hide"
-        p.legend.location = "top_left"
-        p2.legend.click_policy = "hide"
-        p2.legend.location = "top_left"
-
-        layout = column(p, p2, sizing_mode="stretch_width")
-        return layout
-
 
 class GridSimulation:
     def __init__(
@@ -275,12 +121,22 @@ class GridSimulation:
 
         # Load is already in Wh (no conversion needed)
         self.load_energy_array = array("f", prediction.load_wh.to_list())
-        self.electricity_price = array("f", prediction.electricprice.to_list())
+        electricprice = prediction.electricprice
+        if electricprice is not None:
+            self.electricity_price = array("f", electricprice.to_list())
+        else:
+            self.electricity_price = array("f", [0.0] * prediction.steps)
+            logger.warning(
+                "Electricity price column not found in prediction data; defaulting to 0.0 EUR/Wh for all steps."
+            )
         feedintariff = prediction.feedintariff
         if feedintariff is not None:
             self.electricity_revenue = array("f", feedintariff.to_list())
         else:
             self.electricity_revenue = array("f", [0.0] * prediction.steps)
+            logger.warning(
+                "Feed-in tariff column not found in prediction data; defaulting to 0.0 EUR/Wh for all steps."
+            )
 
         self.pv_prediction_map: Optional[Dict[str, array]] = None
         pv_by_inv = prediction.pv_by_inverter

@@ -17,10 +17,11 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
-from typing import Any
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 import matplotlib
+from matplotlib.axes import Axes
 
 matplotlib.use("TkAgg")
 import json
@@ -80,7 +81,7 @@ _BZ_CHOICES = [
     "PL",
 ]
 _DT_CHOICES = ["0.25", "0.5", "1.0", "2.0", "4.0"]
-_PAD = {"padx": 4, "pady": 3}
+_PAD: Mapping[str, Any] = {"padx": 4, "pady": 3}
 
 # ── utilities ─────────────────────────────────────────────────────────────
 
@@ -103,9 +104,11 @@ def _csv(text: str) -> list[float]:
 
 def _field(parent: tk.Misc, row: int, label: str, default: str = "") -> tk.StringVar:
     """Grid label + entry at *row*; return the StringVar."""
-    ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", **_PAD)
+    lbl = ttk.Label(parent, text=label)
+    lbl.grid(row=row, column=0, sticky="w", **_PAD)
     var = tk.StringVar(value=default)
-    ttk.Entry(parent, textvariable=var, width=16).grid(row=row, column=1, sticky="ew", **_PAD)
+    ent = ttk.Entry(parent, textvariable=var, width=16)
+    ent.grid(row=row, column=1, sticky="ew", **_PAD)
     parent.columnconfigure(1, weight=1)
     return var
 
@@ -117,11 +120,11 @@ def _combofield(
     choices: list[str],
     default: str = "",
 ) -> tk.StringVar:
-    ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", **_PAD)
+    lbl = ttk.Label(parent, text=label)
+    lbl.grid(row=row, column=0, sticky="w", **_PAD)
     var = tk.StringVar(value=default or (choices[0] if choices else ""))
-    ttk.Combobox(parent, textvariable=var, values=choices, state="readonly", width=16).grid(
-        row=row, column=1, sticky="ew", **_PAD
-    )
+    cb = ttk.Combobox(parent, textvariable=var, values=choices, state="readonly", width=16)
+    cb.grid(row=row, column=1, sticky="ew", **_PAD)
     return var
 
 
@@ -203,8 +206,8 @@ def _wire_hover(
     return canvas.mpl_connect("motion_notify_event", _on_move)
 
 
-def _setup_plot_axes(fig, num_rows: int = 111) -> tuple:
-    """Common plot setup: clear fig, add subplot. Returns (ax, canvas for later finalization)."""
+def _setup_plot_axes(fig, num_rows: int = 111) -> Axes:
+    """Common plot setup: clear fig, add subplot. Returns the Axes object."""
     fig.clear()
     ax = fig.add_subplot(num_rows)
     return ax
@@ -436,9 +439,15 @@ class _Tab:
         self._status.set(f"Error: {exc}")
         messagebox.showerror("Fetch error", f"{exc}\n\n{tb[:1500]}", parent=self.frame)
 
-    def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
+    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
         ax = _setup_plot_axes(self._fig)
-        ax.plot(ts.to_list(), s.to_list(), linewidth=1.4)
+        # Default plotting: if we got a Series, plot it; if DataFrame, plot first column
+        if isinstance(result, pl.Series):
+            ax.plot(ts.to_list(), result.to_list(), linewidth=1.4)
+        else:
+            cols = result.columns
+            if cols:
+                ax.plot(ts.to_list(), result[cols[0]].to_list(), linewidth=1.4)
         _finalize_plot(ax, title=self.TITLE)
 
 
@@ -494,11 +503,12 @@ class ElecPriceTab(_Tab):
             source_dt_hours=float(self._srcdt.get()),
         )
 
-    def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
+    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
         ax = _setup_plot_axes(self._fig)
         t = ts.to_list()
+        s = result if isinstance(result, pl.Series) else result[result.columns[0]]
         v = [x * 1000 for x in s.to_list()]  # EUR/Wh → EUR/kWh
-        ax.step(t, v, color="#1565C0", linewidth=1.5, where="post")
+        ax.step(t, v, color="#1565C0", linewidth=1.5, where="post", label="Electric Price")
         ax.fill_between(t, v, alpha=0.12, color="#1565C0", step="post")
         _finalize_plot(ax, ylabel="EUR / kWh", title="Electricity Price")
         self._hover_cids.append(_wire_hover(self._canvas, ax, t, v, fmt_y="{:.5f}", unit="EUR/kWh"))
@@ -532,11 +542,12 @@ class FeedInTariffTab(_Tab):
             source_dt_hours=float(self._srcdt.get()),
         )
 
-    def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
+    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
         ax = _setup_plot_axes(self._fig)
         t = ts.to_list()
-        v = [x * 1000 for x in s.to_list()]
-        ax.step(t, v, color="#2E7D32", linewidth=1.5, where="post")
+        s = result if isinstance(result, pl.Series) else result[result.columns[0]]
+        v = [x * 1000 for x in s.to_list()]  # Convert to kWh
+        ax.step(t, v, color="#2E7D32", linewidth=1.5, where="post", label="Feed-in Tariff")
         ax.fill_between(t, v, alpha=0.12, color="#2E7D32", step="post")
         _finalize_plot(ax, ylabel="EUR / kWh", title="Feed-in Tariff")
         self._hover_cids.append(_wire_hover(self._canvas, ax, t, v, fmt_y="{:.5f}", unit="EUR/kWh"))
@@ -573,9 +584,10 @@ class LoadTab(_Tab):
             use_vacation_profile=self._vacation_profile.get(),
         )
 
-    def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
+    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
         ax = _setup_plot_axes(self._fig)
         t = ts.to_list()
+        s = result if isinstance(result, pl.Series) else result[result.columns[0]]
         v = s.to_list()
         ax.step(t, v, color="#E65100", linewidth=1.5, where="post")
         ax.fill_between(t, v, alpha=0.12, color="#E65100", step="post")
@@ -656,7 +668,7 @@ class PVForecastTab(_Tab):
             tilt=float(self._tilt.get()),
             azimuth=float(self._az.get()),
             loss_pct=float(self._loss.get()),
-            userhorizon=userhorizon,
+            userhorizon=tuple(userhorizon) if userhorizon else None,
             damping_morning=float(self._damp_morn.get()),
             damping_evening=float(self._damp_eve.get()),
             partial_shading=self._partial_shading.get(),
@@ -687,9 +699,10 @@ class PVForecastTab(_Tab):
             source_dt_hours=float(self._srcdt.get()),
         )
 
-    def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
+    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
         ax = _setup_plot_axes(self._fig)
         t = ts.to_list()
+        s = result if isinstance(result, pl.Series) else result[result.columns[0]]
         v = s.to_list()
         dt_hours = ((t[1] - t[0]).total_seconds() / 3600) if len(t) > 1 else 1.0
         ax.plot(t, v, color="#F57F17", linewidth=1.5)
@@ -755,7 +768,14 @@ class WeatherTab(_Tab):
             return WeatherOpenMeteo(latitude=lat, longitude=lon, timezone_str=tz)
         return WeatherBrightSky(latitude=lat, longitude=lon, timezone_str=tz)
 
-    def _do_plot(self, df: pl.DataFrame, ts: pl.Series) -> None:
+    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
+        # Accept either a Series (single-column) or a DataFrame
+        if isinstance(result, pl.Series):
+            # Convert to single-column DataFrame for uniform handling
+            col_name = result.name if result.name is not None else "value"
+            df = pl.DataFrame({col_name: result})
+        else:
+            df = result
         t = ts.to_list()
         cols = df.columns
         n = len(cols)
@@ -787,6 +807,8 @@ class WeatherTab(_Tab):
 class OptimizationTab(_Tab):
     TITLE = "Optimization"
     PROVIDERS = []
+    _last_ts: list | None = None
+    _last_dt: float | None = None
 
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
@@ -917,17 +939,17 @@ class OptimizationTab(_Tab):
                             try:
                                 elec_tab._done(pdata.electricprice, ts)
                             except Exception:
-                                pass
+                                logger.exception("Failed to update electric price tab")
                         if feed_tab is not None:
                             try:
                                 feed_tab._done(pdata.feedintariff, ts)
                             except Exception:
-                                pass
+                                logger.exception("Failed to update feed-in tariff tab")
                         if load_tab is not None:
                             try:
                                 load_tab._done(pdata["load_w"], ts)
                             except Exception:
-                                pass
+                                logger.exception("Failed to update load tab")
                         if pv_tab is not None:
                             try:
                                 # sum all pv_* columns into one series for plotting
@@ -939,7 +961,7 @@ class OptimizationTab(_Tab):
                                     pv_sum = reduce(operator.add, pv_series_list)
                                     pv_tab._done(pv_sum, ts)
                             except Exception:
-                                pass
+                                logger.exception("Failed to sum PV series and update PV tab")
                         if weather_tab is not None:
                             try:
                                 # rebuild weather dataframe without the 'weather_' prefix
@@ -951,7 +973,9 @@ class OptimizationTab(_Tab):
                                     wf = pl.DataFrame(data)
                                     weather_tab._done(wf, ts)
                             except Exception:
-                                pass
+                                logger.exception(
+                                    "Failed to rebuild weather dataframe and update weather tab"
+                                )
                     except Exception:
                         # don't let tab-updates break the optimization flow
                         return
@@ -960,8 +984,7 @@ class OptimizationTab(_Tab):
                 try:
                     self.app.root.after(0, _update_tabs)
                 except Exception:
-                    # best-effort: ignore if scheduling fails
-                    pass
+                    logger.exception("Failed to schedule GUI update (_update_tabs)")
 
                 feedin_default = float(self._feedin_default.get())
 
@@ -1106,7 +1129,7 @@ class OptimizationTab(_Tab):
                                     unit=" Wh",
                                 )
                             except Exception:
-                                pass
+                                logger.exception("Failed to add hover for energy flows")
 
                         # Middle: PV generation and Load (left axis), electric price (right axis)
                         ax2 = self._fig.add_subplot(312)
@@ -1167,7 +1190,7 @@ class OptimizationTab(_Tab):
                                     self._canvas, ax2, x, load_wh, fmt_y="{:.1f}", unit=" Wh"
                                 )
                             except Exception:
-                                pass
+                                logger.exception("Failed to add datetime hover to energy plot")
 
                         # Bottom: battery SoC (%) (left axis) and inverter modes (right axis)
                         ax4 = self._fig.add_subplot(313)
@@ -1254,7 +1277,7 @@ class OptimizationTab(_Tab):
                                         self._canvas, ax4, x, soc_data, fmt_y="{:.1f}", unit="%"
                                     )
                                 except Exception:
-                                    pass
+                                    logger.exception("Failed to add hover for SoC plot")
 
                         # Date formatting for all subplots with timestamps
                         if not isinstance(x[0], (int, float)):
@@ -1263,7 +1286,7 @@ class OptimizationTab(_Tab):
                         self._canvas.draw()
                     except Exception:
                         # Fall back to JSON popup if plotting fails
-                        pass
+                        logger.exception("Plotting failed, falling back to JSON popup")
 
                     # Show JSON in a popup scrolled window as well
                     w = tk.Toplevel(self.frame)
