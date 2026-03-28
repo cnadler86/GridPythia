@@ -33,12 +33,6 @@ from loguru import logger
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from src.config import HEMSConfig
-from src.optimization.genetic.genetic import GeneticOptimization, GeneticSolution
-from src.optimization.genetic.params import OptimizationParameters
-
-# Genetic integration
-from src.optimization.genetic.prediction_adapter import prediction_to_genetic_params
 from src.optimization.linear.solver import LinearOptimizer, LinearSolution, OptimizationObjective
 from src.prediction.base import make_timestamps
 from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts, EnergyChartsConfig
@@ -822,30 +816,20 @@ class OptimizationTab(_Tab):
         )
         row += 1
         self._optimizer_type = _combofield(
-            f, row, "Optimizer", ["Genetic", "Linear (CVXPY)"], "Linear (CVXPY)"
+            f, row, "Optimizer", ["Linear (CVXPY)"], "Linear (CVXPY)"
         )
         self._optimizer_type.trace_add("write", lambda *_: self._rebuild())
         row += 1
-
-        opt = self._optimizer_type.get()
-        if opt == "Genetic":
-            self._generations = _field(f, row, "Generations", "100")
-            row += 1
-        else:
-            # Linear-specific settings
-            self._linear_objective = _combofield(
-                f,
-                row,
-                "Objective",
-                ["Minimize Cost", "Maximize Self-consumption"],
-                "Minimize Cost",
-            )
-            row += 1
-            self._bat_end_value = _field(f, row, "Battery end value EUR/Wh", "0.0")
-            row += 1
-
-        # Battery price (EUR/Wh) — used by genetic adapter
-        self._bat_price = _field(f, row, "Battery price EUR/Wh", "0.0")
+        # Linear-specific settings
+        self._linear_objective = _combofield(
+            f,
+            row,
+            "Objective",
+            ["Minimize Cost", "Maximize Self-consumption"],
+            "Minimize Cost",
+        )
+        row += 1
+        self._bat_end_value = _field(f, row, "Battery end value EUR/Wh", "0.0")
         row += 1
 
         # ── Battery configuration ─────────────────────────────────────
@@ -998,7 +982,6 @@ class OptimizationTab(_Tab):
                     # best-effort: ignore if scheduling fails
                     pass
 
-                bat_price = float(self._bat_price.get())
                 feedin_default = float(self._feedin_default.get())
 
                 # ── Build battery + inverter from GUI config ──────────────────
@@ -1033,67 +1016,33 @@ class OptimizationTab(_Tab):
                 )
 
                 async def _run_sim():
-                    if use_linear:
-                        # ── Linear (CVXPY + HiGHS) path ──────────────────────
-                        _, inv_obj = _make_devices(bat_params)
-                        obj_str = getattr(self, "_linear_objective", None)
-                        if obj_str is not None and "Self" in obj_str.get():
-                            objective = OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
-                        else:
-                            objective = OptimizationObjective.MINIMIZE_COST
-                        bat_end_val = 0.0
-                        bat_end_field = getattr(self, "_bat_end_value", None)
-                        if bat_end_field is not None:
-                            try:
-                                bat_end_val = float(bat_end_field.get())
-                            except ValueError:
-                                bat_end_val = 0.0
-                        optimizer = LinearOptimizer(
-                            inverters=[inv_obj],
-                            prediction=pdata,
-                            battery_end_value_eur_wh=bat_end_val,
-                        )
-                        logger.info("Starting LinearOptimizer with objective={}", objective.value)
-                        sol: LinearSolution = await asyncio.to_thread(
-                            lambda: optimizer.solve(objective=objective)
-                        )
-                        return sol
+                    # Linear (CVXPY + HiGHS) path
+                    _, inv_obj = _make_devices(bat_params)
+                    obj_str = getattr(self, "_linear_objective", None)
+                    if obj_str is not None and "Self" in obj_str.get():
+                        objective = OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
                     else:
-                        # ── Genetic path ──────────────────────────────────────
-                        ems_params = prediction_to_genetic_params(
-                            pdata,
-                            preis_euro_pro_wh_akku=bat_price,
-                            einspeise_default=feedin_default,
-                        )
-                        _, inv_obj = _make_devices(bat_params)
-                        opt_params = OptimizationParameters(
-                            ems=ems_params,
-                            pv_akku=bat_params,
-                            inverter=inv_obj.parameters,
-                        )
-                        cfg = HEMSConfig()
+                        objective = OptimizationObjective.MINIMIZE_COST
+                    bat_end_val = 0.0
+                    bat_end_field = getattr(self, "_bat_end_value", None)
+                    if bat_end_field is not None:
                         try:
-                            dt_val = float(self.app._dt.get())
-                        except Exception:
-                            dt_val = float(dt)
-                        steps = max(1, int(float(hours) / dt_val))
-                        cfg.prediction.hours = steps
-                        cfg.prediction.dt_hours = float(dt_val)
-                        cfg.optimization.horizon_hours = float(hours)
-                        genopt = GeneticOptimization(cfg, verbose=False)
-                        logger.info("Starting genetic optimization thread")
-                        sol: GeneticSolution = await asyncio.to_thread(
-                            lambda: genopt.optimierung_ems(
-                                opt_params,
-                                start_hour=0,
-                                worst_case=False,
-                                ngen=int(self._generations.get()),
-                            )
-                        )
-                        return sol
+                            bat_end_val = float(bat_end_field.get())
+                        except ValueError:
+                            bat_end_val = 0.0
+                    optimizer = LinearOptimizer(
+                        inverters=[inv_obj],
+                        prediction=pdata,
+                        battery_end_value_eur_wh=bat_end_val,
+                    )
+                    logger.info("Starting LinearOptimizer with objective={}", objective.value)
+                    sol: LinearSolution = await asyncio.to_thread(
+                        lambda: optimizer.solve(objective=objective)
+                    )
+                    return sol
 
                 def _sim_done(res_tuple):
-                    # res_tuple may be a LinearSolution, GeneticSolution, or legacy tuple
+                    # res_tuple may be a LinearSolution or legacy tuple
                     inv_modes_arrs = None
                     inv_ac_rates_arrs = None
                     solve_meta: str | None = None
@@ -1107,22 +1056,6 @@ class OptimizationTab(_Tab):
                             f"{sol.solve_time_s:.2f}s"
                         )
                         if sol.inverter_plans:
-                            plan = sol.inverter_plans[0]
-                            try:
-                                inv_modes_arrs = [
-                                    array("i", [int(x) for x in plan.get("modes", [])])
-                                ]
-                                inv_ac_rates_arrs = [
-                                    array("f", [float(x) for x in plan.get("rates", [])])
-                                ]
-                            except Exception:
-                                inv_modes_arrs = None
-                                inv_ac_rates_arrs = None
-                    elif isinstance(res_tuple, GeneticSolution):
-                        sol = res_tuple
-                        res = sol.result
-                        # extract modes/rates arrays from inverter_plans if present
-                        if sol.inverter_plans and len(sol.inverter_plans) > 0:
                             plan = sol.inverter_plans[0]
                             try:
                                 inv_modes_arrs = [
@@ -1364,8 +1297,6 @@ class OptimizationTab(_Tab):
                     }
                     if solve_meta:
                         meta["solve_info"] = solve_meta
-                    elif hasattr(self, "_generations"):
-                        meta["generations"] = int(self._generations.get())
                     txt.insert("1.0", json.dumps({"meta": meta, "result": out}, indent=2))
                     txt.configure(state="disabled")
                     suffix = f" · {solve_meta}" if solve_meta else ""

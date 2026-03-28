@@ -264,11 +264,6 @@ def test_simulation(genetic_simulation: GridSimulation) -> None:
     )
     assert result.total_losses >= 0.0
 
-    compat = result.compatibility_adapter()
-    assert isinstance(compat, dict)
-    assert "Last_Wh_pro_Stunde" in compat
-    assert "Gesamtbilanz_Euro" in compat
-    assert "akku_soc_pro_stunde" in compat
 
 
 def test_simulation_discharge_reduces_grid_draw(

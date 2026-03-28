@@ -106,32 +106,6 @@ class SimulationResult:
             "home_appliance_load_per_dt": _conv(self.home_appliance_load_per_dt),
         }
 
-    def compatibility_adapter(self) -> Dict[str, Any]:
-        """Adapt the simulation result to match the legacy output format."""
-        total_load = [
-            g + s for g, s in zip(self.grid_import_wh_per_dt, self.self_consumption_wh_per_dt)
-        ]
-        return {
-            "Last_Wh_pro_Stunde": total_load,
-            "Netzeinspeisung_Wh_pro_Stunde": self.feedin_wh_per_dt,
-            "Netzbezug_Wh_pro_Stunde": self.grid_import_wh_per_dt,
-            "Kosten_Euro_pro_Stunde": self.costs_per_dt,
-            "Einnahmen_Euro_pro_Stunde": self.revenue_per_dt,
-            "Gesamtbilanz_Euro": self.net_balance,
-            "akku_soc_pro_stunde": next(iter(self.battery_soc_percentage_per_dt.values()), None)
-            if self.battery_soc_percentage_per_dt
-            else None,
-            "EAuto_SoC_pro_Stunde": self.battery_soc_percentage_per_dt.get("EV", None)
-            if self.battery_soc_percentage_per_dt and "EV" in self.battery_soc_percentage_per_dt
-            else None,
-            "Gesamteinnahmen_Euro": self.total_revenue,
-            "Gesamtkosten_Euro": self.total_cost,
-            "Verluste_Pro_Stunde": self.losses_wh_per_dt,
-            "Gesamt_Verluste": self.total_losses,
-            "Home_appliance_wh_per_hour": self.home_appliance_load_per_dt,
-            "Inverter_modes_per_hour": self.inverter_modes_per_dt,
-        }
-
     def make_figure(self):
         """Create a Bokeh visualization of the simulation results."""
         try:
