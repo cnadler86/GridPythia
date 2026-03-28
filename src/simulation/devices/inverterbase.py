@@ -133,7 +133,12 @@ class InverterBase:
             InverterMode.AC_CHARGE: self._process_ac_charge,
             InverterMode.AC_CHARGE_ZERO_FEED_IN: self._process_ac_charge,
         }
-        logger.info("Inverter '{}' initialized with topology {}", self.device_id, self.topology)
+        logger.info(
+            "Inverter '{}' initialized with topology {} and pv source {}.",
+            self.device_id,
+            self.topology,
+            self.parameters.pv_source,
+        )
 
     def _resolve_topology(self) -> SystemTopology:
         has_pv = self._has_pv

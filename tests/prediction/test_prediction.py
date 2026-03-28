@@ -37,11 +37,12 @@ class TestPrediction:
         assert isinstance(data, PredictionData)
         assert data.steps == 24
         assert data.dt_hours == 1.0
-        assert len(data["electricprice_eur_wh"]) == 24
-        assert len(data["feedintariff_eur_wh"]) == 24
+        assert len(data.electricprice) == 24
+        assert len(data.feedintariff) == 24
         assert len(data["load_w"]) == 24
-        assert "pv_roof_inverter1_w" in data.df.columns
-        assert len(data["pv_roof_inverter1_w"]) == 24
+        # PV column name now only uses inverter_id, not provider name: pv_{inverter_id}_w
+        assert "pv_inverter1_w" in data.df.columns
+        assert len(data["pv_inverter1_w"]) == 24
         assert "weather_temperature_c" in data.df.columns
 
     async def test_fetch_quarter_hour(self):
@@ -54,24 +55,38 @@ class TestPrediction:
     async def test_values_correct(self):
         pred = self._make_prediction()
         data = await pred.fetch(start=START, hours=24, dt_hours=1.0)
-        assert data["electricprice_eur_wh"][0] == pytest.approx(0.0003)
-        assert data["feedintariff_eur_wh"][0] == pytest.approx(0.000082)
-        assert data["pv_roof_inverter1_w"][0] == pytest.approx(0.0)
-        assert data["pv_roof_inverter1_w"][10] == pytest.approx(1000.0)
+        assert data.electricprice[0] == pytest.approx(0.0003)
+        assert data.feedintariff[0] == pytest.approx(0.000082)
+        assert data["pv_inverter1_w"][0] == pytest.approx(0.0)
+        assert data["pv_inverter1_w"][10] == pytest.approx(1000.0)
 
     async def test_multiple_pv_plants(self):
+        # Test multiple inverters from the same provider
+        class MultiInverterPV(PVForecastProvider):
+            @property
+            def provider_id(self) -> str:
+                return "MultiInverterPV"
+
+            async def fetch(self, timestamps: pl.Series) -> pl.Series:
+                raise AssertionError("Use fetch_by_inverter")
+
+            async def fetch_by_inverter(self, timestamps: pl.Series) -> dict[str, pl.Series]:
+                steps = len(timestamps)
+                return {
+                    "east": pl.Series([500.0] * steps, dtype=pl.Float32),
+                    "west": pl.Series([300.0] * steps, dtype=pl.Float32),
+                }
+
         setup = PredictionSetup(
-            pv={
-                "east": PVForecastImport(power_w=[500.0] * 24),
-                "west": PVForecastImport(power_w=[300.0] * 24),
-            },
+            pv={"roof": MultiInverterPV()},
         )
         pred = Prediction(setup)
         data = await pred.fetch(start=START, hours=24)
-        assert "pv_east_inverter1_w" in data.df.columns
-        assert "pv_west_inverter1_w" in data.df.columns
-        assert data["pv_east_inverter1_w"][0] == pytest.approx(500.0)
-        assert data["pv_west_inverter1_w"][0] == pytest.approx(300.0)
+        # Column names now only use inverter ID
+        assert "pv_east_w" in data.df.columns
+        assert "pv_west_w" in data.df.columns
+        assert data["pv_east_w"][0] == pytest.approx(500.0)
+        assert data["pv_west_w"][0] == pytest.approx(300.0)
 
     async def test_no_providers_gives_zeros(self):
         pred = Prediction(PredictionSetup())
@@ -79,7 +94,6 @@ class TestPrediction:
         assert data.steps == 24
         assert all(v == 0.0 for v in data["electricprice_eur_wh"].to_list())
         assert all(v == 0.0 for v in data["load_w"].to_list())
-        assert data.pv_names == []
         assert "weather_temperature_c" not in data.df.columns
 
     async def test_48_hours(self):
@@ -89,14 +103,31 @@ class TestPrediction:
         assert len(data["electricprice_eur_wh"]) == 48
 
     async def test_pv_names_property(self):
+        # Test multiple inverters from different providers
+        class MultiInvProvider(PVForecastProvider):
+            @property
+            def provider_id(self) -> str:
+                return "MultiInvProvider"
+
+            def __init__(self, inverter_ids: list[str]):
+                self.inverter_ids = inverter_ids
+
+            async def fetch(self, timestamps: pl.Series) -> pl.Series:
+                raise AssertionError("Use fetch_by_inverter")
+
+            async def fetch_by_inverter(self, timestamps: pl.Series) -> dict[str, pl.Series]:
+                steps = len(timestamps)
+                return {
+                    inv_id: pl.Series([100.0] * steps, dtype=pl.Float32)
+                    for inv_id in self.inverter_ids
+                }
+
         setup = PredictionSetup(
-            pv={
-                "north": PVForecastImport(power_w=[0.0] * 24),
-                "south": PVForecastImport(power_w=[0.0] * 24),
-            }
+            pv={"roof": MultiInvProvider(["north", "south"])}
         )
         data = await Prediction(setup).fetch(start=START, hours=24)
-        assert set(data.pv_names) == {"north_inverter1", "south_inverter1"}
+        # With new structure, pv_names only contains inverter IDs
+        assert set(data.pv_names) == {"north", "south"}
 
     async def test_multiple_inverters_per_provider(self):
         class MultiInverterPV(PVForecastProvider):
@@ -114,16 +145,20 @@ class TestPrediction:
                     "inv2": pl.Series([200.0] * steps, dtype=pl.Float32),
                 }
 
+        # Note: with the refactored column naming (pv_{inverter_id}_w only),
+        # multiple inverter IDs from one provider are all at the same level now
         data = await Prediction(PredictionSetup(pv={"roof": MultiInverterPV()})).fetch(
             start=START,
             hours=24,
         )
 
-        assert "pv_roof_inv1_w" in data.df.columns
-        assert "pv_roof_inv2_w" in data.df.columns
-        assert data["pv_roof_inv1_w"][0] == pytest.approx(100.0)
-        assert data["pv_roof_inv2_w"][0] == pytest.approx(200.0)
-        assert set(data.pv_names) == {"roof_inv1", "roof_inv2"}
+        # Column names now only use inverter_id: pv_{inverter_id}_w
+        assert "pv_inv1_w" in data.df.columns
+        assert "pv_inv2_w" in data.df.columns
+        assert data["pv_inv1_w"][0] == pytest.approx(100.0)
+        assert data["pv_inv2_w"][0] == pytest.approx(200.0)
+        # pv_names now only returns the inverter IDs (not provider_inverter)
+        assert set(data.pv_names) == {"inv1", "inv2"}
 
     async def test_timestamps_property(self):
         pred = self._make_prediction()

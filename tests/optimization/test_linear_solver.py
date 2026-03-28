@@ -27,7 +27,7 @@ def _make_prediction(load_w: list[float], price_eur_wh: list[float]) -> Predicti
             "load_w": pl.Series(load_w, dtype=pl.Float32),
         }
     )
-    return PredictionData(df=df, dt_hours=1.0)
+    return PredictionData(_df=df, dt_hours=1.0)
 
 
 def _make_hybrid_inverter(roundtrip_efficiency: float = 0.8) -> InverterBase:
@@ -56,7 +56,7 @@ def _make_hybrid_inverter(roundtrip_efficiency: float = 0.8) -> InverterBase:
         InverterParameters(
             device_id="hybrid_h1",
             battery_id="battery_h1",
-            pv_source="pv_roof",
+            pv_source="hybrid_h1",
             max_ac_output_power_w=1000,
             max_ac_charge_power_w=500,
             dc_to_ac_efficiency=1.0,

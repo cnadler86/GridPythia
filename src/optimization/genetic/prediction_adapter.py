@@ -33,39 +33,30 @@ def prediction_to_genetic_params(
     """
     # dt in hours used by the prediction window
     dt = pred.dt_hours
-
-    df = pred.df
+    n_steps = pred.steps
 
     # Load: convert W -> Wh for each timestep (power * hours)
-    if "load_w" in df.columns:
-        load_wh = (df["load_w"] * float(dt)).to_list()
-    else:
-        load_wh = [0.0] * len(df)
+    load_wh = (pred["load_w"] * float(dt)).to_list()
 
     # Electricity price per Wh (prediction already stores EUR/Wh)
-    if "electricprice_eur_wh" in df.columns:
-        price_eur_per_wh = df["electricprice_eur_wh"].to_list()
+    if pred.electricprice is not None:
+        price_eur_per_wh = pred.electricprice.to_list()
     else:
-        price_eur_per_wh = [0.0] * len(df)
+        price_eur_per_wh = [0.0] * n_steps
 
     # Feed-in tariff: prefer column, otherwise use provided default or zeros
-    if "feedintariff_eur_wh" in df.columns:
-        feedin = df["feedintariff_eur_wh"].to_list()
+    if pred.feedintariff is not None:
+        feedin = pred.feedintariff.to_list()
     else:
         if einspeise_default is None:
-            feedin = [0.0] * len(df)
+            feedin = [0.0] * n_steps
         else:
-            feedin = [float(einspeise_default)] * len(df)
+            feedin = [float(einspeise_default)] * n_steps
 
-    # PV columns are named pv_{name}_{inverter}_w; group by pv name
+    # PV columns are named pv_{inverter_id}_w; map by inverter_id
     pv_map: Dict[str, list[float]] = {}
-    for c in df.columns:
-        if c.startswith("pv_") and c.endswith("_w"):
-            # pv_{name}_{inverter}_w -> extract name
-            body = c[len("pv_") : -len("_w")]
-            # keep the full body as key (name_inverter) so it matches
-            # inverter.parameter.pv_source used in the simulation
-            pv_map[body] = (df[c] * float(dt)).to_list()
+    for inverter_id, series in pred.pv_by_inverter.items():
+        pv_map[inverter_id] = (series * float(dt)).to_list()
 
     return EnergyManagementParameters(
         pv_prognose_wh=pv_map,

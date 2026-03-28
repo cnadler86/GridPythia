@@ -4,7 +4,7 @@ import pytest
 
 from src.simulation.devices import InverterMode, SystemTopology
 from src.simulation.devices.battery import Battery, BatteryParameters
-from src.simulation.devices.inverterbase import InverterBase, InverterParameters
+from src.simulation.devices.inverterbase import InverterBase, InverterParameters, DEFAULT_AC_RATES
 
 
 @pytest.fixture
@@ -176,3 +176,24 @@ class TestEnergyFlow:
         )
         assert res.ac_output_wh == pytest.approx(500, abs=1e-3)
         assert battery.soc_wh < initial_soc
+
+
+class TestRates:
+    def test_hybrid_has_only_charge_rates(self, pv_hybrid_params, battery):
+        """Hybrid inverter: should expose charge_rates from config, no discharge_rates."""
+        inv = InverterBase(pv_hybrid_params, battery=battery)
+        expected_charge = tuple(sorted({float(r) for r in pv_hybrid_params.ac_rates}))
+        assert inv.charge_rates == expected_charge
+        assert inv.discharge_rates == tuple()
+
+    def test_ac_battery_default_charge_rates(self, ac_battery_params, battery):
+        """AC-only battery inverter: should have default charge_rates and no discharge_rates when zero-feed-in is used."""
+        inv = InverterBase(ac_battery_params, battery=battery)
+        assert inv.charge_rates == DEFAULT_AC_RATES
+        assert inv.discharge_rates == tuple()
+
+    def test_pv_battery_no_ac_rates_empty(self, pv_battery_no_ac_params, battery):
+        """PV+Battery without AC charge: no charge_rates; discharge rates only relevant for DISCHARGE mode."""
+        inv = InverterBase(pv_battery_no_ac_params, battery=battery)
+        assert inv.charge_rates == tuple()
+        assert inv.discharge_rates == tuple()

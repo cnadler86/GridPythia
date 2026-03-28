@@ -210,6 +210,24 @@ def _wire_hover(
     return canvas.mpl_connect("motion_notify_event", _on_move)
 
 
+def _setup_plot_axes(fig, num_rows: int = 111) -> tuple:
+    """Common plot setup: clear fig, add subplot. Returns (ax, canvas for later finalization)."""
+    fig.clear()
+    ax = fig.add_subplot(num_rows)
+    return ax
+
+
+def _finalize_plot(ax, ylabel: str = "", title: str = "", gridOn: bool = True) -> None:
+    """Common plot finalization: grid, labels, date formatting."""
+    if ylabel:
+        ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    if gridOn:
+        ax.grid(True, alpha=0.3)
+    # Date formatting happens in _done() for all tabs
+
+
 def _wire_pv_hover(
     canvas: FigureCanvasTkAgg,
     ax,
@@ -426,11 +444,9 @@ class _Tab:
         messagebox.showerror("Fetch error", f"{exc}\n\n{tb[:1500]}", parent=self.frame)
 
     def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
-        ax = self._fig.add_subplot(111)
+        ax = _setup_plot_axes(self._fig)
         ax.plot(ts.to_list(), s.to_list(), linewidth=1.4)
-        ax.set_title(self.TITLE)
-        ax.grid(True, alpha=0.3)
-        self._fig.autofmt_xdate(rotation=25)
+        _finalize_plot(ax, title=self.TITLE)
 
 
 # ── Electric Price ────────────────────────────────────────────────────────
@@ -486,15 +502,12 @@ class ElecPriceTab(_Tab):
         )
 
     def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
-        ax = self._fig.add_subplot(111)
+        ax = _setup_plot_axes(self._fig)
         t = ts.to_list()
         v = [x * 1000 for x in s.to_list()]  # EUR/Wh → EUR/kWh
         ax.step(t, v, color="#1565C0", linewidth=1.5, where="post")
         ax.fill_between(t, v, alpha=0.12, color="#1565C0", step="post")
-        ax.set_ylabel("EUR / kWh")
-        ax.set_title("Electricity Price")
-        ax.grid(True, alpha=0.3)
-        self._fig.autofmt_xdate(rotation=25)
+        _finalize_plot(ax, ylabel="EUR / kWh", title="Electricity Price")
         self._hover_cids.append(_wire_hover(self._canvas, ax, t, v, fmt_y="{:.5f}", unit="EUR/kWh"))
 
 
@@ -527,15 +540,12 @@ class FeedInTariffTab(_Tab):
         )
 
     def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
-        ax = self._fig.add_subplot(111)
+        ax = _setup_plot_axes(self._fig)
         t = ts.to_list()
         v = [x * 1000 for x in s.to_list()]
         ax.step(t, v, color="#2E7D32", linewidth=1.5, where="post")
         ax.fill_between(t, v, alpha=0.12, color="#2E7D32", step="post")
-        ax.set_ylabel("EUR / kWh")
-        ax.set_title("Feed-in Tariff")
-        ax.grid(True, alpha=0.3)
-        self._fig.autofmt_xdate(rotation=25)
+        _finalize_plot(ax, ylabel="EUR / kWh", title="Feed-in Tariff")
         self._hover_cids.append(_wire_hover(self._canvas, ax, t, v, fmt_y="{:.5f}", unit="EUR/kWh"))
 
 
@@ -589,15 +599,12 @@ class LoadTab(_Tab):
             )
 
     def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
-        ax = self._fig.add_subplot(111)
+        ax = _setup_plot_axes(self._fig)
         t = ts.to_list()
         v = s.to_list()
         ax.step(t, v, color="#E65100", linewidth=1.5, where="post")
         ax.fill_between(t, v, alpha=0.12, color="#E65100", step="post")
-        ax.set_ylabel("Power [W]")
-        ax.set_title("Load")
-        ax.grid(True, alpha=0.3)
-        self._fig.autofmt_xdate(rotation=25)
+        _finalize_plot(ax, ylabel="Power [W]", title="Load")
         self._hover_cids.append(_wire_hover(self._canvas, ax, t, v, fmt_y="{:.1f}", unit="W"))
 
 
@@ -706,16 +713,13 @@ class PVForecastTab(_Tab):
         )
 
     def _do_plot(self, s: pl.Series, ts: pl.Series) -> None:
-        ax = self._fig.add_subplot(111)
+        ax = _setup_plot_axes(self._fig)
         t = ts.to_list()
         v = s.to_list()
         dt_hours = ((t[1] - t[0]).total_seconds() / 3600) if len(t) > 1 else 1.0
         ax.plot(t, v, color="#F57F17", linewidth=1.5)
         ax.fill_between(t, v, alpha=0.20, color="#FDD835")
-        ax.set_ylabel("Power [W]")
-        ax.set_title("PV Forecast")
-        ax.grid(True, alpha=0.3)
-        self._fig.autofmt_xdate(rotation=25)
+        _finalize_plot(ax, ylabel="Power [W]", title="PV Forecast")
         self._hover_cids.append(_wire_pv_hover(self._canvas, ax, t, v, dt_hours))
 
 
@@ -877,6 +881,13 @@ class OptimizationTab(_Tab):
         row += 1
         self._inv_ac2dc = _field(f, row, "AC→DC eff", "0.95")
         row += 1
+        self._zero_feed_in = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f,
+            text="Zero feed-in (prevent exporting)",
+            variable=self._zero_feed_in,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
+        row += 1
         # Feed-in default (EUR/Wh) when feedin provider is not configured
         self._feedin_default = _field(f, row, "Feed-in default EUR/Wh", "0.0")
         row += 1
@@ -915,7 +926,7 @@ class OptimizationTab(_Tab):
             electricprice=elec_tab._get_provider() if elec_tab else None,
             feedintariff=feed_tab._get_provider() if feed_tab else None,
             load=load_tab._get_provider() if load_tab else None,
-            pv={"__global__": pv_tab._get_provider()} if pv_tab else {},
+            pv={self._inv_id.get(): pv_tab._get_provider()} if pv_tab else {},
             weather=weather_tab._get_provider() if weather_tab else None,
         )
 
@@ -932,6 +943,60 @@ class OptimizationTab(_Tab):
                 except Exception:
                     self._last_ts = None
                 self._last_dt = getattr(pdata, "dt_hours", None)
+
+                # Update other tabs' plots with the freshly fetched prediction
+                def _update_tabs():
+                    ts = pdata.timestamps
+                    try:
+                        if elec_tab is not None:
+                            try:
+                                elec_tab._done(pdata.electricprice, ts)
+                            except Exception:
+                                pass
+                        if feed_tab is not None:
+                            try:
+                                feed_tab._done(pdata.feedintariff, ts)
+                            except Exception:
+                                pass
+                        if load_tab is not None:
+                            try:
+                                load_tab._done(pdata["load_w"], ts)
+                            except Exception:
+                                pass
+                        if pv_tab is not None:
+                            try:
+                                # sum all pv_* columns into one series for plotting
+                                pv_series_list = list(pdata.pv_by_inverter.values())
+                                if pv_series_list:
+                                    import operator
+                                    from functools import reduce
+
+                                    pv_sum = reduce(operator.add, pv_series_list)
+                                    pv_tab._done(pv_sum, ts)
+                            except Exception:
+                                pass
+                        if weather_tab is not None:
+                            try:
+                                # rebuild weather dataframe without the 'weather_' prefix
+                                weather_cols = [
+                                    c for c in pdata.df.columns if c.startswith("weather_")
+                                ]
+                                if weather_cols:
+                                    data = {c[len("weather_") :]: pdata.df[c] for c in weather_cols}
+                                    wf = pl.DataFrame(data)
+                                    weather_tab._done(wf, ts)
+                            except Exception:
+                                pass
+                    except Exception:
+                        # don't let tab-updates break the optimization flow
+                        return
+
+                # Schedule GUI updates on the main thread
+                try:
+                    self.app.root.after(0, _update_tabs)
+                except Exception:
+                    # best-effort: ignore if scheduling fails
+                    pass
 
                 bat_price = float(self._bat_price.get())
                 feedin_default = float(self._feedin_default.get())
@@ -957,6 +1022,7 @@ class OptimizationTab(_Tab):
                         max_ac_charge_power_w=float(self._inv_max_charge.get()),
                         dc_to_ac_efficiency=float(self._inv_dc2ac.get()),
                         ac_to_dc_efficiency=float(self._inv_ac2dc.get()),
+                        zero_feed_in=bool(self._zero_feed_in.get()),
                     )
                     inv = InverterBase(inv_params, battery=bat)
                     return bat, inv
@@ -1091,7 +1157,13 @@ class OptimizationTab(_Tab):
                     try:
                         self._fig.clear()
                         n = len(res.costs_per_dt)
-                        x = list(range(n))
+                        
+                        # Convert timestamps to matplotlib-compatible format if available
+                        ts = getattr(self, "_last_ts", None)
+                        if ts and len(ts) >= n:
+                            x = ts[:n]
+                        else:
+                            x = list(range(n))
 
                         # Top: energy flows
                         ax = self._fig.add_subplot(311)
@@ -1104,6 +1176,16 @@ class OptimizationTab(_Tab):
                         ax.legend(loc="upper right", fontsize=8)
                         ax.set_ylabel("Wh")
                         ax.grid(alpha=0.3)
+                        if isinstance(x[0], (int, float)):
+                            # numeric x: don't format dates
+                            pass
+                        else:
+                            # Add hover to energy flows
+                            try:
+                                grid_import_data = list(res.grid_import_wh_per_dt)
+                                _wire_hover(self._canvas, ax, x, grid_import_data, fmt_y="{:.1f}", unit=" Wh")
+                            except Exception:
+                                pass
 
                         # Middle: PV generation and Load (left axis), electric price (right axis)
                         ax2 = self._fig.add_subplot(312)
@@ -1152,6 +1234,17 @@ class OptimizationTab(_Tab):
                         lines, labels = ax2.get_legend_handles_labels()
                         lines2, labels2 = ax3.get_legend_handles_labels()
                         ax2.legend(lines + lines2, labels + labels2, loc="upper right", fontsize=8)
+                        
+                        # Add hover annotation for ax2 and ax3
+                        if isinstance(x[0], (int, float)):
+                            # numeric x: datetime hover not applicable
+                            pass
+                        else:
+                            # Add datetime hover to energy plot
+                            try:
+                                _wire_hover(self._canvas, ax2, x, load_wh, fmt_y="{:.1f}", unit=" Wh")
+                            except Exception:
+                                pass
 
                         # Bottom: battery SoC (%) (left axis) and inverter modes (right axis)
                         ax4 = self._fig.add_subplot(313)
@@ -1220,6 +1313,27 @@ class OptimizationTab(_Tab):
                                 handles=handles, labels=labels, loc="upper right", fontsize=8
                             )
                         ax4.grid(alpha=0.2)
+                        
+                        # Add hover to battery SoC plot if timestamps available
+                        if isinstance(x[0], (int, float)):
+                            # numeric x: don't add hover
+                            pass
+                        else:
+                            # Add hover for SoC
+                            soc_data = []
+                            if res.battery_soc_percentage_per_dt:
+                                for k, arr in (res.battery_soc_percentage_per_dt or {}).items():
+                                    soc_data = list(arr)
+                                    break
+                            if soc_data:
+                                try:
+                                    _wire_hover(self._canvas, ax4, x, soc_data, fmt_y="{:.1f}", unit="%")
+                                except Exception:
+                                    pass
+                        
+                        # Date formatting for all subplots with timestamps
+                        if not isinstance(x[0], (int, float)):
+                            self._fig.autofmt_xdate(rotation=25)
 
                         self._canvas.draw()
                     except Exception:

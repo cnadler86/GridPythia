@@ -170,6 +170,8 @@ class LinearOptimizer:
             objective: Which objective function to optimise.
             solver_opts: Optional keyword arguments forwarded to CVXPY's
                 ``solve()`` call (e.g. ``{"time_limit": 60}``).
+                By default a practical ``time_limit`` and ``mip_rel_gap``
+                are applied to avoid GUI stalls on larger MILP instances.
 
         Returns:
             A :class:`LinearSolution` containing the full simulation result
@@ -183,20 +185,17 @@ class LinearOptimizer:
         pred = self.prediction
 
         # ── Extract fixed parameters from PredictionData ──────────────
-        price = np.array(pred["electricprice_eur_wh"].to_list(), dtype=float)
-        feedin_tariff = np.array(pred["feedintariff_eur_wh"].to_list(), dtype=float)
+        price = np.array(pred.electricprice.to_list(), dtype=float)
+        feedin_tariff = np.array(pred.feedintariff.to_list(), dtype=float)
         load_wh = np.array(pred["load_w"].to_list(), dtype=float) * dt
 
         # Aggregate PV generation: W → Wh per step
         pv_total_wh = np.zeros(T, dtype=float)
         pv_per_inverter: dict[str, np.ndarray] = {}
-        for col in pred.df.columns:
-            if col.startswith("pv_") and col.endswith("_w"):
-                arr = np.array(pred[col].to_list(), dtype=float) * dt
-                pv_total_wh += arr
-                # Column format: pv_{name}_{inverter}_w → key is "{name}_{inverter}"
-                body = col[len("pv_") : -len("_w")]
-                pv_per_inverter[body] = arr
+        for inverter_id, pv_series in pred.pv_by_inverter.items():
+            arr = np.array(pv_series.to_list(), dtype=float) * dt
+            pv_total_wh += arr
+            pv_per_inverter[inverter_id] = arr
 
         # ── Decision variables ────────────────────────────────────────
         # Discrete sub-states per inverter:
@@ -321,10 +320,24 @@ class LinearOptimizer:
             obj_expr = cp.sum(g_feedin) - bat_terminal_reward
 
         prob = cp.Problem(cp.Minimize(obj_expr), constraints)
+        size = prob.size_metrics
+        logger.info(
+            "Solving linear optimisation problem with objective '{}' and {} scalar variables ({} constraints)...",
+            objective.value,
+            size.num_scalar_variables,
+            size.num_scalar_eq_constr + size.num_scalar_leq_constr,
+        )
 
         # ── Solve ─────────────────────────────────────────────────────
         t0 = time.perf_counter()
-        opts: dict = {"verbose": False, **(solver_opts or {})}
+        # Practical defaults for interactive usage (GUI): bound runtime and
+        # allow a small MIP gap so an incumbent is returned quickly.
+        opts: dict = {
+            "verbose": False,
+            "time_limit": 30,
+            "mip_rel_gap": 0.02,
+            **(solver_opts or {}),
+        }
         try:
             prob.solve(solver=cp.HIGHS, **opts)
         except cp.SolverError as exc:
@@ -340,7 +353,19 @@ class LinearOptimizer:
             prob.value,
         )
 
-        if status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+        accepted_statuses = {
+            cp.OPTIMAL,
+            cp.OPTIMAL_INACCURATE,
+        }
+        # HiGHS may stop at time/gap limits with a valid incumbent solution.
+        if status == "user_limit" and g_import.value is not None and g_feedin.value is not None:
+            logger.warning(
+                "LinearOptimizer reached user_limit; returning incumbent solution. "
+                "Consider increasing 'time_limit' for higher optimality guarantees."
+            )
+            accepted_statuses.add("user_limit")
+
+        if status not in accepted_statuses:
             raise RuntimeError(
                 f"Optimisation did not converge: solver status='{status}'. "
                 "Check that the problem is feasible (battery capacity and SoC bounds)."

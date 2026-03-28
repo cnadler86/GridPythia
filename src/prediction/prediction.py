@@ -18,42 +18,98 @@ from src.prediction.weather.provider import WeatherProvider
 class PredictionData:
     """All prediction channels aligned on a shared time axis.
 
-    The internal :attr:`df` has the following columns:
+    The internal :attr:`_df` has the following columns:
 
     * ``timestamp`` — ``pl.Datetime``
     * ``electricprice_eur_wh`` — ``pl.Float32``
     * ``feedintariff_eur_wh`` — ``pl.Float32``
     * ``load_w`` — ``pl.Float32``
-        * ``pv_{name}_{inverter}_w`` — ``pl.Float32`` for each registered PV plant
-            and inverter
+    * ``pv_{inverter_id}_w`` — ``pl.Float32`` for each registered inverter with PV
     * ``weather_{channel}`` — ``pl.Float32`` for each weather channel delivered
       by the weather provider (e.g. ``weather_temperature_c``)
 
-    Quick access: ``data["load_w"]`` returns the corresponding ``pl.Series``.
+    Quick access via properties: ``data.load_wh``, ``data.electricprice``, ``data.feedintariff``.
+    For PV: ``data.get_pv_series(inverter_id)`` or ``data.pv_by_inverter``.
     """
 
-    df: pl.DataFrame
-    dt_hours: float
+    _df: pl.DataFrame = None
+    dt_hours: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Validate internal state after dataclass initialization."""
+        if self._df is None:
+            raise ValueError("_df must not be None")
 
     def __getitem__(self, key: str) -> pl.Series:
-        return self.df[key]
+        """Direct column access for internal use; prefer properties for public API."""
+        return self._df[key]
+
+    @property
+    def df(self) -> pl.DataFrame:
+        """Read-only access to internal DataFrame for iteration/inspection only.
+        
+        Prefer using typed properties (load_wh, electricprice, etc) for direct access.
+        """
+        return self._df
 
     @property
     def timestamps(self) -> pl.Series:
-        return self.df["timestamp"]
+        return self._df["timestamp"]
 
     @property
     def steps(self) -> int:
-        return len(self.df)
+        return len(self._df)
+
+    @property
+    def load_wh(self) -> pl.Series:
+        """Load power in Wh (integrated over dt_hours)."""
+        return self._df["load_w"]
+
+    @property
+    def electricprice(self) -> pl.Series:
+        """Electricity price in EUR/Wh."""
+        try:
+            return self._df["electricprice_eur_wh"]
+        except Exception:
+            return None
+
+    @property
+    def feedintariff(self) -> pl.Series:
+        """Feed-in tariff in EUR/Wh."""
+        try:
+            return self._df["feedintariff_eur_wh"]
+        except Exception:
+            return None
+
+    @property
+    def pv_by_inverter(self) -> dict[str, pl.Series]:
+        """Return dict mapping inverter_id to corresponding PV Series.
+        
+        Useful for looking up PV forecast by inverter device ID.
+        Returns empty dict if no PV columns present.
+        """
+        result = {}
+        for col in self._df.columns:
+            if col.startswith("pv_") and col.endswith("_w"):
+                inverter_id = col[len("pv_") : -len("_w")]
+                result[inverter_id] = self._df[col]
+        return result
+
+    def get_pv_series(self, inverter_id: str) -> pl.Series | None:
+        """Get PV forecast Series for a specific inverter, or None if not found."""
+        col_name = f"pv_{inverter_id}_w"
+        try:
+            return self._df[col_name]
+        except Exception:
+            return None
 
     @property
     def pv_names(self) -> list[str]:
-        """PV channel names extracted from ``pv_{name}_{inverter}_w`` columns."""
-        return [
-            c.removeprefix("pv_").removesuffix("_w")
-            for c in self.df.columns
-            if c.startswith("pv_") and c.endswith("_w")
-        ]
+        """PV inverter IDs extracted from ``pv_{inverter_id}_w`` columns.
+        
+        Deprecated: use pv_by_inverter.keys() instead.
+        """
+        return list(self.pv_by_inverter.keys())
 
 
 @dataclass
@@ -137,9 +193,12 @@ class Prediction:
             "feedintariff_eur_wh": ftariff,
             "load_w": load_w,
         }
+        
+        # Add PV data: column format is pv_{inverter_id}_w (not including provider name)
         for name, series_by_inverter in zip(pv_names, pv_series):
             for inverter, series in series_by_inverter.items():
-                data[f"pv_{name}_{inverter}_w"] = series
+                # Only use inverter as key, not the provider name
+                data[f"pv_{inverter}_w"] = series
 
         if weather_df is not None:
             for col_name in weather_df.columns:
@@ -147,4 +206,4 @@ class Prediction:
 
         df = pl.DataFrame(data)
 
-        return PredictionData(df=df, dt_hours=dt_hours)
+        return PredictionData(_df=df, dt_hours=dt_hours)

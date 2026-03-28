@@ -188,7 +188,7 @@ def genetic_simulation() -> GridSimulation:
             device_id="inverter1",
             max_ac_output_power_w=10000,
             battery_id="battery1",
-            pv_source="__global__",
+            pv_source="inverter1",
             dc_to_ac_efficiency=1.0,
             ac_to_dc_efficiency=0.0,
             max_ac_charge_power_w=0.0,
@@ -207,7 +207,7 @@ def genetic_simulation() -> GridSimulation:
     )
 
     params = EnergyManagementParameters(
-        pv_prognose_wh={"__global__": PV_WH},
+        pv_prognose_wh={"inverter1": PV_WH},
         strompreis_euro_pro_wh=PRICES,
         einspeiseverguetung_euro_pro_wh=0.00007,
         preis_euro_pro_wh_akku=0.0001,
