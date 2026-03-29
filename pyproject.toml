@@ -1,7 +1,7 @@
 [project]
-name = "ElioPy"
+name = "GridPythia"
 version = "0.1.0"
-description = "Simplified Home Energy Management System"
+description = "Home energy prediction and optimization system"
 requires-python = ">=3.13"
 dependencies = [
     "loguru",
@@ -47,20 +47,13 @@ output-format = "full"
 [tool.ruff.lint]
 select = [
     "F",      # Enable all `Pyflakes` rules.
-    "D",      # Enable all `pydocstyle` rules, limiting to those that adhere to the
-              # Google convention via `convention = "google"`, below.
-    "S",      # Enable all `flake8-bandit` rules.
+    "W",      # Enable all `Pyflakes` warnings.
+    "D",      # Enable all `pydocstyle` rules (Google convention).
+    "S",      # Enable all `flake8-bandit` rules (security).
+    "B",      # Enable `flake8-bugbear`-style warnings (practical issues).
+    "I",      # Import-related checks (imports, ordering).
 ]
 ignore = [
-   # Prevent errors due to ruff false positives
-   # ------------------------------------------
-   # On top of `Pyflakes (F)` to allow numpydantic Shape forward annotation
-   "F722",    # forward-annotation-syntax-error: forward annotations that include invalid syntax.
-
-    # Prevent errors for existing sources. Should be removed!!!
-    # ---------------------------------------------------------
-    # On top of `Pyflakes (F)`
-    "F841",   # unused-variable: Local variable {name} is assigned to but never used
     # On top of `pydocstyle (D)`
     "D100",   # undocumented-public-module: Missing docstring in public module
     "D101",   # undocumented-public-class: Missing docstring in public class

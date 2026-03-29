@@ -17,7 +17,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
-from typing import Any, Mapping
+from typing import Any, Callable, Coroutine, List, Mapping, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 
 import matplotlib
@@ -40,16 +40,20 @@ from src.prediction.base import make_timestamps
 from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts, EnergyChartsConfig
 from src.prediction.electricprice.fixed import ElecPriceFixed
 from src.prediction.electricprice.import_ import ElecPriceImport
+from src.prediction.electricprice.provider import ElecPriceProvider
 from src.prediction.feedintariff.fixed import FeedInTariffFixed
 from src.prediction.feedintariff.import_ import FeedInTariffImport
+from src.prediction.feedintariff.provider import FeedInTariffProvider
 from src.prediction.load.profilejson import LoadProfileJSON
-from src.prediction.prediction import Prediction, PredictionSetup
+from src.prediction.load.provider import LoadProvider
+from src.prediction.prediction import Prediction, PredictionData, PredictionSetup
 from src.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
 from src.prediction.pvforecast.import_ import PVForecastImport
 from src.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
-from src.prediction.pvforecast.provider import PVPlaneConfig
+from src.prediction.pvforecast.provider import PVForecastProvider, PVPlaneConfig
 from src.prediction.weather.brightsky import WeatherBrightSky
 from src.prediction.weather.openmeteo import WeatherOpenMeteo
+from src.prediction.weather.provider import WeatherProvider
 from src.simulation.devices import InverterMode
 from src.simulation.devices.battery import Battery
 from src.simulation.devices.inverterbase import InverterBase
@@ -87,10 +91,14 @@ _PAD: Mapping[str, Any] = {"padx": 4, "pady": 3}
 # ── utilities ─────────────────────────────────────────────────────────────
 
 
-def _run_async(coro, on_done, on_error) -> None:
+def _run_async(
+    coro: Coroutine[Any, Any, Any],
+    on_done: Callable[[Any], None],
+    on_error: Callable[[Exception, str], None],
+) -> None:
     """Run *coro* in a daemon thread; deliver results via callbacks."""
 
-    def _worker():
+    def _worker() -> None:
         try:
             on_done(asyncio.run(coro))
         except Exception as exc:
@@ -135,7 +143,7 @@ def _textarea(parent: tk.Misc, row: int, height: int = 5) -> scrolledtext.Scroll
     return w
 
 
-def _place_hover_annotation(ax, annot, x: float, y: float) -> None:
+def _place_hover_annotation(ax: Axes, annot: Any, x: float, y: float) -> None:
     """Keep hover annotations inside the visible figure area near the hovered point."""
     bbox = ax.figure.bbox
     px, py = ax.transData.transform((x, y))
@@ -155,9 +163,9 @@ def _place_hover_annotation(ax, annot, x: float, y: float) -> None:
 
 def _wire_hover(
     canvas: FigureCanvasTkAgg,
-    ax,
-    xs_dt: list,
-    ys: list,
+    ax: Axes,
+    xs_dt: List[datetime],
+    ys: List[float],
     fmt_y: str = "{:.4f}",
     unit: str = "",
 ) -> int:
@@ -167,7 +175,7 @@ def _wire_hover(
     xs_num = np.array(mdates.date2num(xs_dt), dtype=float)
     ys_arr = np.array(ys, dtype=float)
 
-    annot = ax.annotate(
+    annot: Any = ax.annotate(
         "",
         xy=(0, 0),
         xytext=(10, 15),
@@ -183,7 +191,7 @@ def _wire_hover(
     annot.set_clip_on(False)
     vline.set_in_layout(False)
 
-    def _on_move(event):
+    def _on_move(event: Any) -> Any:
         if event.inaxes is not ax:
             if annot.get_visible():
                 annot.set_visible(False)
@@ -207,14 +215,14 @@ def _wire_hover(
     return canvas.mpl_connect("motion_notify_event", _on_move)
 
 
-def _setup_plot_axes(fig, num_rows: int = 111) -> Axes:
+def _setup_plot_axes(fig: Figure, num_rows: int = 111) -> Axes:
     """Common plot setup: clear fig, add subplot. Returns the Axes object."""
     fig.clear()
     ax = fig.add_subplot(num_rows)
     return ax
 
 
-def _finalize_plot(ax, ylabel: str = "", title: str = "", gridOn: bool = True) -> None:
+def _finalize_plot(ax: Axes, ylabel: str = "", title: str = "", gridOn: bool = True) -> None:
     """Common plot finalization: grid, labels, date formatting."""
     if ylabel:
         ax.set_ylabel(ylabel)
@@ -227,9 +235,9 @@ def _finalize_plot(ax, ylabel: str = "", title: str = "", gridOn: bool = True) -
 
 def _wire_pv_hover(
     canvas: FigureCanvasTkAgg,
-    ax,
-    xs_dt: list,
-    ys: list,
+    ax: Axes,
+    xs_dt: List[datetime],
+    ys: List[float],
     dt_hours: float,
 ) -> int:
     """PV-specific hover: step energy + daily total + remaining for that day."""
@@ -238,7 +246,7 @@ def _wire_pv_hover(
 
     # Values are already energy per step (Wh), so daily aggregation is a plain sum.
     day_total_wh: dict = {}
-    for ti, wi in zip(xs_dt, ys):
+    for ti, wi in zip(xs_dt, ys, strict=False):
         d = ti.date()
         day_total_wh[d] = day_total_wh.get(d, 0.0) + float(wi)
 
@@ -253,7 +261,7 @@ def _wire_pv_hover(
     xs_num = np.array(mdates.date2num(xs_dt), dtype=float)
     ys_arr = np.array(ys, dtype=float)
 
-    annot = ax.annotate(
+    annot: Any = ax.annotate(
         "",
         xy=(0, 0),
         xytext=(10, 15),
@@ -269,7 +277,7 @@ def _wire_pv_hover(
     annot.set_clip_on(False)
     vline.set_in_layout(False)
 
-    def _on_move(event):
+    def _on_move(event: Any) -> Any:
         if event.inaxes is not ax:
             if annot.get_visible():
                 annot.set_visible(False)
@@ -390,14 +398,14 @@ class _Tab:
 
     # ── provider construction ─────────────────────────────────────────
 
-    def make_provider(self) -> Any:
+    def make_provider(self) -> object:
         raise NotImplementedError
 
     def _provider_sig(self) -> str | None:
         """Return a stable key for the current config, or None to always recreate."""
         return None
 
-    def _get_provider(self) -> Any:
+    def _get_provider(self) -> object:
         """Return a cached provider, creating a new one only when config changed."""
         sig = self._provider_sig()
         if sig is None or sig != self._last_prov_sig:
@@ -413,6 +421,7 @@ class _Tab:
         except Exception as exc:
             self._status.set(f"Config error: {exc}")
             return
+        prov = cast(Any, prov)
         start, hours, dt = self.app.get_time_params()
         ts = make_timestamps(start, hours, dt)
         self._status.set("Fetching…")
@@ -455,6 +464,8 @@ class _Tab:
 
 
 class ElecPriceTab(_Tab):
+    """Tab showing electric price providers and price plots."""
+
     TITLE = "Electric Price"
     PROVIDERS = ["EnergyCharts", "Fixed", "Import"]
 
@@ -490,7 +501,8 @@ class ElecPriceTab(_Tab):
             return f"EnergyCharts:{self._zone.get()}:{self._charges.get()}:{self._vat.get()}"
         return None  # stateless providers: always recreate is fine
 
-    def make_provider(self):
+    def make_provider(self) -> object:
+        """Create and return the configured electric price provider object."""
         ch, vat = float(self._charges.get()), float(self._vat.get())
         p = self._prov_var.get()
         if p == "Fixed":
@@ -518,6 +530,8 @@ class ElecPriceTab(_Tab):
 
 
 class FeedInTariffTab(_Tab):
+    """Tab for feed-in tariff providers and plotting."""
+
     TITLE = "Feed-in Tariff"
     PROVIDERS = ["Fixed", "Import"]
 
@@ -534,7 +548,8 @@ class FeedInTariffTab(_Tab):
             row += 1
             self._srcdt = _field(f, row, "Source dt [h]", "1.0")
 
-    def make_provider(self):
+    def make_provider(self) -> object:
+        """Create and return the configured feed-in tariff provider."""
         if self._prov_var.get() == "Fixed":
             return FeedInTariffFixed(tariff_kwh=float(self._tariff.get()))
         return FeedInTariffImport(
@@ -557,6 +572,8 @@ class FeedInTariffTab(_Tab):
 
 
 class LoadTab(_Tab):
+    """Tab for load providers and plotting (ProfileJSON supported)."""
+
     TITLE = "Load"
     PROVIDERS = ["ProfileJSON"]
 
@@ -577,7 +594,8 @@ class LoadTab(_Tab):
             variable=self._vacation_profile,
         ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
 
-    def make_provider(self):
+    def make_provider(self) -> object:
+        """Create and return the configured load provider."""
         # Only ProfileJSON provider supported in cleaned GUI
         return LoadProfileJSON(
             data_path=Path(self._profile_json_path.get()),
@@ -599,6 +617,8 @@ class LoadTab(_Tab):
 
 
 class PVForecastTab(_Tab):
+    """Tab for PV forecast providers and plane configuration."""
+
     TITLE = "PV Forecast"
     PROVIDERS = ["OpenMeteo", "Akkudoktor", "ForecastSolar", "Import"]
 
@@ -674,7 +694,8 @@ class PVForecastTab(_Tab):
             partial_shading=self._partial_shading.get(),
         )
 
-    def make_provider(self):
+    def make_provider(self) -> object:
+        """Create and return the configured PV forecast provider."""
         p = self._prov_var.get()
         plane = self._plane()
         tz = self.app._tz.get()
@@ -749,6 +770,8 @@ _WTITLE: dict[str, str] = {
 
 
 class WeatherTab(_Tab):
+    """Tab for weather forecast providers and plotting."""
+
     TITLE = "Weather"
     PROVIDERS = ["OpenMeteo", "BrightSky"]
 
@@ -760,7 +783,8 @@ class WeatherTab(_Tab):
         row += 1
         self._tz = _combofield(f, row, "Timezone", _TZ_CHOICES, "UTC")
 
-    def make_provider(self):
+    def make_provider(self) -> object:
+        """Create and return the configured weather provider."""
         lat = float(self._lat.get())
         lon = float(self._lon.get())
         tz = self._tz.get()
@@ -805,6 +829,8 @@ class WeatherTab(_Tab):
 
 
 class OptimizationTab(_Tab):
+    """Tab to configure and run the optimization/simulation flow."""
+
     TITLE = "Optimization"
     PROVIDERS = []
     _last_ts: list | None = None
@@ -889,7 +915,8 @@ class OptimizationTab(_Tab):
             row=row, column=0, columnspan=2, sticky="ew"
         )
 
-    def make_provider(self):
+    def make_provider(self) -> object:
+        """Not used for OptimizationTab; return None."""
         # Not used: this tab aggregates other providers
         return None
 
@@ -898,6 +925,7 @@ class OptimizationTab(_Tab):
         self.run_optimization()
 
     def run_optimization(self) -> None:
+        """Gather providers, fetch predictions and run the optimizer asynchronously."""
         try:
             start, hours, dt = self.app.get_time_params()
             logger.info("Optimization start: start=%s hours=%s dt=%s", start, hours, dt)
@@ -914,11 +942,19 @@ class OptimizationTab(_Tab):
         weather_tab = next((t for t in self.app.tabs if isinstance(t, WeatherTab)), None)
 
         setup = PredictionSetup(
-            electricprice=elec_tab._get_provider() if elec_tab else None,
-            feedintariff=feed_tab._get_provider() if feed_tab else None,
-            load=load_tab._get_provider() if load_tab else None,
-            pv={self._inv_id.get(): pv_tab._get_provider()} if pv_tab else {},
-            weather=weather_tab._get_provider() if weather_tab else None,
+            electricprice=cast(
+                Optional[ElecPriceProvider], elec_tab._get_provider() if elec_tab else None
+            ),
+            feedintariff=cast(
+                Optional[FeedInTariffProvider], feed_tab._get_provider() if feed_tab else None
+            ),
+            load=cast(Optional[LoadProvider], load_tab._get_provider() if load_tab else None),
+            pv={self._inv_id.get(): cast(PVForecastProvider, pv_tab._get_provider())}
+            if pv_tab
+            else {},
+            weather=cast(
+                Optional[WeatherProvider], weather_tab._get_provider() if weather_tab else None
+            ),
         )
 
         pred = Prediction(setup)
@@ -926,7 +962,7 @@ class OptimizationTab(_Tab):
         self.app.root.after(0, lambda: self._status.set("Fetching prediction…"))
 
         # Fetch prediction asynchronously
-        def on_pred_done(pdata):
+        def on_pred_done(pdata: PredictionData) -> None:
             try:
                 # cache timestamps and dt for plotting
                 try:
@@ -936,17 +972,19 @@ class OptimizationTab(_Tab):
                 self._last_dt = getattr(pdata, "dt_hours", None)
 
                 # Update other tabs' plots with the freshly fetched prediction
-                def _update_tabs():
+                def _update_tabs() -> None:
                     ts = pdata.timestamps
                     try:
                         if elec_tab is not None:
                             try:
-                                elec_tab._done(pdata.electricprice, ts)
+                                if pdata.electricprice is not None:
+                                    elec_tab._done(pdata.electricprice, ts)
                             except Exception:
                                 logger.exception("Failed to update electric price tab")
                         if feed_tab is not None:
                             try:
-                                feed_tab._done(pdata.feedintariff, ts)
+                                if pdata.feedintariff is not None:
+                                    feed_tab._done(pdata.feedintariff, ts)
                             except Exception:
                                 logger.exception("Failed to update feed-in tariff tab")
                         if load_tab is not None:
@@ -990,8 +1028,6 @@ class OptimizationTab(_Tab):
                 except Exception:
                     logger.exception("Failed to schedule GUI update (_update_tabs)")
 
-                feedin_default = float(self._feedin_default.get())
-
                 # ── Build battery + inverter from GUI config ──────────────────
                 bat_params = BatteryParameters(
                     device_id=self._bat_id.get(),
@@ -1005,7 +1041,7 @@ class OptimizationTab(_Tab):
                     max_soc_percentage=int(float(self._max_soc.get())),
                 )
 
-                def _make_devices(params):
+                def _make_devices(params: BatteryParameters) -> Tuple[Battery, InverterBase]:
                     bat = Battery(params, prediction_hours=int(hours))
                     inv_params = InverterParameters(
                         device_id=self._inv_id.get(),
@@ -1021,12 +1057,7 @@ class OptimizationTab(_Tab):
                     inv = InverterBase(inv_params, battery=bat)
                     return bat, inv
 
-                optimizer_choice = getattr(self, "_optimizer_type", None)
-                use_linear = (
-                    optimizer_choice is not None and optimizer_choice.get() == "Linear (CVXPY)"
-                )
-
-                async def _run_sim():
+                async def _run_sim() -> LinearSolution:
                     # Linear (CVXPY + HiGHS) path
                     _, inv_obj = _make_devices(bat_params)
                     obj_str = getattr(self, "_linear_objective", None)
@@ -1044,10 +1075,10 @@ class OptimizationTab(_Tab):
                     )
                     return sol
 
-                def _sim_done(res_tuple):
+                def _sim_done(res_tuple: object) -> None:
                     # res_tuple may be a LinearSolution or legacy tuple
-                    inv_modes_arrs = None
-                    inv_ac_rates_arrs = None
+                    inv_modes_arrs: Optional[list[array]] = None
+                    inv_ac_rates_arrs: Optional[list[array]] = None
                     solve_meta: str | None = None
 
                     if isinstance(res_tuple, LinearSolution):
@@ -1073,7 +1104,11 @@ class OptimizationTab(_Tab):
                     else:
                         # legacy tuple (res, modes, rates)
                         if isinstance(res_tuple, tuple):
-                            res, inv_modes_arrs, inv_ac_rates_arrs = res_tuple
+                            t = cast(
+                                Tuple[Any, Optional[list[array]], Optional[list[array]]],
+                                res_tuple,
+                            )
+                            res, inv_modes_arrs, inv_ac_rates_arrs = t
                         else:
                             res = res_tuple
 
@@ -1083,11 +1118,12 @@ class OptimizationTab(_Tab):
                         )
                         self._status.set("Simulation finished: no result")
                         return
+                    # Tell the type checker to treat `res` as dynamic here
+                    res = cast(Any, res)
                     logger.info("Simulation finished, preparing plots and JSON output")
                     out = res.to_dict()
                     # store timestamps for plotting
                     ts = getattr(self, "_last_ts", None)
-                    dt_hours = getattr(self, "_last_dt", None) or float(dt)
 
                     # Draw results into the right-side figure of this tab
                     try:
@@ -1122,7 +1158,7 @@ class OptimizationTab(_Tab):
                                 _wire_hover(
                                     self._canvas,
                                     ax,
-                                    x,
+                                    cast(List[datetime], x),
                                     grid_import_data,
                                     fmt_y="{:.1f}",
                                     unit=" Wh",
@@ -1138,6 +1174,7 @@ class OptimizationTab(_Tab):
                             for g, s in zip(
                                 list(res.grid_import_wh_per_dt),
                                 list(res.self_consumption_wh_per_dt),
+                                strict=False,
                             )
                         ]
                         (h_load,) = ax2.plot(
@@ -1146,11 +1183,10 @@ class OptimizationTab(_Tab):
 
                         # Plot PV sources if available
                         pv_handles = []
-                        if res.solar_generation_wh_per_dt:
+                        if getattr(res, "solar_generation_wh_per_dt", None):
                             for i, (k, arr) in enumerate(
                                 (res.solar_generation_wh_per_dt or {}).items()
                             ):
-                                # choose color cycle
                                 col = f"C{i + 2}"
                                 (h,) = ax2.plot(
                                     x, list(arr), color=col, linewidth=1.2, label=f"PV {k} (Wh)"
@@ -1186,7 +1222,12 @@ class OptimizationTab(_Tab):
                             # Add datetime hover to energy plot
                             try:
                                 _wire_hover(
-                                    self._canvas, ax2, x, load_wh, fmt_y="{:.1f}", unit=" Wh"
+                                    self._canvas,
+                                    ax2,
+                                    cast(List[datetime], x),
+                                    load_wh,
+                                    fmt_y="{:.1f}",
+                                    unit=" Wh",
                                 )
                             except Exception:
                                 logger.exception("Failed to add datetime hover to energy plot")
@@ -1201,7 +1242,7 @@ class OptimizationTab(_Tab):
                         # subsequent SoC values one step to the right because the
                         # solver reports SoC after processing each slot.
                         if res.battery_soc_percentage_per_dt:
-                            for k, arr in (res.battery_soc_percentage_per_dt or {}).items():
+                            for _k, arr in (res.battery_soc_percentage_per_dt or {}).items():
                                 arr_list = list(arr)
                                 try:
                                     init_pct = float(bat_params.initial_soc_percentage)
@@ -1213,9 +1254,9 @@ class OptimizationTab(_Tab):
                                 else:
                                     soc_plot = [init_pct]
 
-                                (h,) = ax4.plot(x, soc_plot, label=f"SoC {k} (%)")
+                                (h,) = ax4.plot(x, soc_plot, label=f"SoC {_k} (%)")
                                 handles.append(h)
-                                labels.append(f"SoC {k} (%)")
+                                labels.append(f"SoC {_k} (%)")
                                 plotted = True
 
                         # Plot inverter modes on right axis (signed rate: discharge=+, charge=-, idle=0)
@@ -1280,7 +1321,7 @@ class OptimizationTab(_Tab):
                             # Add hover for SoC
                             soc_data = []
                             if res.battery_soc_percentage_per_dt:
-                                for k, arr in (res.battery_soc_percentage_per_dt or {}).items():
+                                for _k, arr in (res.battery_soc_percentage_per_dt or {}).items():
                                     arr_list = list(arr)
                                     try:
                                         init_pct = float(bat_params.initial_soc_percentage)
@@ -1294,7 +1335,12 @@ class OptimizationTab(_Tab):
                             if soc_data:
                                 try:
                                     _wire_hover(
-                                        self._canvas, ax4, x, soc_data, fmt_y="{:.1f}", unit="%"
+                                        self._canvas,
+                                        ax4,
+                                        cast(List[datetime], x),
+                                        soc_data,
+                                        fmt_y="{:.1f}",
+                                        unit="%",
                                     )
                                 except Exception:
                                     logger.exception("Failed to add hover for SoC plot")
@@ -1346,7 +1392,10 @@ class OptimizationTab(_Tab):
 
 
 class App:
+    """Main GUI application container for the forecast preview tool."""
+
     def __init__(self) -> None:
+        """Initialize the main application window and tabs."""
         self.root = tk.Tk()
         self.root.title("Forecast Preview  —  dev tool")
         self.root.minsize(960, 580)
@@ -1390,6 +1439,11 @@ class App:
         ttk.Button(bar, text="▶▶ Fetch All", command=self._fetch_all).grid(row=0, column=9)
 
     def get_time_params(self) -> tuple[datetime, float, float]:
+        """Parse and return the start datetime, hours and dt from the top bar fields.
+
+        Returns:
+            Tuple of (start: datetime with tzinfo, hours: float, dt_hours: float).
+        """
         raw = self._start.get().strip()
         dt = None
         for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):

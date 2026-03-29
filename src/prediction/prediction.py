@@ -203,7 +203,7 @@ class Prediction:
         }
 
         # Add PV data: column format is pv_{inverter_id}_wh (energy)
-        for name, series_by_inverter in zip(pv_names, pv_series):
+        for _, series_by_inverter in zip(pv_names, pv_series, strict=False):
             for inverter, series in series_by_inverter.items():
                 # Only use inverter as key, not the provider name.
                 data[f"pv_{inverter}_wh"] = series
