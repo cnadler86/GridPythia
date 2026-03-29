@@ -1197,10 +1197,23 @@ class OptimizationTab(_Tab):
                         plotted = False
                         handles = []
                         labels = []
-                        # Plot SoC on left axis
+                        # Plot SoC on left axis. Show initial SoC at t0 and shift
+                        # subsequent SoC values one step to the right because the
+                        # solver reports SoC after processing each slot.
                         if res.battery_soc_percentage_per_dt:
                             for k, arr in (res.battery_soc_percentage_per_dt or {}).items():
-                                (h,) = ax4.plot(x, list(arr), label=f"SoC {k} (%)")
+                                arr_list = list(arr)
+                                try:
+                                    init_pct = float(bat_params.initial_soc_percentage)
+                                except Exception:
+                                    init_pct = arr_list[0] if arr_list else 0.0
+
+                                if len(arr_list) >= 1:
+                                    soc_plot = [init_pct] + arr_list[:-1]
+                                else:
+                                    soc_plot = [init_pct]
+
+                                (h,) = ax4.plot(x, soc_plot, label=f"SoC {k} (%)")
                                 handles.append(h)
                                 labels.append(f"SoC {k} (%)")
                                 plotted = True
@@ -1268,7 +1281,15 @@ class OptimizationTab(_Tab):
                             soc_data = []
                             if res.battery_soc_percentage_per_dt:
                                 for k, arr in (res.battery_soc_percentage_per_dt or {}).items():
-                                    soc_data = list(arr)
+                                    arr_list = list(arr)
+                                    try:
+                                        init_pct = float(bat_params.initial_soc_percentage)
+                                    except Exception:
+                                        init_pct = arr_list[0] if arr_list else 0.0
+                                    if len(arr_list) >= 1:
+                                        soc_data = [init_pct] + arr_list[:-1]
+                                    else:
+                                        soc_data = [init_pct]
                                     break
                             if soc_data:
                                 try:
