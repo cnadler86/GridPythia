@@ -34,6 +34,7 @@ from loguru import logger
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
+from src.config.models import BatteryParameters, InverterParameters
 from src.optimization.solver import LinearOptimizer, LinearSolution, OptimizationObjective
 from src.prediction.base import make_timestamps
 from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts, EnergyChartsConfig
@@ -50,8 +51,8 @@ from src.prediction.pvforecast.provider import PVPlaneConfig
 from src.prediction.weather.brightsky import WeatherBrightSky
 from src.prediction.weather.openmeteo import WeatherOpenMeteo
 from src.simulation.devices import InverterMode
-from src.simulation.devices.battery import Battery, BatteryParameters
-from src.simulation.devices.inverterbase import InverterBase, InverterParameters
+from src.simulation.devices.battery import Battery
+from src.simulation.devices.inverterbase import InverterBase
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -843,6 +844,10 @@ class OptimizationTab(_Tab):
         row += 1
         self._bat_capacity = _field(f, row, "Battery capacity Wh", "1920")
         row += 1
+        self._bat_ch_eff = _field(f, row, "Charging efficiency", "0.98")
+        row += 1
+        self._bat_dc_eff = _field(f, row, "Discharging efficiency", "0.98")
+        row += 1
         self._initial_soc = _field(f, row, "Initial battery SoC (%)", "50.0")
         row += 1
         self._min_soc = _field(f, row, "Min SoC (%)", "20")
@@ -866,6 +871,8 @@ class OptimizationTab(_Tab):
         self._inv_dc2ac = _field(f, row, "DC→AC eff", "0.95")
         row += 1
         self._inv_ac2dc = _field(f, row, "AC→DC eff", "0.95")
+        row += 1
+        self._inv_mode_switch_cost = _field(f, row, "Mode switch cost EUR/switch", "0.005")
         row += 1
         self._zero_feed_in = tk.BooleanVar(value=True)
         ttk.Checkbutton(
@@ -993,6 +1000,8 @@ class OptimizationTab(_Tab):
                     capacity_wh=int(float(self._bat_capacity.get())),
                     max_charge_power_w=int(float(self._inv_max_charge.get())),
                     max_discharge_power_w=int(float(self._inv_max_out.get())),
+                    charging_efficiency=float(self._bat_ch_eff.get()),
+                    discharging_efficiency=float(self._bat_dc_eff.get()),
                     initial_soc_percentage=int(float(self._initial_soc.get())),
                     min_soc_percentage=int(float(self._min_soc.get())),
                     max_soc_percentage=int(float(self._max_soc.get())),
@@ -1009,6 +1018,7 @@ class OptimizationTab(_Tab):
                         dc_to_ac_efficiency=float(self._inv_dc2ac.get()),
                         ac_to_dc_efficiency=float(self._inv_ac2dc.get()),
                         zero_feed_in=bool(self._zero_feed_in.get()),
+                        mode_switch_cost=float(self._inv_mode_switch_cost.get()),
                     )
                     inv = InverterBase(inv_params, battery=bat)
                     return bat, inv

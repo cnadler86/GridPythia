@@ -5,11 +5,12 @@ from array import array
 import polars as pl
 import pytest
 
+from src.config.models import BatteryParameters, InverterParameters
 from src.prediction.prediction import PredictionData
 from src.simulation.devices import InverterMode
-from src.simulation.devices.battery import Battery, BatteryParameters
+from src.simulation.devices.battery import Battery
 from src.simulation.devices.homeappliance import HomeAppliance, HomeApplianceParameters
-from src.simulation.devices.inverterbase import InverterBase, InverterParameters
+from src.simulation.devices.inverterbase import InverterBase
 from src.simulation.grid_simulation import GridSimulation, SimulationResult
 
 START_IDX = 1

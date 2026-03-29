@@ -2,7 +2,8 @@
 
 import pytest
 
-from src.simulation.devices.battery import Battery, BatteryParameters
+from src.config.models import BatteryParameters
+from src.simulation.devices.battery import Battery
 
 
 @pytest.fixture

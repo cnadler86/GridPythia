@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from array import array
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
@@ -106,10 +107,21 @@ class LinearOptimizer:
         inverters: list[InverterBase],
         prediction: PredictionData,
         battery_end_value_eur_wh: float = 0.0,
+        initial_modes: Mapping[str, InverterMode | int] | None = None,
     ) -> None:
         self.inverters = inverters
         self.prediction = prediction
         self.battery_end_value_eur_wh = battery_end_value_eur_wh
+        self.initial_modes: dict[str, InverterMode] = {}
+        for inv in self.inverters:
+            raw_mode = (
+                initial_modes.get(inv.device_id, InverterMode.IDLE)
+                if initial_modes is not None
+                else InverterMode.IDLE
+            )
+            self.initial_modes[inv.device_id] = (
+                raw_mode if isinstance(raw_mode, InverterMode) else InverterMode(int(raw_mode))
+            )
 
         min_load_wh = float(min(prediction.load_wh)) if prediction.steps > 0 else 1.0
         self._sc_model = FraunhoferSCModel(
@@ -128,11 +140,14 @@ class LinearOptimizer:
         blocks, g_import, g_feedin, pv_self = self._build_problem(prep)
 
         terminal_reward = self._terminal_reward(blocks)
+        mode_switch_costs_term = cp.sum(self._mode_switch_costs) if self._mode_switch_costs else 0.0
+
         if objective == OptimizationObjective.MINIMIZE_COST:
             obj_expr = (
                 cp.sum(
                     cp.multiply(g_import, prep.price) - cp.multiply(g_feedin, prep.feedin_tariff)
                 )
+                + mode_switch_costs_term
                 - terminal_reward
             )
         else:
@@ -232,6 +247,7 @@ class LinearOptimizer:
         dt = prep.dt
 
         self._constraints: list[cp.Constraint] = []
+        self._mode_switch_costs: list[cp.Expression] = []  # Track mode switch costs
         blocks: list[_InverterModelBlock] = []
 
         g_import = cp.Variable(T, nonneg=True, name="g_import")
@@ -354,6 +370,9 @@ class LinearOptimizer:
             elif y_dc is not None:
                 self._constraints.append(cp.sum(y_dc, axis=0) <= 1)
 
+            # Add mode switch cost constraints
+            self._add_mode_switch_costs(inv, inv_id, y_ch, y_dc, T)
+
         else:
             p_ch = cp.Constant(np.zeros(T, dtype=float))
             p_dc = cp.Constant(np.zeros(T, dtype=float))
@@ -405,6 +424,74 @@ class LinearOptimizer:
             selector=selector,
             zero_feed_discharge_continuous=zero_feed_discharge_continuous,
         )
+
+    def _add_mode_switch_costs(
+        self,
+        inv: InverterBase,
+        inv_id: str,
+        y_ch: cp.Variable | None,
+        y_dc: cp.Variable | None,
+        T: int,
+    ) -> None:
+        """Add mode switch cost constraints and track them in objective."""
+        if not inv.battery:
+            return
+
+        mode_switch_cost = inv.parameters.mode_switch_cost
+
+        if mode_switch_cost <= 0.0:
+            return
+
+        initial_mode = self.initial_modes.get(inv_id, InverterMode.IDLE)
+
+        def _mode_flags(mode: InverterMode) -> tuple[int, int]:
+            if mode in (InverterMode.AC_CHARGE, InverterMode.AC_CHARGE_ZERO_FEED_IN):
+                return 1, 0
+            if mode in (InverterMode.DISCHARGE, InverterMode.DISCHARGE_ZERO_FEED_IN):
+                return 0, 1
+            return 0, 0
+
+        init_ch, init_dc = _mode_flags(initial_mode)
+
+        # Create binary variables for mode switches
+        delta_mode = cp.Variable(T, boolean=True, name=f"delta_mode_{inv_id}")
+        mode_ch = cp.Variable(T, boolean=True, name=f"mode_ch_{inv_id}")
+        mode_dc = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
+
+        if y_ch is not None:
+            y_ch_sum = cp.sum(y_ch, axis=0)
+            self._constraints.extend([mode_ch >= y_ch_sum, mode_ch <= y_ch_sum])
+        else:
+            self._constraints.append(mode_ch == 0)
+
+        if y_dc is not None:
+            y_dc_sum = cp.sum(y_dc, axis=0)
+            self._constraints.extend([mode_dc >= y_dc_sum, mode_dc <= y_dc_sum])
+        else:
+            self._constraints.append(mode_dc == 0)
+
+        # At t=0, compare against configured initial mode (default: IDLE).
+        self._constraints.append(delta_mode[0] >= mode_ch[0] - init_ch)
+        self._constraints.append(delta_mode[0] >= init_ch - mode_ch[0])
+        self._constraints.append(delta_mode[0] >= mode_dc[0] - init_dc)
+        self._constraints.append(delta_mode[0] >= init_dc - mode_dc[0])
+
+        # For t > 0, add constraints to detect mode changes
+        if T > 1:
+            # delta_mode[t] = 1 if mode changed from t-1 to t
+            # This means: (mode_ch[t] != mode_ch[t-1]) or (mode_dc[t] != mode_dc[t-1])
+            # Simplified: delta_mode[t] >= |mode_ch[t] - mode_ch[t-1]| + |mode_dc[t] - mode_dc[t-1]|
+            # Since these are binary, |a - b| = max(a - b, b - a)
+            for t in range(1, T):
+                # If mode_ch changes, mode_dc changes, or both change, delta_mode[t] = 1
+                self._constraints.append(delta_mode[t] >= (mode_ch[t] - mode_ch[t - 1]))
+                self._constraints.append(delta_mode[t] >= (mode_ch[t - 1] - mode_ch[t]))
+                self._constraints.append(delta_mode[t] >= (mode_dc[t] - mode_dc[t - 1]))
+                self._constraints.append(delta_mode[t] >= (mode_dc[t - 1] - mode_dc[t]))
+
+        # Add mode switch costs to objective (cost is EUR per mode change, not per Wh)
+        mode_switch_cost_expr = cp.sum(delta_mode) * mode_switch_cost
+        self._mode_switch_costs.append(mode_switch_cost_expr)
 
     def _terminal_reward(self, blocks: list[_InverterModelBlock]) -> cp.Expression | float:
         if self.battery_end_value_eur_wh == 0.0:

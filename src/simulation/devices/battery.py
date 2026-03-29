@@ -1,60 +1,38 @@
 """Battery device simulation."""
 
-from dataclasses import dataclass, field
-from itertools import count
+from __future__ import annotations
+
 from typing import Any
 
 from loguru import logger
 
-_BATTERY_COUNTER = count(1)  # default auto-incrementing device id
+from src.config.models import BatteryParameters
 
 
-@dataclass
-class BatteryParameters:
-    """Battery configuration parameters."""
-
-    device_id: str = field(default_factory=lambda: f"battery{next(_BATTERY_COUNTER)}")
-    capacity_wh: int = 8000
-    charging_efficiency: float = 0.98
-    discharging_efficiency: float = 0.98
-    max_charge_power_w: float = 5000
-    max_discharge_power_w: float = 5000
-    initial_soc_percentage: int = 0
-    min_soc_percentage: int = 0
-    max_soc_percentage: int = 100
-    hours: int | None = None
-
-
-@dataclass
-class ElectricVehicleParameters(BatteryParameters):
-    """Electric vehicle battery parameters."""
-
-    max_charge_power_w: float = 0
-
-
-@dataclass(slots=True)
 class Battery:
     """Represents a battery device with methods to simulate energy charging and discharging."""
 
-    parameters: BatteryParameters = field(repr=False)
-    prediction_hours: int
+    __slots__ = (
+        "parameters",
+        "prediction_hours",
+        "capacity_wh",
+        "initial_soc_percentage",
+        "min_soc_percentage",
+        "max_soc_percentage",
+        "charging_efficiency",
+        "discharging_efficiency",
+        "max_charge_power_w",
+        "max_discharge_power_w",
+        "soc_wh",
+        "min_soc_wh",
+        "max_soc_wh",
+        "_initial_soc_wh",
+        "_soc_pct_factor",
+    )
 
-    # Derived / runtime fields (initialized in _setup)
-    capacity_wh: float = field(init=False)
-    initial_soc_percentage: float = field(init=False)
-    min_soc_percentage: float = field(init=False)
-    max_soc_percentage: float = field(init=False)
-    charging_efficiency: float = field(init=False)
-    discharging_efficiency: float = field(init=False)
-    max_charge_power_w: float = field(init=False)
-    max_discharge_power_w: float = field(init=False)
-    soc_wh: float = field(init=False)
-    min_soc_wh: float = field(init=False)
-    max_soc_wh: float = field(init=False)
-    _initial_soc_wh: float = field(init=False, repr=False)
-    _soc_pct_factor: float = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
+    def __init__(self, parameters: BatteryParameters, prediction_hours: int) -> None:
+        self.parameters = parameters
+        self.prediction_hours = prediction_hours
         self._setup()
 
     def _setup(self) -> None:

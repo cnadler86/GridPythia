@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from itertools import count
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 from loguru import logger
 
+from src.config.models import DEFAULT_AC_RATES, InverterParameters
 from src.simulation.devices import (
     EnergyFlowResult,
     InverterMode,
@@ -18,33 +17,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from src.simulation.devices.battery import Battery
-
-# inverter id counter
-_INVERTER_COUNTER = count(1)
-
-# Default charge rates
-DEFAULT_AC_RATES: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
-
-
-@dataclass
-class InverterParameters:
-    """Inverter device configuration."""
-
-    device_id: str = field(default_factory=lambda: f"inverter{next(_INVERTER_COUNTER)}")
-    battery_id: str | None = None
-    pv_source: str | None = None
-    max_ac_output_power_w: float = 5000
-    max_ac_charge_power_w: float = 0.0
-    dc_to_ac_efficiency: float = 0.95
-    ac_to_dc_efficiency: float = 0.95
-    zero_feed_in: bool = True
-    ac_rates: tuple[float, ...] = field(default_factory=lambda: DEFAULT_AC_RATES)
-
-    def __post_init__(self) -> None:
-        if self.battery_id is None and self.pv_source is None:
-            raise ValueError(
-                f"Inverter '{self.device_id}' must have either a battery_id or a pv_source (or both)."
-            )
 
 
 class InverterBase:

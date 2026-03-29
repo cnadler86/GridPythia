@@ -5,11 +5,12 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
+from src.config.models import BatteryParameters, InverterParameters
 from src.optimization.solver import LinearOptimizer, OptimizationObjective
 from src.prediction.prediction import PredictionData
 from src.simulation.devices import InverterMode
-from src.simulation.devices.battery import Battery, BatteryParameters
-from src.simulation.devices.inverterbase import InverterBase, InverterParameters
+from src.simulation.devices.battery import Battery
+from src.simulation.devices.inverterbase import InverterBase
 
 
 def _make_prediction(load_w: list[float], price_eur_wh: list[float]) -> PredictionData:
@@ -68,10 +69,55 @@ def _make_hybrid_inverter(roundtrip_efficiency: float = 0.8) -> InverterBase:
             ac_to_dc_efficiency=1.0,
             zero_feed_in=True,
             ac_rates=(0.5, 1.0),
+            mode_switch_cost=0.0,
         ),
         battery=battery,
     )
     return inv
+
+
+def _make_switching_case_inverter(
+    *,
+    prediction_hours: int,
+    roundtrip_efficiency: float = 0.8,
+    switch_cost: float,
+) -> InverterBase:
+    """Hybrid inverter for switching-cost edge cases.
+
+    Starts at 0% SoC so profitable charging windows become the deciding factor.
+    """
+    eta = roundtrip_efficiency**0.5
+
+    battery = Battery(
+        BatteryParameters(
+            device_id="battery_sw",
+            capacity_wh=1000,
+            charging_efficiency=eta,
+            discharging_efficiency=eta,
+            max_charge_power_w=500,
+            max_discharge_power_w=1000,
+            initial_soc_percentage=0,
+            min_soc_percentage=0,
+            max_soc_percentage=100,
+        ),
+        prediction_hours=prediction_hours,
+    )
+
+    return InverterBase(
+        InverterParameters(
+            device_id="hybrid_sw",
+            battery_id="battery_sw",
+            pv_source="hybrid_sw",
+            max_ac_output_power_w=1000,
+            max_ac_charge_power_w=500,
+            dc_to_ac_efficiency=1.0,
+            ac_to_dc_efficiency=1.0,
+            zero_feed_in=True,
+            ac_rates=(0.5, 1.0),
+            mode_switch_cost=switch_cost,
+        ),
+        battery=battery,
+    )
 
 
 class TestLinearSolverHybridEconomics:
@@ -216,3 +262,81 @@ class TestLinearSolverHybridEconomics:
         assert sol.parity_report.max_abs_soc_error_wh <= 1e-2
         assert sol.parity_report.max_abs_grid_import_error_wh <= 1e-2
         assert sol.parity_report.max_abs_feedin_error_wh <= 1e-2
+
+    def test_switch_cost_above_threshold_keeps_ac_charge_contiguous_block(self) -> None:
+        """With sufficiently high switching cost, charging stays in adjacent slots."""
+        # Three profitable cheap windows exist: t0/t1 (adjacent, same price) and t3 (isolated, cheaper).
+        # Required charge is 750 Wh (for 600 Wh discharge at 80% roundtrip):
+        # either split (0.5 at adjacent + 1.0 at isolated) or contiguous block (1.0 + 0.5 adjacent).
+        pred = _make_prediction(
+            load_w=[0.0, 0.0, 0.0, 0.0, 600.0],
+            price_eur_wh=[0.00030, 0.00030, 0.00045, 0.00024, 0.00070],
+        )
+        inv = _make_switching_case_inverter(prediction_hours=5, switch_cost=0.020)
+
+        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        plan = sol.inverter_plans[0]
+
+        # High switching penalty should avoid split charging and keep charging contiguous.
+        assert plan["modes"][0] == int(InverterMode.AC_CHARGE)
+        assert plan["modes"][1] == int(InverterMode.AC_CHARGE)
+        assert plan["modes"][3] != int(InverterMode.AC_CHARGE)
+        assert float(plan["rates"][0]) + float(plan["rates"][1]) == pytest.approx(1.5, abs=1e-6)
+
+    def test_switch_cost_below_threshold_prefers_split_with_isolated_cheapest_slot(self) -> None:
+        """With lower switching cost, solver should use the isolated cheapest slot plus one adjacent half-slot."""
+        pred = _make_prediction(
+            load_w=[0.0, 0.0, 0.0, 0.0, 600.0],
+            price_eur_wh=[0.00030, 0.00030, 0.00045, 0.00024, 0.00070],
+        )
+        inv = _make_switching_case_inverter(prediction_hours=5, switch_cost=0.005)
+
+        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        plan = sol.inverter_plans[0]
+
+        # Low switching penalty allows split charging: full on isolated cheapest slot,
+        # remaining half on one of the adjacent equal-price slots.
+        adjacent_charge = (
+            (float(plan["rates"][0]) if plan["modes"][0] == int(InverterMode.AC_CHARGE) else 0.0)
+            + (float(plan["rates"][1]) if plan["modes"][1] == int(InverterMode.AC_CHARGE) else 0.0)
+        )
+        isolated_charge = (
+            float(plan["rates"][3]) if plan["modes"][3] == int(InverterMode.AC_CHARGE) else 0.0
+        )
+
+        assert isolated_charge == pytest.approx(1.0, abs=1e-6)
+        assert adjacent_charge == pytest.approx(0.5, abs=1e-6)
+
+    def test_initial_mode_reduces_first_step_switch_penalty(self) -> None:
+        """If initial mode is AC_CHARGE, charging at t=0 should avoid first-step switch cost."""
+        pred = _make_prediction(
+            load_w=[0.0, 0.0, 600.0],
+            price_eur_wh=[0.00030, 0.00045, 0.00070],
+        )
+
+        inv_idle_start = _make_switching_case_inverter(prediction_hours=3, switch_cost=0.020)
+        sol_idle_start = LinearOptimizer([inv_idle_start], pred).solve(
+            OptimizationObjective.MINIMIZE_COST
+        )
+        plan_idle_start = sol_idle_start.inverter_plans[0]
+
+        inv_charge_start = _make_switching_case_inverter(prediction_hours=3, switch_cost=0.020)
+        sol_charge_start = LinearOptimizer(
+            [inv_charge_start],
+            pred,
+            initial_modes={"hybrid_sw": InverterMode.AC_CHARGE},
+        ).solve(OptimizationObjective.MINIMIZE_COST)
+        plan_charge_start = sol_charge_start.inverter_plans[0]
+
+        # Starting in AC_CHARGE should never make t=0 charging less attractive than idle start.
+        charge_rate_idle_start = (
+            float(plan_idle_start["rates"][0])
+            if plan_idle_start["modes"][0] == int(InverterMode.AC_CHARGE)
+            else 0.0
+        )
+        charge_rate_charge_start = (
+            float(plan_charge_start["rates"][0])
+            if plan_charge_start["modes"][0] == int(InverterMode.AC_CHARGE)
+            else 0.0
+        )
+        assert charge_rate_charge_start >= charge_rate_idle_start - 1e-9
