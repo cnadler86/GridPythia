@@ -183,22 +183,33 @@ class TestLinearSolverHybridEconomics:
         assert rates
         assert set(round(r, 6) for r in rates).issubset(allowed)
 
-    def test_terminal_energy_value_can_prevent_economically_bad_discharge(self) -> None:
-        """A high terminal value should keep energy in battery instead of discharging."""
+    def test_auto_terminal_value_suppresses_cheap_slot_discharge(self) -> None:
+        """Auto terminal value based on high tail prices should prevent discharge in cheap slots.
+
+        Prices: cheap at t=0, expensive at t=1..3.
+        Auto estimate = mean(all 4 prices) * eta_d ≈ 0.00040 * 0.894 = 0.000357 EUR/Wh.
+        Discharge threshold at t=0 = price[0] * eta_d ≈ 0.00010 * 0.894 = 0.0000894 EUR/Wh.
+        estimate >> threshold -> optimizer should stay IDLE at t=0 and discharge later.
+        """
         pred = _make_prediction(
-            load_w=[1500.0],
-            price_eur_wh=[0.00040],
+            load_w=[1500.0, 1500.0, 1500.0, 1500.0],
+            price_eur_wh=[0.00010, 0.00050, 0.00050, 0.00050],
         )
         inv = _make_hybrid_inverter(roundtrip_efficiency=0.8)
 
-        # Terminal value dominates immediate import savings -> do not discharge.
-        sol = LinearOptimizer(
-            [inv], pred, battery_end_value_eur_wh=0.001
-        ).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
 
         plan = sol.inverter_plans[0]
-        assert plan["modes"][0] != int(InverterMode.DISCHARGE_ZERO_FEED_IN)
-        assert plan["modes"][0] != int(InverterMode.DISCHARGE)
+        # Cheap slot: retaining energy for expensive future slots is more valuable.
+        assert plan["modes"][0] not in (
+            int(InverterMode.DISCHARGE),
+            int(InverterMode.DISCHARGE_ZERO_FEED_IN),
+        )
+        # Expensive slot: discharge is now worthwhile.
+        assert plan["modes"][1] in (
+            int(InverterMode.DISCHARGE),
+            int(InverterMode.DISCHARGE_ZERO_FEED_IN),
+        )
 
     def test_zero_feed_discharge_can_compensate_full_load_without_rate(self) -> None:
         """Zero-feed discharge should be energy-target driven, not rate driven."""
@@ -264,10 +275,13 @@ class TestLinearSolverHybridEconomics:
         assert sol.parity_report.max_abs_feedin_error_wh <= 1e-2
 
     def test_switch_cost_above_threshold_keeps_ac_charge_contiguous_block(self) -> None:
-        """With sufficiently high switching cost, charging stays in adjacent slots."""
-        # Three profitable cheap windows exist: t0/t1 (adjacent, same price) and t3 (isolated, cheaper).
-        # Required charge is 750 Wh (for 600 Wh discharge at 80% roundtrip):
-        # either split (0.5 at adjacent + 1.0 at isolated) or contiguous block (1.0 + 0.5 adjacent).
+        """With sufficiently high switching cost, charging stays in adjacent slots.
+
+        Auto terminal value incentivises charging to full capacity, so total charged
+        Wh may exceed the minimum needed for discharge — but the key behaviour is that
+        the isolated cheap slot (t3) is NOT used because the extra switch cost exceeds
+        the price saving.
+        """
         pred = _make_prediction(
             load_w=[0.0, 0.0, 0.0, 0.0, 600.0],
             price_eur_wh=[0.00030, 0.00030, 0.00045, 0.00024, 0.00070],
@@ -277,14 +291,18 @@ class TestLinearSolverHybridEconomics:
         sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
         plan = sol.inverter_plans[0]
 
-        # High switching penalty should avoid split charging and keep charging contiguous.
+        # High switching penalty: charging must stay in the contiguous t0/t1 block.
         assert plan["modes"][0] == int(InverterMode.AC_CHARGE)
         assert plan["modes"][1] == int(InverterMode.AC_CHARGE)
         assert plan["modes"][3] != int(InverterMode.AC_CHARGE)
-        assert float(plan["rates"][0]) + float(plan["rates"][1]) == pytest.approx(1.5, abs=1e-6)
 
     def test_switch_cost_below_threshold_prefers_split_with_isolated_cheapest_slot(self) -> None:
-        """With lower switching cost, solver should use the isolated cheapest slot plus one adjacent half-slot."""
+        """With lower switching cost, solver should use the isolated cheapest slot.
+
+        Auto terminal value means the optimizer may charge fully (not just the minimum
+        for discharge), so adjacent rates may be higher than before — but t3 MUST still
+        be used because its price saving exceeds the extra switch cost.
+        """
         pred = _make_prediction(
             load_w=[0.0, 0.0, 0.0, 0.0, 600.0],
             price_eur_wh=[0.00030, 0.00030, 0.00045, 0.00024, 0.00070],
@@ -294,8 +312,6 @@ class TestLinearSolverHybridEconomics:
         sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
         plan = sol.inverter_plans[0]
 
-        # Low switching penalty allows split charging: full on isolated cheapest slot,
-        # remaining half on one of the adjacent equal-price slots.
         adjacent_charge = (
             (float(plan["rates"][0]) if plan["modes"][0] == int(InverterMode.AC_CHARGE) else 0.0)
             + (float(plan["rates"][1]) if plan["modes"][1] == int(InverterMode.AC_CHARGE) else 0.0)
@@ -304,8 +320,10 @@ class TestLinearSolverHybridEconomics:
             float(plan["rates"][3]) if plan["modes"][3] == int(InverterMode.AC_CHARGE) else 0.0
         )
 
+        # The isolated cheapest slot must be used at full rate.
         assert isolated_charge == pytest.approx(1.0, abs=1e-6)
-        assert adjacent_charge == pytest.approx(0.5, abs=1e-6)
+        # At least one adjacent slot must also be used (battery charges more than t3 alone).
+        assert adjacent_charge > 0.0
 
     def test_initial_mode_reduces_first_step_switch_penalty(self) -> None:
         """If initial mode is AC_CHARGE, charging at t=0 should avoid first-step switch cost."""

@@ -99,19 +99,18 @@ class LinearOptimizer:
         inverters: All inverters in the system. Topology determines which
             variables and constraints are instantiated per inverter.
         prediction: Aligned prediction channels for the horizon.
-        battery_end_value_eur_wh: Terminal value for battery SoC.
+        initial_modes: Prior inverter mode per device ID for correct t=0
+            mode-switch cost accounting.
     """
 
     def __init__(
         self,
         inverters: list[InverterBase],
         prediction: PredictionData,
-        battery_end_value_eur_wh: float = 0.0,
         initial_modes: Mapping[str, InverterMode | int] | None = None,
     ) -> None:
         self.inverters = inverters
         self.prediction = prediction
-        self.battery_end_value_eur_wh = battery_end_value_eur_wh
         self.initial_modes: dict[str, InverterMode] = {}
         for inv in self.inverters:
             raw_mode = (
@@ -139,7 +138,8 @@ class LinearOptimizer:
         prep = self._prepare_inputs()
         blocks, g_import, g_feedin, pv_self = self._build_problem(prep)
 
-        terminal_reward = self._terminal_reward(blocks)
+        terminal_value = self._estimate_terminal_value(prep, blocks)
+        terminal_reward = self._terminal_reward(blocks, terminal_value)
         mode_switch_costs_term = cp.sum(self._mode_switch_costs) if self._mode_switch_costs else 0.0
 
         if objective == OptimizationObjective.MINIMIZE_COST:
@@ -493,19 +493,49 @@ class LinearOptimizer:
         mode_switch_cost_expr = cp.sum(delta_mode) * mode_switch_cost
         self._mode_switch_costs.append(mode_switch_cost_expr)
 
-    def _terminal_reward(self, blocks: list[_InverterModelBlock]) -> cp.Expression | float:
-        if self.battery_end_value_eur_wh == 0.0:
+    def _estimate_terminal_value(
+        self,
+        prep: _PreparedInputs,
+        blocks: list[_InverterModelBlock],
+    ) -> float:
+        """Estimate EUR/Wh terminal value for battery SoC.
+
+        Uses the mean price over the last min(T, 6) steps, weighted by the
+        mean discharge efficiency, to approximate what 1 Wh of stored energy
+        would save in the near future.
+        """
+        if prep.T == 0:
             return 0.0
 
-        terminal_terms: list[cp.Expression] = []
-        for block in blocks:
-            if block.soc is not None:
-                terminal_terms.append(block.soc[-1])
+        eta_d_values = [
+            block.inverter.battery.discharging_efficiency
+            * block.inverter.parameters.dc_to_ac_efficiency
+            for block in blocks
+            if block.inverter.battery is not None
+        ]
+        if not eta_d_values:
+            return 0.0
 
+        mean_eta_d = float(np.mean(eta_d_values))
+        N = min(prep.T, 6)
+        mean_price = float(np.mean(prep.price[-N:]))
+        return mean_price * mean_eta_d
+
+    def _terminal_reward(
+        self,
+        blocks: list[_InverterModelBlock],
+        terminal_value: float,
+    ) -> cp.Expression | float:
+        if terminal_value == 0.0:
+            return 0.0
+
+        terminal_terms: list[cp.Expression] = [
+            block.soc[-1] for block in blocks if block.soc is not None
+        ]
         if not terminal_terms:
             return 0.0
 
-        return self.battery_end_value_eur_wh * cp.sum(cp.hstack(terminal_terms))
+        return terminal_value * cp.sum(cp.hstack(terminal_terms))
 
     @staticmethod
     def _sum_terms(terms: list[cp.Expression], T: int) -> cp.Expression:

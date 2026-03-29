@@ -832,8 +832,6 @@ class OptimizationTab(_Tab):
             "Minimize Cost",
         )
         row += 1
-        self._bat_end_value = _field(f, row, "Battery end value EUR/Wh", "0.0")
-        row += 1
 
         # ── Battery configuration ─────────────────────────────────────
         ttk.Label(f, text="Battery", foreground="#555", font=("TkDefaultFont", 8, "bold")).grid(
@@ -1036,17 +1034,9 @@ class OptimizationTab(_Tab):
                         objective = OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
                     else:
                         objective = OptimizationObjective.MINIMIZE_COST
-                    bat_end_val = 0.0
-                    bat_end_field = getattr(self, "_bat_end_value", None)
-                    if bat_end_field is not None:
-                        try:
-                            bat_end_val = float(bat_end_field.get())
-                        except ValueError:
-                            bat_end_val = 0.0
                     optimizer = LinearOptimizer(
                         inverters=[inv_obj],
                         prediction=pdata,
-                        battery_end_value_eur_wh=bat_end_val,
                     )
                     logger.info("Starting LinearOptimizer with objective={}", objective.value)
                     sol: LinearSolution = await asyncio.to_thread(
