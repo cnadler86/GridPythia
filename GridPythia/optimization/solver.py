@@ -406,6 +406,14 @@ class LinearOptimizer:
             delta = p_ch * eta_c_ac + pv_to_bat * eta_c_pv - p_dc / eta_d
             soc_init = float(bat.soc_wh)
 
+            start_soc = cp.hstack([soc_init, soc[:-1]]) if T > 1 else cp.hstack([soc_init])
+
+            # Enforce mode feasibility from the SoC at the start of each step.
+            # This prevents activating discharge at min SoC or AC charge at max SoC,
+            # even if opposite-direction flows in the same step would keep end SoC feasible.
+            self._constraints.append(p_dc / eta_d <= start_soc - bat.min_soc_wh)
+            self._constraints.append(p_ch * eta_c_ac <= bat.max_soc_wh - start_soc)
+
             self._constraints.append(soc[0] == soc_init + delta[0])
             if T > 1:
                 self._constraints.append(soc[1:] == soc[:-1] + delta[1:])
@@ -592,7 +600,7 @@ class LinearOptimizer:
 
         gi = np.maximum(g_import_val, 0.0)
         gf = np.maximum(g_feedin_val, 0.0)
-        pv_self = np.maximum(pv_self_val, 0.0)
+        self_consumption = np.maximum(prep.load_wh - gi, 0.0)
 
         costs = gi * prep.price
         revenue = gf * prep.feedin_tariff
@@ -614,7 +622,7 @@ class LinearOptimizer:
             pv_ac = self._expr_to_vec(block.pv_ac, T)
             pv_to_bat = self._expr_to_vec(block.pv_to_bat, T)
 
-            if np.any(pv_ac > 1e-9):
+            if inv.parameters.pv_source is not None:
                 solar_gen_per_dt[inv_id] = array("f", pv_ac.tolist())
 
             if inv.battery is not None and block.soc is not None:
@@ -642,7 +650,7 @@ class LinearOptimizer:
             costs_per_dt=array("f", costs.tolist()),
             revenue_per_dt=array("f", revenue.tolist()),
             grid_import_wh_per_dt=array("f", gi.tolist()),
-            self_consumption_wh_per_dt=array("f", pv_self.tolist()),
+            self_consumption_wh_per_dt=array("f", self_consumption.tolist()),
             feedin_wh_per_dt=array("f", gf.tolist()),
             losses_wh_per_dt=array("f", losses_arr.tolist()),
             electricity_price_per_dt=array("f", prep.price.tolist()),

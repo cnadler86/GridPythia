@@ -13,7 +13,11 @@ from GridPythia.simulation.devices.battery import Battery
 from GridPythia.simulation.devices.inverterbase import InverterBase
 
 
-def _make_prediction(load_w: list[float], price_eur_wh: list[float]) -> PredictionData:
+def _make_prediction(
+    load_w: list[float],
+    price_eur_wh: list[float],
+    pv_wh: dict[str, list[float]] | None = None,
+) -> PredictionData:
     """Create a minimal PredictionData with aligned timestamp/load/price arrays.
     
     Args:
@@ -25,14 +29,17 @@ def _make_prediction(load_w: list[float], price_eur_wh: list[float]) -> Predicti
 
     # The linear solver only requires aligned columns; a simple integer
     # timestamp keeps tests robust across Polars versions on Windows.
-    df = pl.DataFrame(
-        {
-            "timestamp": pl.Series(range(n), dtype=pl.Int64),
-            "electricprice_eur_wh": pl.Series(price_eur_wh, dtype=pl.Float32),
-            "feedintariff_eur_wh": pl.Series([0.0] * n, dtype=pl.Float32),
-            "load_wh": pl.Series(load_w, dtype=pl.Float32),
-        }
-    )
+    data: dict[str, pl.Series] = {
+        "timestamp": pl.Series(range(n), dtype=pl.Int64),
+        "electricprice_eur_wh": pl.Series(price_eur_wh, dtype=pl.Float32),
+        "feedintariff_eur_wh": pl.Series([0.0] * n, dtype=pl.Float32),
+        "load_wh": pl.Series(load_w, dtype=pl.Float32),
+    }
+    for inverter_id, series in (pv_wh or {}).items():
+        assert len(series) == n
+        data[f"pv_{inverter_id}_wh"] = pl.Series(series, dtype=pl.Float32)
+
+    df = pl.DataFrame(data)
     return PredictionData(_df=df, dt_hours=1.0)
 
 
@@ -115,6 +122,47 @@ def _make_switching_case_inverter(
             zero_feed_in=True,
             ac_rates=(0.5, 1.0),
             mode_switch_cost=switch_cost,
+        ),
+        battery=battery,
+    )
+
+
+def _make_boundary_inverter(
+    *,
+    device_id: str,
+    zero_feed_in: bool,
+    pv_source: str | None,
+    initial_soc_percentage: int,
+    min_soc_percentage: int,
+    max_soc_percentage: int,
+) -> InverterBase:
+    battery = Battery(
+        BatteryParameters(
+            device_id=f"battery_{device_id}",
+            capacity_wh=1000,
+            charging_efficiency=1.0,
+            discharging_efficiency=1.0,
+            max_charge_power_w=500,
+            max_discharge_power_w=500,
+            initial_soc_percentage=initial_soc_percentage,
+            min_soc_percentage=min_soc_percentage,
+            max_soc_percentage=max_soc_percentage,
+        ),
+        prediction_hours=1,
+    )
+
+    return InverterBase(
+        InverterParameters(
+            device_id=device_id,
+            battery_id=battery.parameters.device_id,
+            pv_source=pv_source,
+            max_ac_output_power_w=500,
+            max_ac_charge_power_w=500,
+            dc_to_ac_efficiency=1.0,
+            ac_to_dc_efficiency=1.0,
+            zero_feed_in=zero_feed_in,
+            ac_rates=(0.5, 1.0),
+            mode_switch_cost=0.0,
         ),
         battery=battery,
     )
@@ -205,10 +253,10 @@ class TestLinearSolverHybridEconomics:
             int(InverterMode.DISCHARGE),
             int(InverterMode.DISCHARGE_ZERO_FEED_IN),
         )
-        # Expensive slot: discharge is now worthwhile.
-        assert plan["modes"][1] in (
-            int(InverterMode.DISCHARGE),
-            int(InverterMode.DISCHARGE_ZERO_FEED_IN),
+        # At least one later expensive slot should use the stored energy.
+        assert any(
+            mode in (int(InverterMode.DISCHARGE), int(InverterMode.DISCHARGE_ZERO_FEED_IN))
+            for mode in plan["modes"][1:]
         )
 
     def test_zero_feed_discharge_can_compensate_full_load_without_rate(self) -> None:
@@ -358,3 +406,71 @@ class TestLinearSolverHybridEconomics:
             else 0.0
         )
         assert charge_rate_charge_start >= charge_rate_idle_start - 1e-9
+
+    def test_rate_discharge_mode_is_blocked_at_min_soc_even_with_pv(self) -> None:
+        """Discrete discharge must stay idle when the battery starts at min SoC."""
+        inv = _make_boundary_inverter(
+            device_id="hybrid_min_rate",
+            zero_feed_in=False,
+            pv_source="hybrid_min_rate",
+            initial_soc_percentage=20,
+            min_soc_percentage=20,
+            max_soc_percentage=100,
+        )
+        pred = _make_prediction(
+            load_w=[500.0],
+            price_eur_wh=[0.00060],
+            pv_wh={"hybrid_min_rate": [500.0]},
+        )
+
+        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        plan = sol.inverter_plans[0]
+
+        assert plan["modes"][0] == int(InverterMode.IDLE)
+        assert plan["rates"][0] == pytest.approx(0.0, abs=1e-6)
+        assert float(sol.result.battery_wh_per_dt["hybrid_min_rate"][0]) == pytest.approx(700.0)
+
+    def test_zero_feed_discharge_mode_is_blocked_at_min_soc_even_with_pv(self) -> None:
+        """Zero-feed discharge must stay idle when the battery starts at min SoC."""
+        inv = _make_boundary_inverter(
+            device_id="hybrid_min_zfi",
+            zero_feed_in=True,
+            pv_source="hybrid_min_zfi",
+            initial_soc_percentage=20,
+            min_soc_percentage=20,
+            max_soc_percentage=100,
+        )
+        pred = _make_prediction(
+            load_w=[500.0],
+            price_eur_wh=[0.00060],
+            pv_wh={"hybrid_min_zfi": [500.0]},
+        )
+
+        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        plan = sol.inverter_plans[0]
+
+        assert plan["modes"][0] == int(InverterMode.IDLE)
+        assert plan["rates"][0] == pytest.approx(0.0, abs=1e-6)
+        assert float(sol.result.battery_wh_per_dt["hybrid_min_zfi"][0]) == pytest.approx(700.0)
+
+    def test_ac_charge_mode_is_blocked_at_max_soc(self) -> None:
+        """AC charge must stay idle when the battery starts at max SoC."""
+        inv = _make_boundary_inverter(
+            device_id="hybrid_max_charge",
+            zero_feed_in=False,
+            pv_source=None,
+            initial_soc_percentage=80,
+            min_soc_percentage=0,
+            max_soc_percentage=80,
+        )
+        pred = _make_prediction(
+            load_w=[0.0],
+            price_eur_wh=[0.00010],
+        )
+
+        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        plan = sol.inverter_plans[0]
+
+        assert plan["modes"][0] == int(InverterMode.IDLE)
+        assert plan["rates"][0] == pytest.approx(0.0, abs=1e-6)
+        assert float(sol.result.battery_wh_per_dt["hybrid_max_charge"][0]) == pytest.approx(800.0)

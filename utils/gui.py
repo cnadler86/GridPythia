@@ -1445,7 +1445,10 @@ class OptimizationTab(_Tab):
                     )
                     logger.info("Starting LinearOptimizer with objective={}", objective.value)
                     sol: LinearSolution = await asyncio.to_thread(
-                        lambda: optimizer.solve(objective=objective)
+                        lambda: optimizer.solve(
+                            objective=objective,
+                            validate_with_simulation=True,
+                        )
                     )
                     return sol
 
@@ -1454,15 +1457,23 @@ class OptimizationTab(_Tab):
                     inv_modes_arrs: Optional[list[array]] = None
                     inv_ac_rates_arrs: Optional[list[array]] = None
                     solve_meta: str | None = None
+                    simulation_error: dict[str, Any] | None = None
 
                     if isinstance(res_tuple, LinearSolution):
                         sol = res_tuple
-                        res = sol.result
+                        res = sol.simulation_result or sol.result
                         solve_meta = (
                             f"Linear ({sol.objective.value}) · "
                             f"status={sol.solver_status} · "
                             f"{sol.solve_time_s:.2f}s"
                         )
+                        if sol.parity_report is not None and not sol.parity_report.ok:
+                            simulation_error = {
+                                "max_abs_soc_error_wh": sol.parity_report.max_abs_soc_error_wh,
+                                "max_abs_grid_import_error_wh": sol.parity_report.max_abs_grid_import_error_wh,
+                                "max_abs_feedin_error_wh": sol.parity_report.max_abs_feedin_error_wh,
+                                "max_abs_cost_error_eur": sol.parity_report.max_abs_cost_error_eur,
+                            }
                         if sol.inverter_plans:
                             plan = sol.inverter_plans[0]
                             try:
@@ -1496,6 +1507,8 @@ class OptimizationTab(_Tab):
                     res = cast(Any, res)
                     logger.info("Simulation finished, preparing plots and JSON output")
                     out = res.to_dict()
+                    if simulation_error is not None:
+                        out["simulation_error"] = simulation_error
                     # store timestamps for plotting
                     ts = getattr(self, "_last_ts", None)
 
@@ -1735,8 +1748,9 @@ class OptimizationTab(_Tab):
                     txt.pack(fill="both", expand=True)
                     # include config metadata
                     meta: dict = {
-                        "optimizer": getattr(self, "_optimizer_type", None)
-                        and self._optimizer_type.get(),
+                        "optimizer": getattr(
+                            getattr(self, "_optimizer_type", None), "get", lambda: None
+                        )(),
                         "initial_soc_pct": float(self._initial_soc.get()),
                     }
                     if solve_meta:

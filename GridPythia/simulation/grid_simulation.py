@@ -100,8 +100,6 @@ class SimulationResult:
             "solar_generation_wh_per_dt": _conv(self.solar_generation_wh_per_dt or {}),
             "battery_wh_per_dt": _conv(self.battery_wh_per_dt or {}),
             "battery_soc_percentage_per_dt": _conv(self.battery_soc_percentage_per_dt or {}),
-            # explicit alias: SOC values refer to the state at the end of each simulated step
-            "battery_soc_percentage_at_step_end": _conv(self.battery_soc_percentage_per_dt or {}),
             "inverter_modes_per_dt": _conv(self.inverter_modes_per_dt or {}),
             "inverter_ac_rate_per_dt": _conv(self.inverter_ac_rate_per_dt or {}),
             "electricity_price_per_dt": _conv(self.electricity_price_per_dt),
@@ -300,6 +298,7 @@ class GridSimulation:
         _step = self._simulate_step
         pv_lens = [len(a) for a in pv_arrs]
         appl_len = len(appliance_load) if appliance_load is not None else -1
+        appl_arr = appliance_load
 
         costs_per_dt = array("f", [0.0] * total_idx)
         revenue_per_dt = array("f", [0.0] * total_idx)
@@ -334,7 +333,7 @@ class GridSimulation:
         for h in range(start_idx, start_idx + total_idx):
             i = h - start_idx
 
-            load_wh = load_arr[h] + (appliance_load[h] if h < appl_len else 0.0)
+            load_wh = load_arr[h] + (appl_arr[h] if appl_arr is not None and h < appl_len else 0.0)
 
             for j in range(n_inv):
                 step = step_buf[j]
