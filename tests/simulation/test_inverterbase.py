@@ -36,7 +36,7 @@ def pv_hybrid_params() -> InverterParameters:
         ac_to_dc_efficiency=0.90,
         max_ac_charge_power_w=2000,
         zero_feed_in=True,
-        ac_rates=(0.0, 0.25, 0.5, 0.75, 1.0),
+        ac_rates_pct=(25, 50, 75, 100),
     )
 
 
@@ -161,7 +161,7 @@ class TestEnergyFlow:
         inv = InverterBase(pv_hybrid_params, battery=battery)
         initial_soc = battery.soc_wh
         res = inv.process_energy(
-            generation=0, mode=InverterMode.AC_CHARGE, dt=1.0, ac_rate=1.0
+            generation=0, mode=InverterMode.AC_CHARGE, dt=1.0, ac_rate_pct=100
         )
         assert res.ac_input_wh > 0
         assert battery.soc_wh > initial_soc
@@ -183,7 +183,7 @@ class TestRates:
     def test_hybrid_has_only_charge_rates(self, pv_hybrid_params, battery):
         """Hybrid inverter: should expose charge_rates from config, no discharge_rates."""
         inv = InverterBase(pv_hybrid_params, battery=battery)
-        expected_charge = tuple(sorted({float(r) for r in pv_hybrid_params.ac_rates}))
+        expected_charge = tuple(sorted({int(r) for r in pv_hybrid_params.ac_rates_pct}))
         assert inv.charge_rates == expected_charge
         assert inv.discharge_rates == tuple()
 

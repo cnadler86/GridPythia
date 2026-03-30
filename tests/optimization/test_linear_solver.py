@@ -75,7 +75,7 @@ def _make_hybrid_inverter(roundtrip_efficiency: float = 0.8) -> InverterBase:
             dc_to_ac_efficiency=1.0,
             ac_to_dc_efficiency=1.0,
             zero_feed_in=True,
-            ac_rates=(0.5, 1.0),
+            ac_rates_pct=(50, 100),
             mode_switch_cost=0.0,
         ),
         battery=battery,
@@ -120,7 +120,7 @@ def _make_switching_case_inverter(
             dc_to_ac_efficiency=1.0,
             ac_to_dc_efficiency=1.0,
             zero_feed_in=True,
-            ac_rates=(0.5, 1.0),
+            ac_rates_pct=(50, 100),
             mode_switch_cost=switch_cost,
         ),
         battery=battery,
@@ -161,8 +161,7 @@ def _make_boundary_inverter(
             dc_to_ac_efficiency=1.0,
             ac_to_dc_efficiency=1.0,
             zero_feed_in=zero_feed_in,
-            ac_rates=(0.5, 1.0),
-            mode_switch_cost=0.0,
+            ac_rates_pct=(50, 100),
         ),
         battery=battery,
     )
@@ -210,7 +209,7 @@ class TestLinearSolverHybridEconomics:
         # SoC increase must match selected discrete rate.
         soc = list(sol.result.battery_wh_per_dt["hybrid_h1"])
         eta = 0.8**0.5
-        charged_wh = 500.0 * float(plan["rates"][1])
+        charged_wh = 500.0 * (int(plan["rates"][1]) / 100.0)
         assert soc[1] - soc[0] == pytest.approx(charged_wh * eta, abs=1e-2)
 
         # High-price period should discharge in zero-feed-in mode.
@@ -227,7 +226,7 @@ class TestLinearSolverHybridEconomics:
         sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
         rates = [float(r) for r in sol.result.inverter_ac_rate_per_dt["hybrid_h1"] if float(r) > 1e-8]
 
-        allowed = {0.5, 1.0}
+        allowed = {50.0, 100.0}
         assert rates
         assert set(round(r, 6) for r in rates).issubset(allowed)
 
@@ -305,7 +304,7 @@ class TestLinearSolverHybridEconomics:
                 dc_to_ac_efficiency=1.0,
                 ac_to_dc_efficiency=1.0,
                 zero_feed_in=False,
-                ac_rates=(0.5, 1.0),
+                ac_rates_pct=(50, 100),
             ),
             battery=battery,
         )
@@ -369,7 +368,7 @@ class TestLinearSolverHybridEconomics:
         )
 
         # The isolated cheapest slot must be used at full rate.
-        assert isolated_charge == pytest.approx(1.0, abs=1e-6)
+        assert isolated_charge == pytest.approx(100.0, abs=1e-6)
         # At least one adjacent slot must also be used (battery charges more than t3 alone).
         assert adjacent_charge > 0.0
 

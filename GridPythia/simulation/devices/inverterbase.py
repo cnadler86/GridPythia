@@ -85,13 +85,13 @@ class InverterBase:
         # if any of the rate-required modes are available, populate rates
         if InverterMode.AC_CHARGE in self.available_modes:
             self.charge_rates = DEFAULT_AC_RATES
-            if self.parameters.ac_rates:
-                self.charge_rates = tuple(sorted({float(r) for r in self.parameters.ac_rates}))
+            if self.parameters.ac_rates_pct:
+                self.charge_rates = tuple(sorted({int(r) for r in self.parameters.ac_rates_pct}))
         if InverterMode.DISCHARGE in self.available_modes:
             self.discharge_rates = DEFAULT_AC_RATES
-            if self.parameters.ac_rates:
+            if self.parameters.ac_rates_pct:
                 self.discharge_rates = tuple(
-                    sorted({float(r) for r in self.parameters.ac_rates if 0 < r <= 1})
+                    sorted({int(r) for r in self.parameters.ac_rates_pct if 0 < int(r) <= 100})
                 )
 
         self.is_optimizable: bool = (
@@ -169,7 +169,7 @@ class InverterBase:
         mode: InverterMode,
         dt: float = 1.0,
         *,
-        ac_rate: Optional[float] = None,
+        ac_rate_pct: Optional[int] = None,
         energy_wh: Optional[float] = None,
     ) -> EnergyFlowResult:
         """Process energy at DC/AC boundary for one time step."""
@@ -185,9 +185,9 @@ class InverterBase:
             raise ValueError(
                 f"Inverter '{self.parameters.device_id}': energy_wh must be provided for zero feed-in modes"
             )
-        if mode in self._RATE_REQUIRED_MODES and ac_rate is None:
+        if mode in self._RATE_REQUIRED_MODES and ac_rate_pct is None:
             raise ValueError(
-                f"Inverter '{self.parameters.device_id}': ac_rate must be provided for DISCHARGE and AC_CHARGE modes"
+                f"Inverter '{self.parameters.device_id}': ac_rate_pct must be provided for DISCHARGE and AC_CHARGE modes"
             )
 
         self.current_state = mode
@@ -196,7 +196,15 @@ class InverterBase:
         if mode in self._ZERO_FEED_IN_MODES:
             return handler(generation, dt, energy_wh=energy_wh)
         if mode in self._RATE_REQUIRED_MODES:
-            return handler(generation, dt, ac_rate=ac_rate)
+            if not isinstance(ac_rate_pct, int):
+                raise ValueError(
+                    f"Inverter '{self.parameters.device_id}': ac_rate_pct must be an integer percent in [1, 100]"
+                )
+            if ac_rate_pct < 1 or ac_rate_pct > 100:
+                raise ValueError(
+                    f"Inverter '{self.parameters.device_id}': ac_rate_pct must be within [1, 100], got {ac_rate_pct}"
+                )
+            return handler(generation, dt, ac_rate_pct=ac_rate_pct)
         return handler(generation, dt)
 
     def _process_idle(self, generation_wh: float, dt: float) -> EnergyFlowResult:
@@ -234,7 +242,7 @@ class InverterBase:
         generation_wh: float,
         dt: float,
         *,
-        ac_rate: Optional[float] = None,
+        ac_rate_pct: Optional[int] = None,
         energy_wh: Optional[float] = None,
     ) -> EnergyFlowResult:
         """DISCHARGE: (PV) + (Battery) → AC output."""
@@ -244,8 +252,8 @@ class InverterBase:
 
         dc2ac = self._dc_to_ac_efficiency
         max_discharge_ac_wh = self._max_ac_output_power_w * dt
-        if ac_rate is not None:
-            max_discharge_ac_wh *= ac_rate
+        if ac_rate_pct is not None:
+            max_discharge_ac_wh *= ac_rate_pct / 100.0
 
         if max_discharge_ac_wh <= 0:
             return self._process_idle(generation_wh, dt)
@@ -310,7 +318,7 @@ class InverterBase:
 
             return EnergyFlowResult(ac_output_wh, ac_input_wh, losses_wh, pv_ac_wh=ac_from_pv)
 
-        # Mode 2: DISCHARGE with ac_rate
+        # Mode 2: DISCHARGE with ac_rate_pct
         pv_used_dc = 0.0
         pv_ac = 0.0
         if generation_wh > 0:
@@ -347,7 +355,7 @@ class InverterBase:
         generation: float,
         dt: float,
         *,
-        ac_rate: Optional[float] = None,
+        ac_rate_pct: Optional[int] = None,
         energy_wh: Optional[float] = None,
     ) -> EnergyFlowResult:
         """AC_CHARGE: AC bus → Battery. PV prioritized over AC."""
@@ -381,11 +389,11 @@ class InverterBase:
 
         if energy_wh is not None:
             max_ac_charge = energy_wh
-        elif ac_rate is not None:
-            max_ac_charge = self._max_ac_charge_power_w * dt * ac_rate
+        elif ac_rate_pct is not None:
+            max_ac_charge = self._max_ac_charge_power_w * dt * (ac_rate_pct / 100.0)
         else:
             raise ValueError(
-                f"Inverter '{self.parameters.device_id}': either energy_wh or ac_rate must be provided"
+                f"Inverter '{self.parameters.device_id}': either energy_wh or ac_rate_pct must be provided"
             )
 
         if max_ac_charge > 0:

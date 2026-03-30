@@ -240,7 +240,7 @@ def test_simulation(grid_simulation: GridSimulation) -> None:
         for inv in sim._inv_list
     }
     inverter_ac_rates = {
-        inv.device_id: array("f", [0.0] * n_hours)
+        inv.device_id: array("i", [0] * n_hours)
         for inv in sim._inv_list
     }
     appliance_load = array("f", [0.0] * n_hours)
@@ -283,7 +283,7 @@ def test_simulation_discharge_reduces_grid_draw(
         for inv in sim._inv_list
     }
     rates = {
-        inv.device_id: array("f", [0.0] * n_hours)
+        inv.device_id: array("i", [0] * n_hours)
         for inv in sim._inv_list
     }
     appliance_load = array("f", [0.0] * n_hours)
@@ -307,7 +307,7 @@ def test_simulation_reset(grid_simulation: GridSimulation) -> None:
         for inv in sim._inv_list
     }
     rates = {
-        inv.device_id: array("f", [0.0] * n_hours)
+        inv.device_id: array("i", [0] * n_hours)
         for inv in sim._inv_list
     }
     appliance_load = array("f", [0.0] * n_hours)

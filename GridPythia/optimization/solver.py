@@ -60,8 +60,8 @@ class LinearSolution:
 class _RateSelector:
     """Per-inverter binary selectors for discrete charge/discharge rate states."""
 
-    charge_rates: tuple[float, ...]
-    discharge_rates: tuple[float, ...]
+    charge_rates: tuple[int, ...]
+    discharge_rates: tuple[int, ...]
     y_ch: cp.Variable | None
     y_dc: cp.Variable | None
 
@@ -331,12 +331,12 @@ class LinearOptimizer:
             max_dc_wh = inv.battery.max_discharge_power_w * dt
 
             if y_ch is not None:
-                p_ch = max_ch_wh * (np.array(charge_rates, dtype=float) @ y_ch)
+                p_ch = max_ch_wh * ((np.array(charge_rates, dtype=float) / 100.0) @ y_ch)
             else:
                 p_ch = cp.Constant(np.zeros(T, dtype=float))
 
             if y_dc is not None:
-                p_dc = max_dc_wh * (np.array(discharge_rates, dtype=float) @ y_dc)
+                p_dc = max_dc_wh * ((np.array(discharge_rates, dtype=float) / 100.0) @ y_dc)
             elif has_zero_feed_discharge and not has_rate_discharge:
                 # Zero-feed discharge is energy-target driven in simulation,
                 # so model discharge continuously (bounded only by physics).
@@ -552,26 +552,26 @@ class LinearOptimizer:
             return terms[0]
         return cp.sum(cp.vstack(terms), axis=0)
 
-    def _get_charge_rates(self, inv: InverterBase) -> tuple[float, ...]:
+    def _get_charge_rates(self, inv: InverterBase) -> tuple[int, ...]:
         if InverterMode.AC_CHARGE not in inv.available_modes:
             return tuple()
         raw = tuple(getattr(inv, "charge_rates", tuple())) or tuple(
-            getattr(inv.parameters, "ac_rates", tuple())
+            getattr(inv.parameters, "ac_rates_pct", tuple())
         )
-        rates = tuple(sorted({float(r) for r in raw if 0.0 < float(r) <= 1.0}))
-        return rates or (1.0,)
+        rates = tuple(sorted({int(r) for r in raw if 0 < int(r) <= 100}))
+        return rates or (100,)
 
-    def _get_discharge_rates(self, inv: InverterBase) -> tuple[float, ...]:
+    def _get_discharge_rates(self, inv: InverterBase) -> tuple[int, ...]:
         # DISCHARGE_ZERO_FEED_IN is handled as continuous discharge variable,
         # not as discrete-rate states.
         if InverterMode.DISCHARGE not in inv.available_modes:
             return tuple()
 
         raw = tuple(getattr(inv, "discharge_rates", tuple())) or tuple(
-            getattr(inv.parameters, "ac_rates", tuple())
+            getattr(inv.parameters, "ac_rates_pct", tuple())
         )
-        rates = tuple(sorted({float(r) for r in raw if 0.0 < float(r) <= 1.0}))
-        return rates or (1.0,)
+        rates = tuple(sorted({int(r) for r in raw if 0 < int(r) <= 100}))
+        return rates or (100,)
 
     @staticmethod
     def _expr_to_vec(expr: cp.Expression, T: int) -> np.ndarray:
@@ -582,6 +582,17 @@ class LinearOptimizer:
         if arr.ndim == 0:
             return np.full(T, float(arr), dtype=float)
         return np.maximum(arr, 0.0)
+
+    @staticmethod
+    def _sanitize_rate_percent(
+        rate_pct: float,
+        *,
+        allowed_levels: tuple[int, ...] = tuple(),
+    ) -> int:
+        r = float(rate_pct)
+        if allowed_levels:
+            return int(min(allowed_levels, key=lambda lvl: abs(float(lvl) - r)))
+        return int(max(0, min(100, round(r))))
 
     def _build_solution(
         self,
@@ -643,7 +654,7 @@ class LinearOptimizer:
             # Build mode/rate series for simulation replay and UI output.
             modes, rates = self._extract_modes_and_rates(block, p_ch, p_dc, dt)
             inv_modes_per_dt[inv_id] = array("b", modes)
-            inv_rates_per_dt[inv_id] = array("f", rates)
+            inv_rates_per_dt[inv_id] = array("i", rates)
             inverter_plans.append({"device_id": inv_id, "modes": modes, "rates": rates})
 
         result = SimulationResult(
@@ -675,12 +686,12 @@ class LinearOptimizer:
         p_ch: np.ndarray,
         p_dc: np.ndarray,
         dt: float,
-    ) -> tuple[list[int], list[float]]:
+    ) -> tuple[list[int], list[int]]:
         inv = block.inverter
         T = len(p_ch)
         eps = 1e-4
         modes: list[int] = []
-        rates: list[float] = []
+        rates: list[int] = []
 
         bat = inv.battery
         max_ch_wh = bat.max_charge_power_w * dt if bat is not None else 0.0
@@ -688,8 +699,8 @@ class LinearOptimizer:
 
         y_ch_vals = None
         y_dc_vals = None
-        ch_rate_levels: tuple[float, ...] = tuple()
-        dc_rate_levels: tuple[float, ...] = tuple()
+        ch_rate_levels: tuple[int, ...] = tuple()
+        dc_rate_levels: tuple[int, ...] = tuple()
         if block.selector is not None:
             ch_rate_levels = block.selector.charge_rates
             dc_rate_levels = block.selector.discharge_rates
@@ -710,9 +721,12 @@ class LinearOptimizer:
                 )
                 if y_ch_vals is not None and y_ch_vals.shape[1] > t and ch_rate_levels:
                     k = int(np.argmax(y_ch_vals[:, t]))
-                    rate = float(ch_rate_levels[k])
+                    rate = int(ch_rate_levels[k])
                 else:
-                    rate = min(ch / max_ch_wh, 1.0) if max_ch_wh > eps else 1.0
+                    rate = int(
+                        round((min(ch / max_ch_wh, 1.0) if max_ch_wh > eps else 1.0) * 100.0)
+                    )
+                rate = self._sanitize_rate_percent(rate, allowed_levels=ch_rate_levels)
             elif dc > eps:
                 if InverterMode.DISCHARGE in inv.available_modes:
                     mode = int(InverterMode.DISCHARGE)
@@ -723,16 +737,19 @@ class LinearOptimizer:
                         else int(InverterMode.DISCHARGE)
                     )
                 if mode == int(InverterMode.DISCHARGE_ZERO_FEED_IN):
-                    # Zero-feed discharge uses energy_wh in simulation; no ac_rate.
-                    rate = 0.0
+                    # Zero-feed discharge uses energy_wh in simulation; no ac_rate_pct.
+                    rate = 0
                 elif y_dc_vals is not None and y_dc_vals.shape[1] > t and dc_rate_levels:
                     k = int(np.argmax(y_dc_vals[:, t]))
-                    rate = float(dc_rate_levels[k])
+                    rate = int(dc_rate_levels[k])
                 else:
-                    rate = min(dc / max_dc_wh, 1.0) if max_dc_wh > eps else 1.0
+                    rate = int(
+                        round((min(dc / max_dc_wh, 1.0) if max_dc_wh > eps else 1.0) * 100.0)
+                    )
+                rate = self._sanitize_rate_percent(rate, allowed_levels=dc_rate_levels)
             else:
                 mode = int(InverterMode.IDLE)
-                rate = 0.0
+                rate = 0
 
             modes.append(mode)
             rates.append(rate)
@@ -756,10 +773,10 @@ class LinearOptimizer:
             plan = next((p for p in solution.inverter_plans if p["device_id"] == inv_id), None)
             if plan is None:
                 modes[inv_id] = array("i", [int(InverterMode.IDLE)] * prep.T)
-                rates[inv_id] = array("f", [0.0] * prep.T)
+                rates[inv_id] = array("i", [0] * prep.T)
             else:
                 modes[inv_id] = array("i", plan["modes"])
-                rates[inv_id] = array("f", plan["rates"])
+                rates[inv_id] = array("i", [int(x) for x in plan["rates"]])
 
         sim_result = sim.simulate(
             inverter_modes=modes,

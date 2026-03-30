@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field, field_validator
 _INVERTER_COUNTER = count(1)
 _BATTERY_COUNTER = count(1)
 
-# Default charge rates
-DEFAULT_AC_RATES: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+# Default charge/discharge rates as percent values.
+DEFAULT_AC_RATES: tuple[int, ...] = tuple(range(5, 101, 5))
 
 
 class BatteryParameters(BaseModel):
@@ -79,9 +79,9 @@ class InverterParameters(BaseModel):
         default=0.95, ge=0.0, le=1.0, description="AC→DC efficiency [0, 1]"
     )
     zero_feed_in: bool = Field(default=True, description="Enable zero-feed-in mode")
-    ac_rates: tuple[float, ...] = Field(
+    ac_rates_pct: tuple[int, ...] = Field(
         default=DEFAULT_AC_RATES,
-        description="Discrete charge/discharge rates for optimization",
+        description="Discrete charge/discharge rates in percent (1..100)",
     )
     mode_switch_cost: float = Field(
         default=0.005, ge=0.0, description="Cost (€) per inverter mode change (wear cost)"
@@ -103,10 +103,16 @@ class InverterParameters(BaseModel):
                 f"Inverter '{self.device_id}' must have either battery_id or pv_source (or both)."
             )
 
-    @field_validator("ac_rates", mode="before")
+    @field_validator("ac_rates_pct", mode="before")
     @classmethod
-    def normalize_rates(cls, v) -> tuple[float, ...]:
-        """Normalize ac_rates to sorted tuple of floats in (0, 1]."""
+    def normalize_rates(cls, v) -> tuple[int, ...]:
+        """Normalize ac_rates_pct to sorted tuple of unique integer percentages."""
         if isinstance(v, (list, tuple)):
-            return tuple(sorted({float(r) for r in v if 0.0 < float(r) <= 1.0}))
+            normalized: set[int] = set()
+            for r in v:
+                if not isinstance(r, int):
+                    raise ValueError("ac_rates_pct entries must be integers in [1, 100]")
+                if 1 <= r <= 100:
+                    normalized.add(r)
+            return tuple(sorted(x for x in normalized if 0 < x <= 100))
         return v

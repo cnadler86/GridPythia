@@ -1481,7 +1481,7 @@ class OptimizationTab(_Tab):
                                     array("i", [int(x) for x in plan.get("modes", [])])
                                 ]
                                 inv_ac_rates_arrs = [
-                                    array("f", [float(x) for x in plan.get("rates", [])])
+                                    array("i", [int(x) for x in plan.get("rates", [])])
                                 ]
                             except Exception:
                                 inv_modes_arrs = None
@@ -1661,7 +1661,7 @@ class OptimizationTab(_Tab):
                                 except Exception:
                                     mode_int = int(InverterMode.IDLE)
                                 rate = (
-                                    float(rates_arr[i])
+                                    float(rates_arr[i]) / 100.0
                                     if rates_arr is not None and i < len(rates_arr)
                                     else 1.0
                                 )

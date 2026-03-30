@@ -20,7 +20,7 @@ class InverterSimulationDataStep:
     inverter: InverterBase
     mode: InverterMode
     generation: float = 0.0
-    ac_rate: Optional[float] = None
+    ac_rate_pct: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -33,7 +33,7 @@ class SimulationResult:
     losses_wh_per_dt: array[float]
     electricity_price_per_dt: array[float]
     inverter_modes_per_dt: Dict[str, array[int]]
-    inverter_ac_rate_per_dt: Dict[str, array[float]] = field(default_factory=dict)
+    inverter_ac_rate_per_dt: Dict[str, array[int]] = field(default_factory=dict)
     solar_generation_wh_per_dt: Dict[str, array[float]] = field(default_factory=dict)
     battery_wh_per_dt: Dict[str, array[float]] = field(default_factory=dict)
     battery_soc_percentage_per_dt: Dict[str, array[float]] = field(default_factory=dict)
@@ -161,7 +161,7 @@ class GridSimulation:
 
         self._step_buf: list[InverterSimulationDataStep] = [
             InverterSimulationDataStep(
-                inverter=inv, mode=InverterMode.IDLE, generation=0.0, ac_rate=1.0
+                inverter=inv, mode=InverterMode.IDLE, generation=0.0, ac_rate_pct=100
             )
             for inv in self._inv_list
         ]
@@ -224,7 +224,7 @@ class GridSimulation:
                     generation=sb.generation,
                     mode=m,
                     dt=dt,
-                    ac_rate=sb.ac_rate,
+                    ac_rate_pct=sb.ac_rate_pct,
                 )
                 static_ie += res.ac_output_wh - res.ac_input_wh
                 static_pv += res.pv_ac_wh
@@ -270,7 +270,7 @@ class GridSimulation:
     def simulate(
         self,
         inverter_modes: Dict[str, array[InverterMode]],
-        inverter_ac_rates: Dict[str, array[float]],
+        inverter_ac_rates: Dict[str, array[int]],
         appliance_load: Optional[array[float]] = None,
         start_idx: int = 0,
         dt: float = 1.0,
@@ -293,7 +293,7 @@ class GridSimulation:
 
         # Extract ordered arrays for the hot loop (avoids per-step dict lookups)
         modes_arrs = [inverter_modes.get(inv.device_id, array("i", [])) for inv in inv_list]
-        rates_arrs = [inverter_ac_rates.get(inv.device_id, array("f", [])) for inv in inv_list]
+        rates_arrs = [inverter_ac_rates.get(inv.device_id, array("i", [])) for inv in inv_list]
 
         _step = self._simulate_step
         pv_lens = [len(a) for a in pv_arrs]
@@ -339,7 +339,7 @@ class GridSimulation:
                 step = step_buf[j]
                 step.mode = modes_arrs[j][h]
                 step.generation = pv_arrs[j][h] if h < pv_lens[j] else 0.0
-                step.ac_rate = rates_arrs[j][h]
+                step.ac_rate_pct = int(rates_arrs[j][h])
 
             end_load, pv_ac_wh, losses_wh_per_dt[i], pv_per_inv_list = _step(step_buf, load_wh, dt)
 
@@ -382,7 +382,7 @@ class GridSimulation:
         }
         inverter_ac_rate_per_dt: Dict[str, array] = {
             inv.device_id: array(
-                "f", inverter_ac_rates[inv.device_id][start_idx : start_idx + total_idx]
+                "i", inverter_ac_rates[inv.device_id][start_idx : start_idx + total_idx]
             )
             for inv in inv_list
             if inv.device_id in inverter_ac_rates
