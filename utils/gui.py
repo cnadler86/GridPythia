@@ -10,10 +10,12 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import threading
 import tkinter as tk
 import traceback
+from array import array
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -24,12 +26,14 @@ import matplotlib
 from matplotlib.axes import Axes
 
 matplotlib.use("TkAgg")
-import json
-from array import array
-
 import matplotlib.dates as mdates
 import numpy as np
 import polars as pl
+import yaml
+from loguru import logger
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
+
 from GridPythia.config.models import BatteryParameters, InverterParameters
 from GridPythia.optimization.solver import LinearOptimizer, LinearSolution, OptimizationObjective
 from GridPythia.prediction.base import make_timestamps
@@ -56,9 +60,6 @@ from GridPythia.prediction.weather.provider import WeatherProvider
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.battery import Battery
 from GridPythia.simulation.devices.inverterbase import InverterBase
-from loguru import logger
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.figure import Figure
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -90,6 +91,11 @@ _BZ_CHOICES = [
 _DT_CHOICES = ["0.25", "0.5", "1.0", "2.0", "4.0"]
 _PAD: Mapping[str, Any] = {"padx": 4, "pady": 3}
 
+# ── GUI Defaults ──────────────────────────────────────────────────────────
+_GUI_HOURS_DEFAULT = "48"
+_GUI_DT_DEFAULT = "0.25"
+_GUI_TIMEZONE_DEFAULT = "UTC"
+
 # ── utilities ─────────────────────────────────────────────────────────────
 
 
@@ -111,6 +117,14 @@ def _run_async(
 
 def _csv(text: str) -> list[float]:
     return [float(t) for t in re.split(r"[\s,;]+", text.strip()) if t]
+
+
+def _csv_text(values: Any, default: str = "") -> str:
+    if values is None:
+        return default
+    if isinstance(values, (list, tuple)):
+        return ", ".join(str(v) for v in values)
+    return str(values)
 
 
 def _path_field(
@@ -342,6 +356,7 @@ def _wire_pv_hover(
 class _Tab:
     TITLE = ""
     PROVIDERS: list[str] = []
+    _LEFT_WIDTH: int = 260
 
     def __init__(self, nb: ttk.Notebook, app: "App") -> None:
         self.app = app
@@ -359,7 +374,7 @@ class _Tab:
 
     def _build_layout(self) -> None:
         # Left panel (fixed width)
-        left = ttk.Frame(self.frame, width=260)
+        left = ttk.Frame(self.frame, width=self._LEFT_WIDTH)
         left.grid(row=0, column=0, sticky="nsew", padx=(4, 2), pady=4)
         left.grid_propagate(False)
         left.columnconfigure(0, weight=1)
@@ -370,7 +385,7 @@ class _Tab:
             pf = ttk.LabelFrame(left, text="Provider", padding=4)
             pf.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
             pf.columnconfigure(0, weight=1)
-            self._prov_var = tk.StringVar(value=self.PROVIDERS[0])
+            self._prov_var = tk.StringVar(value=self._initial_provider())
             cb = ttk.Combobox(
                 pf,
                 textvariable=self._prov_var,
@@ -423,6 +438,16 @@ class _Tab:
 
     def _build_fields(self) -> None:
         """Override — add widgets to self._cfg using grid rows."""
+
+    def _initial_provider(self) -> str:
+        return self.PROVIDERS[0] if self.PROVIDERS else ""
+
+    def load_defaults_from_config(self) -> None:
+        if self.PROVIDERS and hasattr(self, "_prov_var"):
+            prov = self._initial_provider()
+            if prov in self.PROVIDERS:
+                self._prov_var.set(prov)
+        self._rebuild()
 
     # ── provider construction ─────────────────────────────────────────
 
@@ -497,15 +522,38 @@ class ElecPriceTab(_Tab):
     TITLE = "Electric Price"
     PROVIDERS = ["EnergyCharts", "Fixed", "Import"]
 
+    def _initial_provider(self) -> str:
+        v = self.app.cfg_text("prediction", "electricprice", "provider", default="EnergyCharts")
+        return v if v in self.PROVIDERS else self.PROVIDERS[0]
+
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
         p = self._prov_var.get()
 
         if p == "Fixed":
-            self._price = _field(f, row, "Price EUR/kWh", "0.30")
+            self._price = _field(
+                f,
+                row,
+                "Price EUR/kWh",
+                self.app.cfg_text(
+                    "prediction", "electricprice", "fixed", "price_kwh", default="0.30"
+                ),
+            )
             row += 1
         elif p == "EnergyCharts":
-            self._zone = _combofield(f, row, "Bidding zone", _BZ_CHOICES, "DE-LU")
+            self._zone = _combofield(
+                f,
+                row,
+                "Bidding zone",
+                _BZ_CHOICES,
+                self.app.cfg_text(
+                    "prediction",
+                    "electricprice",
+                    "energycharts",
+                    "bidding_zone",
+                    default="DE-LU",
+                ),
+            )
             row += 1
         else:  # Import
             ttk.Label(f, text="Values (EUR/Wh, CSV):").grid(
@@ -513,15 +561,46 @@ class ElecPriceTab(_Tab):
             )
             row += 1
             self._ta = _textarea(f, row)
+            self._ta.insert(
+                "1.0",
+                self.app.cfg_csv(
+                    "prediction",
+                    "electricprice",
+                    "import",
+                    "prices_wh",
+                    default="",
+                ),
+            )
             row += 1
-            self._srcdt = _field(f, row, "Source dt [h]", "1.0")
+            self._srcdt = _field(
+                f,
+                row,
+                "Source dt [h]",
+                self.app.cfg_text(
+                    "prediction",
+                    "electricprice",
+                    "import",
+                    "source_dt_hours",
+                    default="1.0",
+                ),
+            )
             row += 1
 
         ttk.Separator(f).grid(row=row, column=0, columnspan=2, sticky="ew", pady=4)
         row += 1
-        self._charges = _field(f, row, "Charges EUR/kWh", "0.1528")
+        self._charges = _field(
+            f,
+            row,
+            "Charges EUR/kWh",
+            self.app.cfg_text("prediction", "electricprice", "charges_kwh", default="0.1528"),
+        )
         row += 1
-        self._vat = _field(f, row, "VAT rate", "0.19")
+        self._vat = _field(
+            f,
+            row,
+            "VAT rate",
+            self.app.cfg_text("prediction", "electricprice", "vat_rate", default="0.19"),
+        )
 
     def _provider_sig(self) -> str | None:
         p = self._prov_var.get()
@@ -563,18 +642,50 @@ class FeedInTariffTab(_Tab):
     TITLE = "Feed-in Tariff"
     PROVIDERS = ["Fixed", "Import"]
 
+    def _initial_provider(self) -> str:
+        v = self.app.cfg_text("prediction", "feedintariff", "provider", default="Fixed")
+        return v if v in self.PROVIDERS else self.PROVIDERS[0]
+
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
         if self._prov_var.get() == "Fixed":
-            self._tariff = _field(f, row, "Tariff EUR/kWh", "0.0")
+            self._tariff = _field(
+                f,
+                row,
+                "Tariff EUR/kWh",
+                self.app.cfg_text(
+                    "prediction", "feedintariff", "fixed", "tariff_kwh", default="0.0"
+                ),
+            )
         else:
             ttk.Label(f, text="Values (EUR/Wh, CSV):").grid(
                 row=row, column=0, columnspan=2, sticky="w", **_PAD
             )
             row += 1
             self._ta = _textarea(f, row)
+            self._ta.insert(
+                "1.0",
+                self.app.cfg_csv(
+                    "prediction",
+                    "feedintariff",
+                    "import",
+                    "tariffs_wh",
+                    default="",
+                ),
+            )
             row += 1
-            self._srcdt = _field(f, row, "Source dt [h]", "1.0")
+            self._srcdt = _field(
+                f,
+                row,
+                "Source dt [h]",
+                self.app.cfg_text(
+                    "prediction",
+                    "feedintariff",
+                    "import",
+                    "source_dt_hours",
+                    default="1.0",
+                ),
+            )
 
     def make_provider(self) -> object:
         """Create and return the configured feed-in tariff provider."""
@@ -605,33 +716,30 @@ class LoadTab(_Tab):
     TITLE = "Load"
     PROVIDERS = ["ProfileJSON", "ProfileCSV"]
 
+    def _initial_provider(self) -> str:
+        v = self.app.cfg_text("prediction", "load", "provider", default="ProfileJSON")
+        return v if v in self.PROVIDERS else self.PROVIDERS[0]
+
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
+        # Global path field (common to all providers)
+        self._profile_path = _path_field(
+            f,
+            row,
+            "Profile path",
+            self.app.cfg_text("prediction", "load", "path", default=""),
+            filetypes=[("JSON/CSV files", "*.json *.csv"), ("All files", "*.*")],
+        )
+        row += 1
+        # Vacation profile runtime toggle (only for ProfileJSON)
         p = self._prov_var.get()
         if p == "ProfileJSON":
-            self._profile_json_path = _path_field(
-                f,
-                row,
-                "Profile JSON",
-                str(Path("GridPythia/prediction/load/data/load_profiles.json")),
-                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            )
-            row += 1
             self._vacation_profile = tk.BooleanVar(value=False)
             ttk.Checkbutton(
                 f,
                 text="Use vacation profile",
                 variable=self._vacation_profile,
             ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
-            row += 1
-        else:  # ProfileCSV
-            self._profile_csv_path = _path_field(
-                f,
-                row,
-                "Profile CSV",
-                "",
-                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            )
             row += 1
 
         # Holiday settings (shared by both providers)
@@ -641,27 +749,29 @@ class LoadTab(_Tab):
             row=row, column=0, columnspan=2, sticky="w", padx=4
         )
         row += 1
-        self._country = _field(f, row, "Country (ISO)", "DE")
+        self._country = _field(
+            f,
+            row,
+            "Country (ISO)",
+            self.app.cfg_text("prediction", "load", "country", default="DE"),
+        )
         row += 1
-        self._subdivision = _field(f, row, "Subdivision", "BW")
+        self._subdivision = _field(
+            f,
+            row,
+            "Subdivision",
+            self.app.cfg_text("prediction", "load", "subdivision", default="BW"),
+        )
 
     def make_provider(self) -> object:
         """Create and return the configured load provider."""
         country = self._country.get().strip() or None
         subdivision = self._subdivision.get().strip() or None
-        p = self._prov_var.get()
-        if p == "ProfileJSON":
-            cfg = LoadProfileConfig(
-                path=Path(self._profile_json_path.get()),
-                country=country,
-                subdivision=subdivision,
-            )
-        else:  # ProfileCSV
-            cfg = LoadProfileConfig(
-                path=Path(self._profile_csv_path.get().strip()),
-                country=country,
-                subdivision=subdivision,
-            )
+        cfg = LoadProfileConfig(
+            path=Path(self._profile_path.get()),
+            country=country,
+            subdivision=subdivision,
+        )
         return load_provider_from_config(cfg)
 
     def fetch(self) -> None:
@@ -703,6 +813,10 @@ class PVForecastTab(_Tab):
     TITLE = "PV Forecast"
     PROVIDERS = ["OpenMeteo", "Akkudoktor", "ForecastSolar", "Import"]
 
+    def _initial_provider(self) -> str:
+        v = self.app.cfg_text("prediction", "pvforecast", "provider", default="OpenMeteo")
+        return v if v in self.PROVIDERS else self.PROVIDERS[0]
+
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
 
@@ -711,21 +825,64 @@ class PVForecastTab(_Tab):
             row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 0)
         )
         row += 1
-        self._peak = _field(f, row, "Peak [kW]", "0.41")
+        self._peak = _field(
+            f,
+            row,
+            "Peak [kW]",
+            self.app.cfg_text("prediction", "pvforecast", "plane", "peak_kw", default="0.41"),
+        )
         row += 1
-        self._tilt = _field(f, row, "Tilt [°]", "75.0")
+        self._tilt = _field(
+            f,
+            row,
+            "Tilt [°]",
+            self.app.cfg_text("prediction", "pvforecast", "plane", "tilt", default="75.0"),
+        )
         row += 1
-        self._az = _field(f, row, "Azimuth [°]", "218.0")
+        self._az = _field(
+            f,
+            row,
+            "Azimuth [°]",
+            self.app.cfg_text("prediction", "pvforecast", "plane", "azimuth", default="218.0"),
+        )
         row += 1
-        self._loss = _field(f, row, "Loss [%]", "4.0")
+        self._loss = _field(
+            f,
+            row,
+            "Loss [%]",
+            self.app.cfg_text("prediction", "pvforecast", "plane", "loss_pct", default="4.0"),
+        )
         row += 1
-        self._horizon = _field(f, row, "Horizon [°] CSV", "")
+        self._horizon = _field(
+            f,
+            row,
+            "Horizon [°] CSV",
+            self.app.cfg_csv("prediction", "pvforecast", "plane", "userhorizon", default=""),
+        )
         row += 1
-        self._damp_morn = _field(f, row, "Damp. morning", "2.0")
+        self._damp_morn = _field(
+            f,
+            row,
+            "Damp. morning",
+            self.app.cfg_text(
+                "prediction", "pvforecast", "plane", "damping_morning", default="2.0"
+            ),
+        )
         row += 1
-        self._damp_eve = _field(f, row, "Damp. evening", "0.2")
+        self._damp_eve = _field(
+            f,
+            row,
+            "Damp. evening",
+            self.app.cfg_text(
+                "prediction", "pvforecast", "plane", "damping_evening", default="0.2"
+            ),
+        )
         row += 1
-        self._partial_shading = tk.BooleanVar(value=False)
+        self._partial_shading = tk.BooleanVar(
+            value=self.app.cfg_bool(
+                "prediction", "pvforecast", "plane", "partial_shading", default=False
+            )
+        )
         ttk.Checkbutton(f, text="Partial shading", variable=self._partial_shading).grid(
             row=row, column=0, columnspan=2, sticky="w", **_PAD
         )
@@ -742,24 +899,71 @@ class PVForecastTab(_Tab):
 
         prov = self._prov_var.get()
         if prov in ("OpenMeteo", "Akkudoktor", "ForecastSolar"):
-            self._lat = _field(f, row, "Latitude", "47.99545")
+            # Global PV location
+            self._lat = _field(
+                f,
+                row,
+                "Latitude",
+                self.app.cfg_text("prediction", "pvforecast", "latitude", default="47.99545"),
+            )
             row += 1
-            self._lon = _field(f, row, "Longitude", "7.83355")
+            self._lon = _field(
+                f,
+                row,
+                "Longitude",
+                self.app.cfg_text("prediction", "pvforecast", "longitude", default="7.83355"),
+            )
             row += 1
             if prov == "ForecastSolar":
-                self._apikey = _field(f, row, "API key (opt.)", "")
+                self._apikey = _field(
+                    f,
+                    row,
+                    "API key (opt.)",
+                    self.app.cfg_text(
+                        "prediction", "pvforecast", "forecastsolar", "api_key", default=""
+                    ),
+                )
             elif prov == "OpenMeteo":
-                self._om_apikey = _field(f, row, "API key (opt.)", "")
+                self._om_apikey = _field(
+                    f,
+                    row,
+                    "API key (opt.)",
+                    self.app.cfg_text(
+                        "prediction", "pvforecast", "openmeteo", "api_key", default=""
+                    ),
+                )
                 row += 1
-                self._om_weather_model = _field(f, row, "Weather model", "")
+                self._om_weather_model = _field(
+                    f,
+                    row,
+                    "Weather model",
+                    self.app.cfg_text(
+                        "prediction",
+                        "pvforecast",
+                        "openmeteo",
+                        "weather_model",
+                        default="",
+                    ),
+                )
         else:  # Import
             ttk.Label(f, text="Values (W, CSV):").grid(
                 row=row, column=0, columnspan=2, sticky="w", **_PAD
             )
             row += 1
             self._ta = _textarea(f, row, height=4)
+            self._ta.insert(
+                "1.0",
+                self.app.cfg_csv("prediction", "pvforecast", "import", "power_w", default=""),
+            )
             row += 1
-            self._srcdt = _field(f, row, "Source dt [h]", "1.0")
+            self._srcdt = _field(
+                f,
+                row,
+                "Source dt [h]",
+                self.app.cfg_text(
+                    "prediction", "pvforecast", "import", "source_dt_hours", default="1.0"
+                ),
+            )
 
     def _plane(self) -> PVPlaneConfig:
         hz_text = self._horizon.get().strip()
@@ -856,13 +1060,34 @@ class WeatherTab(_Tab):
     TITLE = "Weather"
     PROVIDERS = ["OpenMeteo", "BrightSky"]
 
+    def _initial_provider(self) -> str:
+        v = self.app.cfg_text("prediction", "weather", "provider", default="OpenMeteo")
+        return v if v in self.PROVIDERS else self.PROVIDERS[0]
+
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
-        self._lat = _field(f, row, "Latitude", "52.52")
+        # Global weather location
+        self._lat = _field(
+            f,
+            row,
+            "Latitude",
+            self.app.cfg_text("prediction", "weather", "latitude", default="52.52"),
+        )
         row += 1
-        self._lon = _field(f, row, "Longitude", "13.405")
+        self._lon = _field(
+            f,
+            row,
+            "Longitude",
+            self.app.cfg_text("prediction", "weather", "longitude", default="13.405"),
+        )
         row += 1
-        self._tz = _combofield(f, row, "Timezone", _TZ_CHOICES, "UTC")
+        self._tz = _combofield(
+            f,
+            row,
+            "Timezone",
+            _TZ_CHOICES,
+            self.app.cfg_text("prediction", "weather", "timezone", default="UTC"),
+        )
 
     def make_provider(self) -> object:
         """Create and return the configured weather provider."""
@@ -914,29 +1139,24 @@ class OptimizationTab(_Tab):
 
     TITLE = "Optimization"
     PROVIDERS = []
+    _LEFT_WIDTH = 295
     _last_ts: list | None = None
     _last_dt: float | None = None
 
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
 
-        # ── Optimizer selector ────────────────────────────────────────
-        ttk.Label(f, text="Optimizer", foreground="#555", font=("TkDefaultFont", 8, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 0)
+        objective_raw = self.app.cfg_text("optimization", "solver", "objective", default="cost")
+        objective_default = (
+            "Maximize Self-consumption" if "self" in objective_raw.lower() else "Minimize Cost"
         )
-        row += 1
-        self._optimizer_type = _combofield(
-            f, row, "Optimizer", ["Linear (CVXPY)"], "Linear (CVXPY)"
-        )
-        self._optimizer_type.trace_add("write", lambda *_: self._rebuild())
-        row += 1
-        # Linear-specific settings
+
         self._linear_objective = _combofield(
             f,
             row,
             "Objective",
             ["Minimize Cost", "Maximize Self-consumption"],
-            "Minimize Cost",
+            objective_default,
         )
         row += 1
 
@@ -945,19 +1165,56 @@ class OptimizationTab(_Tab):
             row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 0)
         )
         row += 1
-        self._bat_id = _field(f, row, "Battery ID", "battery1")
+        # Load first battery from list
+        bat = self.app.cfg_list_item("optimization", "batteries", idx=0, default={})
+        self._bat_id = _field(
+            f,
+            row,
+            "Battery ID",
+            self.app.cfg_text_from_dict(bat, "device_id", default="battery1"),
+        )
         row += 1
-        self._bat_capacity = _field(f, row, "Battery capacity Wh", "1920")
+        self._bat_capacity = _field(
+            f,
+            row,
+            "Battery capacity Wh",
+            self.app.cfg_text_from_dict(bat, "capacity_wh", default="1920"),
+        )
         row += 1
-        self._bat_ch_eff = _field(f, row, "Charging efficiency", "0.98")
+        self._bat_ch_eff = _field(
+            f,
+            row,
+            "Charging efficiency",
+            self.app.cfg_text_from_dict(bat, "charging_efficiency", default="0.98"),
+        )
         row += 1
-        self._bat_dc_eff = _field(f, row, "Discharging efficiency", "0.98")
+        self._bat_dc_eff = _field(
+            f,
+            row,
+            "Discharging efficiency",
+            self.app.cfg_text_from_dict(bat, "discharging_efficiency", default="0.98"),
+        )
         row += 1
-        self._initial_soc = _field(f, row, "Initial battery SoC (%)", "50.0")
+        self._initial_soc = _field(
+            f,
+            row,
+            "Initial battery SoC (%)",
+            self.app.cfg_text_from_dict(bat, "initial_soc_percentage", default="50.0"),
+        )
         row += 1
-        self._min_soc = _field(f, row, "Min SoC (%)", "20")
+        self._min_soc = _field(
+            f,
+            row,
+            "Min SoC (%)",
+            self.app.cfg_text_from_dict(bat, "min_soc_percentage", default="20"),
+        )
         row += 1
-        self._max_soc = _field(f, row, "Max SoC (%)", "100")
+        self._max_soc = _field(
+            f,
+            row,
+            "Max SoC (%)",
+            self.app.cfg_text_from_dict(bat, "max_soc_percentage", default="100"),
+        )
         row += 1
 
         # ── Inverter configuration ────────────────────────────────────
@@ -965,29 +1222,65 @@ class OptimizationTab(_Tab):
             row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 0)
         )
         row += 1
-        self._inv_id = _field(f, row, "Device ID", "inverter1")
+        # Load first inverter from list
+        inv = self.app.cfg_list_item("optimization", "inverters", idx=0, default={})
+        self._inv_id = _field(
+            f,
+            row,
+            "Device ID",
+            self.app.cfg_text_from_dict(inv, "device_id", default="inverter1"),
+        )
         row += 1
-        self._pv_source = _field(f, row, "PV source key", "inverter1")
+        self._pv_source = _field(
+            f,
+            row,
+            "PV source key",
+            self.app.cfg_text_from_dict(inv, "pv_source", default="inverter1"),
+        )
         row += 1
-        self._inv_max_out = _field(f, row, "Max AC output W", "800")
+        self._inv_max_out = _field(
+            f,
+            row,
+            "Max AC output W",
+            self.app.cfg_text_from_dict(inv, "max_ac_output_power_w", default="800"),
+        )
         row += 1
-        self._inv_max_charge = _field(f, row, "Max AC charge W", "1000")
+        self._inv_max_charge = _field(
+            f,
+            row,
+            "Max AC charge W",
+            self.app.cfg_text_from_dict(inv, "max_ac_charge_power_w", default="1000"),
+        )
         row += 1
-        self._inv_dc2ac = _field(f, row, "DC→AC eff", "0.95")
+        self._inv_dc2ac = _field(
+            f,
+            row,
+            "DC→AC eff",
+            self.app.cfg_text_from_dict(inv, "dc_to_ac_efficiency", default="0.95"),
+        )
         row += 1
-        self._inv_ac2dc = _field(f, row, "AC→DC eff", "0.95")
+        self._inv_ac2dc = _field(
+            f,
+            row,
+            "AC→DC eff",
+            self.app.cfg_text_from_dict(inv, "ac_to_dc_efficiency", default="0.95"),
+        )
         row += 1
-        self._inv_mode_switch_cost = _field(f, row, "Mode switch cost EUR/switch", "0.005")
+        self._inv_mode_switch_cost = _field(
+            f,
+            row,
+            "Mode switch cost EUR",
+            self.app.cfg_text_from_dict(inv, "mode_switch_cost", default="0.005"),
+        )
         row += 1
-        self._zero_feed_in = tk.BooleanVar(value=True)
+        self._zero_feed_in = tk.BooleanVar(
+            value=self.app.cfg_bool_from_dict(inv, "zero_feed_in", default=True)
+        )
         ttk.Checkbutton(
             f,
             text="Zero feed-in (prevent exporting)",
             variable=self._zero_feed_in,
         ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
-        row += 1
-        # Feed-in default (EUR/Wh) when feedin provider is not configured
-        self._feedin_default = _field(f, row, "Feed-in default EUR/Wh", "0.0")
         row += 1
         # Run button
         ttk.Separator(f).grid(row=row, column=0, columnspan=2, sticky="ew", pady=4)
@@ -1478,6 +1771,10 @@ class App:
     def __init__(self) -> None:
         """Initialize the main application window and tabs."""
         self.root = tk.Tk()
+        default_config_path = Path(__file__).resolve().parent.parent / "config.yaml"
+        self._config_path = tk.StringVar(value=str(default_config_path))
+        self._yaml_config: dict[str, Any] = {}
+        self._load_yaml_config(show_error=False)
         self.root.title("Forecast Preview  —  dev tool")
         self.root.minsize(960, 580)
         self._build_topbar()
@@ -1492,32 +1789,137 @@ class App:
             OptimizationTab(nb, self),
         ]
 
+    def _load_yaml_config(self, show_error: bool = True) -> bool:
+        path = Path(self._config_path.get()).expanduser()
+        if not path.exists():
+            self._yaml_config = {}
+            if show_error:
+                messagebox.showwarning(
+                    "Config not found",
+                    f"Could not find config file:\n{path}",
+                    parent=self.root,
+                )
+            return False
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                loaded = yaml.safe_load(fh) or {}
+            if not isinstance(loaded, dict):
+                raise ValueError("Root YAML node must be a mapping")
+            self._yaml_config = loaded
+            return True
+        except Exception as exc:
+            self._yaml_config = {}
+            if show_error:
+                messagebox.showerror(
+                    "Config error", f"Failed to load YAML:\n{exc}", parent=self.root
+                )
+            return False
+
+    def cfg(self, *path: str, default: Any = None) -> Any:
+        node: Any = self._yaml_config
+        for key in path:
+            if not isinstance(node, Mapping) or key not in node:
+                return default
+            node = node[key]
+        return node
+
+    def cfg_text(self, *path: str, default: str = "") -> str:
+        value = self.cfg(*path, default=default)
+        return _csv_text(value, default=default)
+
+    def cfg_csv(self, *path: str, default: str = "") -> str:
+        value = self.cfg(*path, default=None)
+        return _csv_text(value, default=default)
+
+    def cfg_bool(self, *path: str, default: bool = False) -> bool:
+        value = self.cfg(*path, default=default)
+        return bool(value)
+
+    def cfg_list_item(self, *path: str, idx: int = 0, default: Any = None) -> Any:
+        """Get item at idx from a list at *path, or return default."""
+        lst = self.cfg(*path, default=None)
+        if isinstance(lst, list) and idx < len(lst):
+            return lst[idx]
+        return default or {}
+
+    def cfg_text_from_dict(self, d: dict[str, Any], key: str, default: str = "") -> str:
+        """Extract text value from dict, converting lists/tuples to CSV."""
+        value = d.get(key, default) if isinstance(d, dict) else default
+        return _csv_text(value, default=default)
+
+    def cfg_bool_from_dict(self, d: dict[str, Any], key: str, default: bool = False) -> bool:
+        """Extract bool value from dict."""
+        value = d.get(key, default) if isinstance(d, dict) else default
+        return bool(value)
+
+    def _browse_config(self) -> None:
+        path = filedialog.askopenfilename(
+            filetypes=[("YAML files", "*.yaml *.yml"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        self._config_path.set(path)
+        self._reload_config_defaults()
+
+    def _reload_config_defaults(self) -> None:
+        if not self._load_yaml_config(show_error=True):
+            return
+        self._apply_topbar_defaults()
+        for tab in self.tabs:
+            tab.load_defaults_from_config()
+
     def _build_topbar(self) -> None:
         bar = ttk.Frame(self.root)
-        bar.pack(fill="x", padx=6, pady=6)
+        # anchor="nw": bar sizes to its natural content width; both rows stay equally wide
+        bar.pack(anchor="nw", padx=6, pady=6)
 
+        # Row 0: Time parameters – natural (fixed) width determines the bar width
         ttk.Label(bar, text="Start:").grid(row=0, column=0)
-        self._start = tk.StringVar(value=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"))
-        ttk.Entry(bar, textvariable=self._start, width=17).grid(row=0, column=1, padx=2)
+        self._start = tk.StringVar()
+        ttk.Entry(bar, textvariable=self._start, width=16).grid(row=0, column=1, padx=2)
 
         ttk.Label(bar, text="Hours:").grid(row=0, column=2, padx=(10, 0))
-        self._hours = tk.StringVar(value="48")
-        ttk.Entry(bar, textvariable=self._hours, width=6).grid(row=0, column=3, padx=2)
+        self._hours = tk.StringVar()
+        ttk.Entry(bar, textvariable=self._hours, width=5).grid(row=0, column=3, padx=2)
 
         ttk.Label(bar, text="Δt [h]:").grid(row=0, column=4, padx=(10, 0))
-        self._dt = tk.StringVar(value="0.25")
+        self._dt = tk.StringVar()
         ttk.Combobox(
-            bar, textvariable=self._dt, values=_DT_CHOICES, state="readonly", width=6
+            bar, textvariable=self._dt, values=_DT_CHOICES, state="readonly", width=5
         ).grid(row=0, column=5, padx=2)
 
-        ttk.Label(bar, text="Timezone:").grid(row=0, column=6, padx=(10, 0))
-        self._tz = tk.StringVar(value="UTC")
+        ttk.Label(bar, text="Time Zone:").grid(row=0, column=6, padx=(10, 0))
+        self._tz = tk.StringVar()
         ttk.Combobox(
-            bar, textvariable=self._tz, values=_TZ_CHOICES, state="readonly", width=18
+            bar, textvariable=self._tz, values=_TZ_CHOICES, state="readonly", width=14
         ).grid(row=0, column=7, padx=2)
 
         ttk.Separator(bar, orient="vertical").grid(row=0, column=8, sticky="ns", padx=12)
-        ttk.Button(bar, text="▶▶ Fetch All", command=self._fetch_all).grid(row=0, column=9)
+        # width≈20% wider than the text character-count default
+        ttk.Button(bar, text="▶▶ Fetch All", command=self._fetch_all, width=14).grid(
+            row=0, column=9, sticky="w"
+        )
+
+        # Row 1: Config file selector
+        # Columns 1-7 are sized by row 0; the entry with sticky="ew" fills that exact space.
+        ttk.Label(bar, text="Config:").grid(row=1, column=0, pady=(6, 0), sticky="w")
+        ttk.Entry(bar, textvariable=self._config_path).grid(
+            row=1, column=1, columnspan=7, padx=2, pady=(6, 0), sticky="ew"
+        )
+        ttk.Button(bar, text="…", width=2, command=self._browse_config).grid(
+            row=1, column=8, sticky="w", padx=(2, 0), pady=(6, 0)
+        )
+        ttk.Button(bar, text="Load", command=self._reload_config_defaults).grid(
+            row=1, column=9, padx=2, pady=(6, 0)
+        )
+        self._apply_topbar_defaults()
+
+    def _apply_topbar_defaults(self) -> None:
+        start_default = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        self._start.set(start_default)
+        self._hours.set(_GUI_HOURS_DEFAULT)
+        self._dt.set(_GUI_DT_DEFAULT)
+        self._tz.set(_GUI_TIMEZONE_DEFAULT)
 
     def get_time_params(self) -> tuple[datetime, float, float]:
         """Parse and return the start datetime, hours and dt from the top bar fields.
