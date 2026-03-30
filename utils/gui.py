@@ -30,33 +30,35 @@ from array import array
 import matplotlib.dates as mdates
 import numpy as np
 import polars as pl
+from GridPythia.config.models import BatteryParameters, InverterParameters
+from GridPythia.optimization.solver import LinearOptimizer, LinearSolution, OptimizationObjective
+from GridPythia.prediction.base import make_timestamps
+from GridPythia.prediction.electricprice.energycharts import (
+    ElecPriceEnergyCharts,
+    EnergyChartsConfig,
+)
+from GridPythia.prediction.electricprice.fixed import ElecPriceFixed
+from GridPythia.prediction.electricprice.import_ import ElecPriceImport
+from GridPythia.prediction.electricprice.provider import ElecPriceProvider
+from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
+from GridPythia.prediction.feedintariff.import_ import FeedInTariffImport
+from GridPythia.prediction.feedintariff.provider import FeedInTariffProvider
+from GridPythia.prediction.load.config import LoadProfileConfig
+from GridPythia.prediction.load.provider import LoadProvider, load_provider_from_config
+from GridPythia.prediction.prediction import Prediction, PredictionData, PredictionSetup
+from GridPythia.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
+from GridPythia.prediction.pvforecast.import_ import PVForecastImport
+from GridPythia.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
+from GridPythia.prediction.pvforecast.provider import PVForecastProvider, PVPlaneConfig
+from GridPythia.prediction.weather.brightsky import WeatherBrightSky
+from GridPythia.prediction.weather.openmeteo import WeatherOpenMeteo
+from GridPythia.prediction.weather.provider import WeatherProvider
+from GridPythia.simulation.devices import InverterMode
+from GridPythia.simulation.devices.battery import Battery
+from GridPythia.simulation.devices.inverterbase import InverterBase
 from loguru import logger
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
-
-from src.config.models import BatteryParameters, InverterParameters
-from src.optimization.solver import LinearOptimizer, LinearSolution, OptimizationObjective
-from src.prediction.base import make_timestamps
-from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts, EnergyChartsConfig
-from src.prediction.electricprice.fixed import ElecPriceFixed
-from src.prediction.electricprice.import_ import ElecPriceImport
-from src.prediction.electricprice.provider import ElecPriceProvider
-from src.prediction.feedintariff.fixed import FeedInTariffFixed
-from src.prediction.feedintariff.import_ import FeedInTariffImport
-from src.prediction.feedintariff.provider import FeedInTariffProvider
-from src.prediction.load.config import LoadProfileConfig
-from src.prediction.load.provider import LoadProvider, load_provider_from_config
-from src.prediction.prediction import Prediction, PredictionData, PredictionSetup
-from src.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
-from src.prediction.pvforecast.import_ import PVForecastImport
-from src.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
-from src.prediction.pvforecast.provider import PVForecastProvider, PVPlaneConfig
-from src.prediction.weather.brightsky import WeatherBrightSky
-from src.prediction.weather.openmeteo import WeatherOpenMeteo
-from src.prediction.weather.provider import WeatherProvider
-from src.simulation.devices import InverterMode
-from src.simulation.devices.battery import Battery
-from src.simulation.devices.inverterbase import InverterBase
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -611,7 +613,7 @@ class LoadTab(_Tab):
                 f,
                 row,
                 "Profile JSON",
-                str(Path("src/prediction/load/data/load_profiles.json")),
+                str(Path("GridPythia/prediction/load/data/load_profiles.json")),
                 filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
             )
             row += 1
@@ -1551,7 +1553,7 @@ def run() -> None:
     import logging
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
-    logging.getLogger("src").setLevel(logging.DEBUG)
+    logging.getLogger("GridPythia").setLevel(logging.DEBUG)
 
     app = App()
     app.root.mainloop()

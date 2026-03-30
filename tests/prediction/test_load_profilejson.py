@@ -5,9 +5,9 @@ import json
 
 import pytest
 
-from src.prediction.base import make_timestamps
-from src.prediction.load.config import LoadProfileConfig
-from src.prediction.load.profilejson import LoadProfileJSON
+from GridPythia.prediction.base import make_timestamps
+from GridPythia.prediction.load.config import LoadProfileConfig
+from GridPythia.prediction.load.profilejson import LoadProfileJSON
 
 
 def _write_profiles(path, weekday: list[float], weekend: list[float]) -> None:

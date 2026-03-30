@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 import polars as pl
 
-from src.prediction.base import make_timestamps
-from src.prediction.load.config import LoadProfileConfig
-from src.prediction.load.provider import load_provider_from_config
-from src.prediction.load.profilecsv import LoadProfileCSV
-from src.prediction.load.profilejson import LoadProfileJSON
-from src.prediction.load.provider import DayType, day_type_for_date
+from GridPythia.prediction.base import make_timestamps
+from GridPythia.prediction.load.config import LoadProfileConfig
+from GridPythia.prediction.load.provider import load_provider_from_config
+from GridPythia.prediction.load.profilecsv import LoadProfileCSV
+from GridPythia.prediction.load.profilejson import LoadProfileJSON
+from GridPythia.prediction.load.provider import DayType, day_type_for_date
 
 # Monday 2025-06-16 00:00 UTC
 _START_MON = datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc)

@@ -6,11 +6,11 @@ from unittest.mock import AsyncMock, patch
 import polars as pl
 import pytest
 
-from src.prediction.base import make_timestamps
-from src.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor, _ForecastValue
-from src.prediction.pvforecast.import_ import PVForecastImport
-from src.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
-from src.prediction.pvforecast.provider import PVPlaneConfig
+from GridPythia.prediction.base import make_timestamps
+from GridPythia.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor, _ForecastValue
+from GridPythia.prediction.pvforecast.import_ import PVForecastImport
+from GridPythia.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
+from GridPythia.prediction.pvforecast.provider import PVPlaneConfig
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 _PLANE = PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0)

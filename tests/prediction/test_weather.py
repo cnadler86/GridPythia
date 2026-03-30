@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 import polars as pl
 import pytest
 
-from src.prediction.base import make_timestamps
-from src.prediction.weather.import_ import WeatherImport
+from GridPythia.prediction.base import make_timestamps
+from GridPythia.prediction.weather.import_ import WeatherImport
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 

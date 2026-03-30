@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, patch
 import polars as pl
 import pytest
 
-from src.prediction.base import make_timestamps
-from src.prediction.electricprice.fixed import ElecPriceFixed, TimeWindow
-from src.prediction.electricprice.import_ import ElecPriceImport
+from GridPythia.prediction.base import make_timestamps
+from GridPythia.prediction.electricprice.fixed import ElecPriceFixed, TimeWindow
+from GridPythia.prediction.electricprice.import_ import ElecPriceImport
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 
@@ -117,7 +117,7 @@ class TestElecPriceEnergyChartsCache:
     @staticmethod
     def _provider(poll_minutes: int = 30, buffer_hours: int = 25):
         from datetime import timedelta
-        from src.prediction.electricprice.energycharts import (
+        from GridPythia.prediction.electricprice.energycharts import (
             ElecPriceEnergyCharts,
             EnergyChartsConfig,
         )
@@ -184,7 +184,7 @@ class TestElecPriceEnergyChartsCache:
         # and decides to recheck.
         expired = now + timedelta(minutes=31)
         ts_expired = make_timestamps(expired, hours=24, dt_hours=1.0)
-        with patch("src.prediction.electricprice.energycharts.datetime") as mock_dt:
+        with patch("GridPythia.prediction.electricprice.energycharts.datetime") as mock_dt:
             mock_dt.now.return_value = expired
             await provider.fetch(ts_expired)
 
@@ -231,7 +231,7 @@ class TestElecPriceEnergyChartsCache:
         later = now + timedelta(hours=2)
         from unittest.mock import patch
 
-        with patch("src.prediction.electricprice.energycharts.datetime") as mock_dt:
+        with patch("GridPythia.prediction.electricprice.energycharts.datetime") as mock_dt:
             mock_dt.now.return_value = later
             result2 = await provider.fetch(ts)
 
@@ -357,7 +357,7 @@ class TestElecPriceEnergyChartsCache:
         """charges_kwh and vat_rate are factored into the cached prices."""
         from datetime import timedelta
 
-        from src.prediction.electricprice.energycharts import (
+        from GridPythia.prediction.electricprice.energycharts import (
             ElecPriceEnergyCharts,
             EnergyChartsConfig,
         )
@@ -385,7 +385,7 @@ async def test_energycharts_fetch_today():
     """Integration test: skipped when Energy-Charts API is unreachable."""
     import aiohttp
 
-    from src.prediction.electricprice.energycharts import ElecPriceEnergyCharts
+    from GridPythia.prediction.electricprice.energycharts import ElecPriceEnergyCharts
     from zoneinfo import ZoneInfo
 
     berlin = ZoneInfo("Europe/Berlin")
@@ -403,7 +403,7 @@ async def test_energycharts_fetch_today():
     except Exception as exc:
         pytest.skip(f"Energy-Charts API unreachable: {exc}")
 
-    from src.prediction.electricprice.energycharts import EnergyChartsConfig
+    from GridPythia.prediction.electricprice.energycharts import EnergyChartsConfig
 
     provider = ElecPriceEnergyCharts(EnergyChartsConfig(bidding_zone="DE-LU"))
     ts = make_timestamps(start, hours=24, dt_hours=1.0)

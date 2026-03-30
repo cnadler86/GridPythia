@@ -2,8 +2,8 @@
 
 import pytest
 
-from src.config.models import BatteryParameters
-from src.simulation.devices.battery import Battery
+from GridPythia.config.models import BatteryParameters
+from GridPythia.simulation.devices.battery import Battery
 
 
 @pytest.fixture

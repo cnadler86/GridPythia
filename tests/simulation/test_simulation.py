@@ -5,13 +5,13 @@ from array import array
 import polars as pl
 import pytest
 
-from src.config.models import BatteryParameters, InverterParameters
-from src.prediction.prediction import PredictionData
-from src.simulation.devices import InverterMode
-from src.simulation.devices.battery import Battery
-from src.simulation.devices.homeappliance import HomeAppliance, HomeApplianceParameters
-from src.simulation.devices.inverterbase import InverterBase
-from src.simulation.grid_simulation import GridSimulation, SimulationResult
+from GridPythia.config.models import BatteryParameters, InverterParameters
+from GridPythia.prediction.prediction import PredictionData
+from GridPythia.simulation.devices import InverterMode
+from GridPythia.simulation.devices.battery import Battery
+from GridPythia.simulation.devices.homeappliance import HomeAppliance, HomeApplianceParameters
+from GridPythia.simulation.devices.inverterbase import InverterBase
+from GridPythia.simulation.grid_simulation import GridSimulation, SimulationResult
 
 START_IDX = 1
 

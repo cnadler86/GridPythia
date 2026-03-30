@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 import polars as pl
 import pytest
 
-from src.prediction.base import make_timestamps
-from src.prediction.feedintariff.fixed import FeedInTariffFixed
-from src.prediction.feedintariff.import_ import FeedInTariffImport
+from GridPythia.prediction.base import make_timestamps
+from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
+from GridPythia.prediction.feedintariff.import_ import FeedInTariffImport
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 

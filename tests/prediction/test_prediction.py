@@ -5,13 +5,13 @@ from datetime import datetime, timezone
 import polars as pl
 import pytest
 
-from src.prediction.base import make_timestamps
-from src.prediction.electricprice.fixed import ElecPriceFixed
-from src.prediction.feedintariff.fixed import FeedInTariffFixed
-from src.prediction.prediction import Prediction, PredictionData, PredictionSetup
-from src.prediction.pvforecast.import_ import PVForecastImport
-from src.prediction.pvforecast.provider import PVForecastProvider
-from src.prediction.weather.import_ import WeatherImport
+from GridPythia.prediction.base import make_timestamps
+from GridPythia.prediction.electricprice.fixed import ElecPriceFixed
+from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
+from GridPythia.prediction.prediction import Prediction, PredictionData, PredictionSetup
+from GridPythia.prediction.pvforecast.import_ import PVForecastImport
+from GridPythia.prediction.pvforecast.provider import PVForecastProvider
+from GridPythia.prediction.weather.import_ import WeatherImport
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 

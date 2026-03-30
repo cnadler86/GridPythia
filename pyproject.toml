@@ -28,8 +28,8 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
-# where = ["src"]
+include = ["GridPythia*"]
+# where = ["GridPythia"]
 # include = ["*"]
 
 [tool.pytest.ini_options]

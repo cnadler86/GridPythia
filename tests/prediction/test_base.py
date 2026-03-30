@@ -1,11 +1,11 @@
-"""Tests for src.prediction.base utilities."""
+"""Tests for GridPythia.prediction.base utilities."""
 
 from datetime import datetime, timedelta, timezone
 
 import polars as pl
 import pytest
 
-from src.prediction.base import make_timestamps, resample_to_timestamps
+from GridPythia.prediction.base import make_timestamps, resample_to_timestamps
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 

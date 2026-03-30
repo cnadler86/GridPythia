@@ -5,12 +5,12 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from src.config.models import BatteryParameters, InverterParameters
-from src.optimization.solver import LinearOptimizer, OptimizationObjective
-from src.prediction.prediction import PredictionData
-from src.simulation.devices import InverterMode
-from src.simulation.devices.battery import Battery
-from src.simulation.devices.inverterbase import InverterBase
+from GridPythia.config.models import BatteryParameters, InverterParameters
+from GridPythia.optimization.solver import LinearOptimizer, OptimizationObjective
+from GridPythia.prediction.prediction import PredictionData
+from GridPythia.simulation.devices import InverterMode
+from GridPythia.simulation.devices.battery import Battery
+from GridPythia.simulation.devices.inverterbase import InverterBase
 
 
 def _make_prediction(load_w: list[float], price_eur_wh: list[float]) -> PredictionData:
