@@ -42,16 +42,13 @@ from GridPythia.prediction.electricprice.energycharts import (
     EnergyChartsConfig,
 )
 from GridPythia.prediction.electricprice.fixed import ElecPriceFixed
-from GridPythia.prediction.electricprice.import_ import ElecPriceImport
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
-from GridPythia.prediction.feedintariff.import_ import FeedInTariffImport
 from GridPythia.prediction.feedintariff.provider import FeedInTariffProvider
 from GridPythia.prediction.load.config import LoadProfileConfig
 from GridPythia.prediction.load.provider import LoadProvider, load_provider_from_config
 from GridPythia.prediction.prediction import Prediction, PredictionData, PredictionSetup
 from GridPythia.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
-from GridPythia.prediction.pvforecast.import_ import PVForecastImport
 from GridPythia.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
 from GridPythia.prediction.pvforecast.provider import PVForecastProvider, PVPlaneConfig
 from GridPythia.prediction.weather.brightsky import WeatherBrightSky
@@ -520,7 +517,7 @@ class ElecPriceTab(_Tab):
     """Tab showing electric price providers and price plots."""
 
     TITLE = "Electric Price"
-    PROVIDERS = ["EnergyCharts", "Fixed", "Import"]
+    PROVIDERS = ["EnergyCharts", "Fixed"]
 
     def _initial_provider(self) -> str:
         v = self.app.cfg_text("prediction", "electricprice", "provider", default="EnergyCharts")
@@ -555,36 +552,6 @@ class ElecPriceTab(_Tab):
                 ),
             )
             row += 1
-        else:  # Import
-            ttk.Label(f, text="Values (EUR/Wh, CSV):").grid(
-                row=row, column=0, columnspan=2, sticky="w", **_PAD
-            )
-            row += 1
-            self._ta = _textarea(f, row)
-            self._ta.insert(
-                "1.0",
-                self.app.cfg_csv(
-                    "prediction",
-                    "electricprice",
-                    "import",
-                    "prices_wh",
-                    default="",
-                ),
-            )
-            row += 1
-            self._srcdt = _field(
-                f,
-                row,
-                "Source dt [h]",
-                self.app.cfg_text(
-                    "prediction",
-                    "electricprice",
-                    "import",
-                    "source_dt_hours",
-                    default="1.0",
-                ),
-            )
-            row += 1
 
         ttk.Separator(f).grid(row=row, column=0, columnspan=2, sticky="ew", pady=4)
         row += 1
@@ -614,13 +581,8 @@ class ElecPriceTab(_Tab):
         p = self._prov_var.get()
         if p == "Fixed":
             return ElecPriceFixed(price_kwh=float(self._price.get()), charges_kwh=ch, vat_rate=vat)
-        if p == "EnergyCharts":
-            cfg = EnergyChartsConfig(bidding_zone=self._zone.get(), charges_kwh=ch, vat_rate=vat)
-            return ElecPriceEnergyCharts(cfg)
-        return ElecPriceImport(
-            prices_wh=_csv(self._ta.get("1.0", "end")),
-            source_dt_hours=float(self._srcdt.get()),
-        )
+        cfg = EnergyChartsConfig(bidding_zone=self._zone.get(), charges_kwh=ch, vat_rate=vat)
+        return ElecPriceEnergyCharts(cfg)
 
     def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
         ax = _setup_plot_axes(self._fig)
@@ -640,7 +602,7 @@ class FeedInTariffTab(_Tab):
     """Tab for feed-in tariff providers and plotting."""
 
     TITLE = "Feed-in Tariff"
-    PROVIDERS = ["Fixed", "Import"]
+    PROVIDERS = ["Fixed"]
 
     def _initial_provider(self) -> str:
         v = self.app.cfg_text("prediction", "feedintariff", "provider", default="Fixed")
@@ -648,53 +610,16 @@ class FeedInTariffTab(_Tab):
 
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
-        if self._prov_var.get() == "Fixed":
-            self._tariff = _field(
-                f,
-                row,
-                "Tariff EUR/kWh",
-                self.app.cfg_text(
-                    "prediction", "feedintariff", "fixed", "tariff_kwh", default="0.0"
-                ),
-            )
-        else:
-            ttk.Label(f, text="Values (EUR/Wh, CSV):").grid(
-                row=row, column=0, columnspan=2, sticky="w", **_PAD
-            )
-            row += 1
-            self._ta = _textarea(f, row)
-            self._ta.insert(
-                "1.0",
-                self.app.cfg_csv(
-                    "prediction",
-                    "feedintariff",
-                    "import",
-                    "tariffs_wh",
-                    default="",
-                ),
-            )
-            row += 1
-            self._srcdt = _field(
-                f,
-                row,
-                "Source dt [h]",
-                self.app.cfg_text(
-                    "prediction",
-                    "feedintariff",
-                    "import",
-                    "source_dt_hours",
-                    default="1.0",
-                ),
-            )
+        self._tariff = _field(
+            f,
+            row,
+            "Tariff EUR/kWh",
+            self.app.cfg_text("prediction", "feedintariff", "fixed", "tariff_kwh", default="0.0"),
+        )
 
     def make_provider(self) -> object:
         """Create and return the configured feed-in tariff provider."""
-        if self._prov_var.get() == "Fixed":
-            return FeedInTariffFixed(tariff_kwh=float(self._tariff.get()))
-        return FeedInTariffImport(
-            tariffs_wh=_csv(self._ta.get("1.0", "end")),
-            source_dt_hours=float(self._srcdt.get()),
-        )
+        return FeedInTariffFixed(tariff_kwh=float(self._tariff.get()))
 
     def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
         ax = _setup_plot_axes(self._fig)
@@ -711,13 +636,13 @@ class FeedInTariffTab(_Tab):
 
 
 class LoadTab(_Tab):
-    """Tab for load providers and plotting (ProfileJSON and ProfileCSV supported)."""
+    """Tab for load providers and plotting."""
 
     TITLE = "Load"
-    PROVIDERS = ["ProfileJSON", "ProfileCSV"]
+    PROVIDERS = ["ProfileCSV"]
 
     def _initial_provider(self) -> str:
-        v = self.app.cfg_text("prediction", "load", "provider", default="ProfileJSON")
+        v = self.app.cfg_text("prediction", "load", "provider", default="ProfileCSV")
         return v if v in self.PROVIDERS else self.PROVIDERS[0]
 
     def _build_fields(self) -> None:
@@ -728,21 +653,11 @@ class LoadTab(_Tab):
             row,
             "Profile path",
             self.app.cfg_text("prediction", "load", "path", default=""),
-            filetypes=[("JSON/CSV files", "*.json *.csv"), ("All files", "*.*")],
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
         )
         row += 1
-        # Vacation profile runtime toggle (only for ProfileJSON)
-        p = self._prov_var.get()
-        if p == "ProfileJSON":
-            self._vacation_profile = tk.BooleanVar(value=False)
-            ttk.Checkbutton(
-                f,
-                text="Use vacation profile",
-                variable=self._vacation_profile,
-            ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
-            row += 1
 
-        # Holiday settings (shared by both providers)
+        # Holiday settings
         ttk.Separator(f).grid(row=row, column=0, columnspan=2, sticky="ew", pady=4)
         row += 1
         ttk.Label(f, text="Holidays", foreground="#555", font=("TkDefaultFont", 8, "bold")).grid(
@@ -811,7 +726,7 @@ class PVForecastTab(_Tab):
     """Tab for PV forecast providers and plane configuration."""
 
     TITLE = "PV Forecast"
-    PROVIDERS = ["OpenMeteo", "Akkudoktor", "ForecastSolar", "Import"]
+    PROVIDERS = ["OpenMeteo", "Akkudoktor"]
 
     def _initial_provider(self) -> str:
         v = self.app.cfg_text("prediction", "pvforecast", "provider", default="OpenMeteo")
@@ -898,7 +813,7 @@ class PVForecastTab(_Tab):
         row += 1
 
         prov = self._prov_var.get()
-        if prov in ("OpenMeteo", "Akkudoktor", "ForecastSolar"):
+        if prov in ("OpenMeteo", "Akkudoktor"):
             # Global PV location
             self._lat = _field(
                 f,
@@ -914,16 +829,7 @@ class PVForecastTab(_Tab):
                 self.app.cfg_text("prediction", "pvforecast", "longitude", default="7.83355"),
             )
             row += 1
-            if prov == "ForecastSolar":
-                self._apikey = _field(
-                    f,
-                    row,
-                    "API key (opt.)",
-                    self.app.cfg_text(
-                        "prediction", "pvforecast", "forecastsolar", "api_key", default=""
-                    ),
-                )
-            elif prov == "OpenMeteo":
+            if prov == "OpenMeteo":
                 self._om_apikey = _field(
                     f,
                     row,
@@ -945,25 +851,6 @@ class PVForecastTab(_Tab):
                         default="",
                     ),
                 )
-        else:  # Import
-            ttk.Label(f, text="Values (W, CSV):").grid(
-                row=row, column=0, columnspan=2, sticky="w", **_PAD
-            )
-            row += 1
-            self._ta = _textarea(f, row, height=4)
-            self._ta.insert(
-                "1.0",
-                self.app.cfg_csv("prediction", "pvforecast", "import", "power_w", default=""),
-            )
-            row += 1
-            self._srcdt = _field(
-                f,
-                row,
-                "Source dt [h]",
-                self.app.cfg_text(
-                    "prediction", "pvforecast", "import", "source_dt_hours", default="1.0"
-                ),
-            )
 
     def _plane(self) -> PVPlaneConfig:
         hz_text = self._horizon.get().strip()
@@ -983,26 +870,18 @@ class PVForecastTab(_Tab):
         """Create and return the configured PV forecast provider."""
         p = self._prov_var.get()
         plane = self._plane()
-        tz = self.app._tz.get()
         if p == "OpenMeteo":
             return PVForecastOpenMeteo(
                 planes=[plane],
                 latitude=float(self._lat.get()),
                 longitude=float(self._lon.get()),
-                timezone_str=tz,
                 api_key=self._om_apikey.get().strip() or None,
                 weather_model=self._om_weather_model.get().strip() or None,
             )
-        if p == "Akkudoktor":
-            return PVForecastAkkudoktor(
-                planes=[plane],
-                latitude=float(self._lat.get()),
-                longitude=float(self._lon.get()),
-                timezone_str=tz,
-            )
-        return PVForecastImport(
-            power_w=_csv(self._ta.get("1.0", "end")),
-            source_dt_hours=float(self._srcdt.get()),
+        return PVForecastAkkudoktor(
+            planes=[plane],
+            latitude=float(self._lat.get()),
+            longitude=float(self._lon.get()),
         )
 
     def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
@@ -1080,23 +959,14 @@ class WeatherTab(_Tab):
             "Longitude",
             self.app.cfg_text("prediction", "weather", "longitude", default="13.405"),
         )
-        row += 1
-        self._tz = _combofield(
-            f,
-            row,
-            "Timezone",
-            _TZ_CHOICES,
-            self.app.cfg_text("prediction", "weather", "timezone", default="UTC"),
-        )
 
     def make_provider(self) -> object:
         """Create and return the configured weather provider."""
         lat = float(self._lat.get())
         lon = float(self._lon.get())
-        tz = self._tz.get()
         if self._prov_var.get() == "OpenMeteo":
-            return WeatherOpenMeteo(latitude=lat, longitude=lon, timezone_str=tz)
-        return WeatherBrightSky(latitude=lat, longitude=lon, timezone_str=tz)
+            return WeatherOpenMeteo(latitude=lat, longitude=lon)
+        return WeatherBrightSky(latitude=lat, longitude=lon)
 
     def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
         # Accept either a Series (single-column) or a DataFrame

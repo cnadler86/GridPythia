@@ -42,7 +42,6 @@ class PVForecastAkkudoktor(PVForecastProvider):
         planes:        One or more :class:`~GridPythia.prediction.pvforecast.provider.PVPlaneConfig`.
         latitude:      Location latitude in decimal degrees.
         longitude:     Location longitude in decimal degrees.
-        timezone_str:  IANA timezone string (e.g. ``"Europe/Berlin"``).
     """
 
     def __init__(
@@ -50,14 +49,12 @@ class PVForecastAkkudoktor(PVForecastProvider):
         planes: list[PVPlaneConfig],
         latitude: float,
         longitude: float,
-        timezone_str: str = "Europe/Berlin",
     ) -> None:
         if not planes:
             raise ValueError("At least one PVPlaneConfig is required.")
         self._planes = planes
         self._lat = latitude
         self._lon = longitude
-        self._tz = timezone_str
 
     @property
     def provider_id(self) -> str:
@@ -92,7 +89,7 @@ class PVForecastAkkudoktor(PVForecastProvider):
                 "cellCoEff=-0.36",
                 "inverterEfficiency=0.8",
                 "albedo=0.25",
-                f"timezone={self._tz}",
+                "timezone=UTC",
                 "hourly=relativehumidity_2m%2Cwindspeed_10m",
             ]
         )
@@ -123,7 +120,7 @@ class PVForecastAkkudoktor(PVForecastProvider):
             if dt.tzinfo is None:
                 from zoneinfo import ZoneInfo
 
-                dt = dt.replace(tzinfo=ZoneInfo(self._tz))
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
             values.append(
                 _ForecastValue(
                     dt=dt,
@@ -144,7 +141,7 @@ class PVForecastAkkudoktor(PVForecastProvider):
             if dt.tzinfo is None:
                 from zoneinfo import ZoneInfo
 
-                dt = dt.replace(tzinfo=ZoneInfo(self._tz))
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
 
             dc = sum(float(v.get("dcPower", 0) or 0) for v in per_plane)
             ac = sum(float(v.get("power", 0) or 0) for v in per_plane)

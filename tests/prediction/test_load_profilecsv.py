@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-import polars as pl
 
 from GridPythia.prediction.base import make_timestamps
 from GridPythia.prediction.load.config import LoadProfileConfig
+from GridPythia.prediction.load.provider import DayType, day_type_for_date
 from GridPythia.prediction.load.provider import load_provider_from_config
 from GridPythia.prediction.load.profilecsv import LoadProfileCSV
-from GridPythia.prediction.load.profilejson import LoadProfileJSON
-from GridPythia.prediction.load.provider import DayType, day_type_for_date
 
 # Monday 2025-06-16 00:00 UTC
 _START_MON = datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc)
@@ -207,32 +204,6 @@ class TestLoadProfileCSVGetProfileSeries:
 
 
 # ---------------------------------------------------------------------------
-# LoadProfileJSON – get_profile_series (regression guard)
-# ---------------------------------------------------------------------------
-
-
-class TestLoadProfileJSONGetProfileSeries:
-    async def test_json_provider_two_days(self, tmp_path):
-        payload = {
-            "profile_dt_hours": 1.0,
-            "profiles": {
-                "weekday": {"mean_wh": [100.0] * 24},
-                "weekend": {"mean_wh": [200.0] * 24},
-            },
-        }
-        p = tmp_path / "prof.json"
-        p.write_text(json.dumps(payload), encoding="utf-8")
-        provider = LoadProfileJSON(LoadProfileConfig(path=p))
-        day_ts = make_timestamps(_START_MON, 24, 1.0)
-        result = await provider.get_profile_series(day_ts, [DayType.WEEKDAY, DayType.WEEKEND])
-        assert len(result) == 48
-        # Weekday half
-        assert pytest.approx(24 * 100.0, rel=1e-3) == result[:24].sum()
-        # Weekend half
-        assert pytest.approx(24 * 200.0, rel=1e-3) == result[24:].sum()
-
-
-# ---------------------------------------------------------------------------
 # day_type_for_date helper
 # ---------------------------------------------------------------------------
 
@@ -302,53 +273,11 @@ class TestLoadProfileCSVHolidays:
 
 
 # ---------------------------------------------------------------------------
-# Holiday-aware fetch (JSON provider)
-# ---------------------------------------------------------------------------
-
-
-class TestLoadProfileJSONHolidays:
-    def _write_json(self, p: Path) -> None:
-        payload = {
-            "profile_dt_hours": 1.0,
-            "profiles": {
-                "weekday": {"mean_wh": [100.0] * 24},
-                "weekend": {"mean_wh": [200.0] * 24},
-                "vacation": {"mean_wh": [50.0] * 24},
-            },
-        }
-        p.write_text(json.dumps(payload), encoding="utf-8")
-
-    async def test_holiday_uses_sunday_profile(self, tmp_path: Path) -> None:
-        p = tmp_path / "prof.json"
-        self._write_json(p)
-        provider = LoadProfileJSON(LoadProfileConfig(path=p, country="DE", subdivision="BW"))
-        # 2025-01-01 is New Year's Day (holiday) → treated as Sunday → weekend = 200 Wh
-        ts = make_timestamps(datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc), 24, 1.0)
-        result = await provider.fetch(ts)
-        assert all(v == pytest.approx(200.0, rel=0.01) for v in result.to_list())
-
-    async def test_regular_weekday_unaffected(self, tmp_path: Path) -> None:
-        p = tmp_path / "prof.json"
-        self._write_json(p)
-        provider = LoadProfileJSON(LoadProfileConfig(path=p, country="DE", subdivision="BW"))
-        # 2025-06-16 is a regular Monday
-        ts = make_timestamps(datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc), 24, 1.0)
-        result = await provider.fetch(ts)
-        assert all(v == pytest.approx(100.0, rel=0.01) for v in result.to_list())
-
-
-# ---------------------------------------------------------------------------
 # LoadProfileConfig + load_provider_from_config
 # ---------------------------------------------------------------------------
 
 
 class TestLoadProfileConfig:
-    def test_json_suffix_accepted(self, tmp_path: Path) -> None:
-        p = tmp_path / "prof.json"
-        p.write_text("{}", encoding="utf-8")
-        cfg = LoadProfileConfig(path=p)
-        assert cfg.path.suffix == ".json"
-
     def test_csv_suffix_accepted(self, tmp_path: Path) -> None:
         p = tmp_path / "prof.csv"
         p.write_text("time,weekday\n", encoding="utf-8")
@@ -361,17 +290,6 @@ class TestLoadProfileConfig:
         with pytest.raises(Exception, match="Unsupported"):
             LoadProfileConfig(path=p)
 
-    def test_factory_returns_json_provider(self, tmp_path: Path) -> None:
-        p = tmp_path / "prof.json"
-        p.write_text(json.dumps({
-            "profile_dt_hours": 1.0,
-            "profiles": {"weekday": {"mean_wh": [100.0] * 24}},
-        }), encoding="utf-8")
-        cfg = LoadProfileConfig(path=p, country="DE", subdivision="BW")
-        provider = load_provider_from_config(cfg)
-        assert isinstance(provider, LoadProfileJSON)
-        assert provider._country == "DE"
-        assert provider._subdivision == "BW"
     def test_factory_returns_csv_provider(self, tmp_path: Path) -> None:
         p = tmp_path / "prof.csv"
         rows = ["time,weekday,weekend"] + [f"{h:02d}:00,100,200" for h in range(24)]

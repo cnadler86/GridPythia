@@ -220,13 +220,9 @@ class LoadProvider(PredictionProvider):
 def load_provider_from_config(cfg: LoadProfileConfig) -> LoadProvider:
     """Instantiate the correct :class:`LoadProvider` from a :class:`LoadProfileConfig`.
 
-    JSON files map to :class:`~GridPythia.prediction.load.profilejson.LoadProfileJSON`;
     CSV files map to :class:`~GridPythia.prediction.load.profilecsv.LoadProfileCSV`.
     """
     # Lazy imports to avoid circular dependency (subclasses import from this module).
     from GridPythia.prediction.load.profilecsv import LoadProfileCSV  # noqa: PLC0415
-    from GridPythia.prediction.load.profilejson import LoadProfileJSON  # noqa: PLC0415
 
-    if cfg.path.suffix.lower() == ".json":
-        return LoadProfileJSON(cfg)
     return LoadProfileCSV(cfg)

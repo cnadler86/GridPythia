@@ -1,33 +1,55 @@
 """Tests for the unified Prediction orchestrator."""
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
 
-from GridPythia.prediction.base import make_timestamps
 from GridPythia.prediction.electricprice.fixed import ElecPriceFixed
+from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
 from GridPythia.prediction.prediction import Prediction, PredictionData, PredictionSetup
-from GridPythia.prediction.pvforecast.import_ import PVForecastImport
 from GridPythia.prediction.pvforecast.provider import PVForecastProvider
-from GridPythia.prediction.weather.import_ import WeatherImport
+from GridPythia.prediction.weather.provider import WeatherProvider
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 
 
 class TestPrediction:
     def _make_prediction(self) -> Prediction:
-        pv_profile = [0.0] * 6 + [1000.0] * 12 + [0.0] * 6
-        weather_data = {
-            "temperature_c": [20.0] * 24,
-            "cloud_cover_pct": [40.0] * 24,
-        }
+        class DaylightPV(PVForecastProvider):
+            @property
+            def provider_id(self) -> str:
+                return "DaylightPV"
+
+            async def fetch(self, timestamps: pl.Series) -> pl.Series:
+                raise AssertionError("Use fetch_by_inverter")
+
+            async def fetch_by_inverter(self, timestamps: pl.Series) -> dict[str, pl.Series]:
+                ts_list = timestamps.to_list()
+                values = [1000.0 if 6 <= ts.hour < 18 else 0.0 for ts in ts_list]
+                return {"inverter1": pl.Series(values, dtype=pl.Float32)}
+
+        class FixedWeather(WeatherProvider):
+            @property
+            def provider_id(self) -> str:
+                return "FixedWeather"
+
+            async def fetch(self, timestamps: pl.Series) -> pl.DataFrame:
+                n = len(timestamps)
+                return pl.DataFrame(
+                    {
+                        "temperature_c": pl.Series([20.0] * n, dtype=pl.Float32),
+                        "cloud_cover_pct": pl.Series([40.0] * n, dtype=pl.Float32),
+                    }
+                )
+
         setup = PredictionSetup(
             electricprice=ElecPriceFixed(price_kwh=0.30),
             feedintariff=FeedInTariffFixed(tariff_kwh=0.082),
-            pv={"roof": PVForecastImport(power_w=pv_profile)},
-            weather=WeatherImport(data=weather_data),
+            pv={"roof": DaylightPV()},
+            weather=FixedWeather(),
         )
         return Prediction(setup)
 
@@ -190,44 +212,46 @@ class TestPrediction:
         data = await pred.fetch(start=START, hours=24)
         assert isinstance(data.df, pl.DataFrame)
 
-    async def test_wh_conversion_from_w_to_wh(self):
-        """Verify that W values are correctly converted to Wh using dt_hours."""
-        pv_profile = [0.0] * 6 + [1000.0] * 12 + [0.0] * 6  # 1000 W
-        setup = PredictionSetup(
-            pv={"roof": PVForecastImport(power_w=pv_profile)},
-        )
-        pred = Prediction(setup)
-        # With dt_hours=1.0, 1 hour of 1000W = 1000 Wh
-        data = await pred.fetch(start=START, hours=24, dt_hours=1.0)
-        
-        # At hour 10 (index 10), PV is producing 1000 W for 1 hour = 1000 Wh
-        assert data["pv_inverter1_wh"][10] == pytest.approx(1000.0)
-
-    async def test_wh_conversion_quarter_hour(self):
-        """Verify W→Wh conversion with dt_hours=0.25 (15 minutes)."""
-        pv_profile = [1000.0] * 24  # 1000 W constant
-        setup = PredictionSetup(
-            pv={"test": PVForecastImport(power_w=pv_profile)},
-        )
-        pred = Prediction(setup)
-        # dt_hours=0.25 (15 min): 1000 W * 0.25 h = 250 Wh per 15-min step
-        data = await pred.fetch(start=START, hours=6, dt_hours=0.25)
-        
-        # All values should be 250 Wh (1000 W * 0.25 h)
-        pv_series = data.get_pv_series("inverter1")
-        assert pv_series is not None
-        assert all(v == pytest.approx(250.0) for v in pv_series.to_list())
-
     async def test_missing_pv_returns_empty_dict(self):
         """Verify get_pv_series returns None for missing inverter."""
+        class SingleInverterPV(PVForecastProvider):
+            @property
+            def provider_id(self) -> str:
+                return "SingleInverterPV"
+
+            async def fetch(self, timestamps: pl.Series) -> pl.Series:
+                return pl.Series([100.0] * len(timestamps), dtype=pl.Float32)
+
         setup = PredictionSetup(
             electricprice=ElecPriceFixed(price_kwh=0.30),
-            pv={"roof": PVForecastImport(power_w=[1000.0] * 24)},
+            pv={"roof": SingleInverterPV()},
         )
         pred = Prediction(setup)
         data = await pred.fetch(start=START, hours=24)
-        
+
         # Existing inverter should return Series
         assert data.get_pv_series("inverter1") is not None
         # Non-existing inverter should return None
         assert data.get_pv_series("nonexistent") is None
+
+    async def test_timezone_is_converted_to_utc_for_providers(self):
+        class CapturePrice(ElecPriceProvider):
+            def __init__(self) -> None:
+                self.seen_tzinfo = None
+
+            @property
+            def provider_id(self) -> str:
+                return "CapturePrice"
+
+            async def fetch(self, timestamps: pl.Series) -> pl.Series:
+                first = timestamps.to_list()[0]
+                self.seen_tzinfo = first.tzinfo
+                return pl.Series([0.0] * len(timestamps), dtype=pl.Float32)
+
+        provider = CapturePrice()
+        pred = Prediction(PredictionSetup(electricprice=provider))
+        start_local = datetime(2025, 6, 15, 2, 0, tzinfo=ZoneInfo("Europe/Berlin"))
+        data = await pred.fetch(start=start_local, hours=2, dt_hours=1.0)
+
+        assert str(provider.seen_tzinfo) == "UTC"
+        assert str(data.timestamps.to_list()[0].tzinfo) in {"Europe/Berlin", "CEST", "CET"}

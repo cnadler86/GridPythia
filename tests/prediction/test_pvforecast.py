@@ -8,7 +8,6 @@ import pytest
 
 from GridPythia.prediction.base import make_timestamps
 from GridPythia.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor, _ForecastValue
-from GridPythia.prediction.pvforecast.import_ import PVForecastImport
 from GridPythia.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
 from GridPythia.prediction.pvforecast.provider import PVPlaneConfig
 
@@ -55,50 +54,6 @@ class TestPVPlaneConfig:
         )
         cache = {p1: "cached"}
         assert cache[p2] == "cached"
-
-
-# ── PVForecastImport ──────────────────────────────────────────────────────────
-
-
-class TestPVForecastImport:
-    async def test_full_day(self):
-        power = [0.0] * 6 + [500.0] * 12 + [0.0] * 6
-        provider = PVForecastImport(power_w=power)
-        result = await provider.fetch(_ts())
-        assert len(result) == 24
-        assert result[0] == pytest.approx(0.0)
-        assert result[6] == pytest.approx(500.0)
-
-    async def test_shorter_pads_zero(self):
-        power = [1000.0] * 12
-        provider = PVForecastImport(power_w=power)
-        result = await provider.fetch(_ts())
-        assert len(result) == 24
-        assert result[11] == pytest.approx(1000.0)
-        assert result[12] == pytest.approx(0.0)
-
-    async def test_quarter_hour(self):
-        power = [0.0, 100.0]
-        ts = make_timestamps(START, hours=2, dt_hours=0.25)
-        provider = PVForecastImport(power_w=power, source_dt_hours=1.0)
-        result = await provider.fetch(ts)
-        assert len(result) == 8
-        # At t=1h the source power is 100 W -> 25 Wh for a 15-minute timestep.
-        assert result[4] == pytest.approx(25.0)
-
-    async def test_provider_id(self):
-        assert PVForecastImport(power_w=[]).provider_id == "PVForecastImport"
-
-    async def test_returns_polars_float32(self):
-        result = await PVForecastImport(power_w=[0.0] * 24).fetch(_ts())
-        assert isinstance(result, pl.Series)
-        assert result.dtype == pl.Float32
-
-    async def test_fetch_by_inverter_uses_default(self):
-        provider = PVForecastImport(power_w=[0.0] * 24)
-        result = await provider.fetch_by_inverter(_ts())
-        assert set(result) == {"inverter1"}
-        assert result["inverter1"].dtype == pl.Float32
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -229,9 +184,7 @@ class TestPVForecastAkkudoktor:
 
 class TestPVForecastOpenMeteo:
     def _make_provider(self) -> PVForecastOpenMeteo:
-        return PVForecastOpenMeteo(
-            planes=[_PLANE], latitude=52.52, longitude=13.405, timezone_str="UTC"
-        )
+        return PVForecastOpenMeteo(planes=[_PLANE], latitude=52.52, longitude=13.405)
 
     def test_provider_id(self):
         assert self._make_provider().provider_id == "PVForecastOpenMeteo"
@@ -324,7 +277,7 @@ class TestPVForecastOpenMeteo:
             peak_kw=5.0, tilt=30.0, azimuth=180.0, userhorizon=(0.0, 5.0), inverter="inv-a"
         )
         provider = PVForecastOpenMeteo(
-            planes=[plane1, plane2], latitude=52.52, longitude=13.405, timezone_str="UTC"
+            planes=[plane1, plane2], latitude=52.52, longitude=13.405
         )
 
         result = await provider.fetch(_ts())
@@ -365,7 +318,6 @@ class TestPVForecastOpenMeteo:
             ],
             latitude=52.52,
             longitude=13.405,
-            timezone_str="UTC",
         )
 
         result = await provider.fetch_by_inverter(_ts())

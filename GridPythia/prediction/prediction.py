@@ -143,8 +143,7 @@ class Prediction:
         pred = Prediction(PredictionSetup(
             electricprice=ElecPriceFixed(price_kwh=0.30),
             feedintariff=FeedInTariffFixed(tariff_kwh=0.082),
-            load=LoadFixed(power_w=500),
-            pv={"roof": PVForecastImport(power_w=[0]*6 + [500]*12 + [0]*6)},
+            pv={"roof": my_pv_provider},
         ))
         data = await pred.fetch(start=datetime.now(), hours=24, dt_hours=1.0)
         data.load_wh  # → pl.Series with energy in Wh
@@ -159,8 +158,17 @@ class Prediction:
         hours: int | float,
         dt_hours: float = 1.0,
     ) -> PredictionData:
-        """Fetch all prediction channels in parallel for the next *hours* from *start*."""
+        """Fetch all prediction channels in parallel for the next *hours* from *start*.
+
+        Providers are always called with UTC timestamps when *start* is timezone-aware.
+        Returned timestamps keep the original requested timezone.
+        """
         timestamps = make_timestamps(start, hours, dt_hours)
+        provider_timestamps = timestamps
+        if start.tzinfo is not None:
+            tz_name: str = getattr(start.tzinfo, "key", None) or str(start.tzinfo)
+            if tz_name not in ("UTC", "utc"):
+                provider_timestamps = timestamps.dt.convert_time_zone("UTC")
         n = len(timestamps)
 
         async def _zeros() -> pl.Series:
@@ -168,16 +176,20 @@ class Prediction:
 
         # Build all coroutines; run in parallel with asyncio.gather
         eprice_coro = (
-            self.setup.electricprice.fetch(timestamps) if self.setup.electricprice else _zeros()
+            self.setup.electricprice.fetch(provider_timestamps)
+            if self.setup.electricprice
+            else _zeros()
         )
         ftariff_coro = (
-            self.setup.feedintariff.fetch(timestamps) if self.setup.feedintariff else _zeros()
+            self.setup.feedintariff.fetch(provider_timestamps)
+            if self.setup.feedintariff
+            else _zeros()
         )
-        load_coro = self.setup.load.fetch(timestamps) if self.setup.load else _zeros()
-        weather_coro = self.setup.weather.fetch(timestamps) if self.setup.weather else None
+        load_coro = self.setup.load.fetch(provider_timestamps) if self.setup.load else _zeros()
+        weather_coro = self.setup.weather.fetch(provider_timestamps) if self.setup.weather else None
 
         pv_names = list(self.setup.pv)
-        pv_coros = [self.setup.pv[name].fetch_by_inverter(timestamps) for name in pv_names]
+        pv_coros = [self.setup.pv[name].fetch_by_inverter(provider_timestamps) for name in pv_names]
 
         all_coros = [eprice_coro, ftariff_coro, load_coro] + pv_coros
         if weather_coro is not None:

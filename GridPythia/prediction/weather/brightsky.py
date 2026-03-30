@@ -23,11 +23,9 @@ class WeatherBrightSky(WeatherProvider):
         self,
         latitude: float,
         longitude: float,
-        timezone_str: str = "Europe/Berlin",
     ) -> None:
         self._lat = latitude
         self._lon = longitude
-        self._tz = timezone_str
 
     @property
     def provider_id(self) -> str:
@@ -47,7 +45,7 @@ class WeatherBrightSky(WeatherProvider):
             "lon": self._lon,
             "date": _fmt(start),
             "last_date": _fmt(end),
-            "tz": self._tz,
+            "tz": "UTC",
         }
 
         timeout = aiohttp.ClientTimeout(total=30)

@@ -60,8 +60,6 @@ class PVForecastOpenMeteo(PVForecastProvider):
         planes:        One or more :class:`~GridPythia.prediction.pvforecast.provider.PVPlaneConfig`.
         latitude:      Location latitude in decimal degrees.
         longitude:     Location longitude in decimal degrees.
-        timezone_str:  IANA timezone string (unused in API calls but kept for
-                       consistency with other providers).
         api_key:       Optional Open-Meteo API key for commercial endpoints.
         weather_model: Open-Meteo weather model identifier
                        (e.g. ``"best_match"``, ``"ecmwf_ifs04"``).  ``None`` = API default.
@@ -74,7 +72,6 @@ class PVForecastOpenMeteo(PVForecastProvider):
         planes: list[PVPlaneConfig],
         latitude: float,
         longitude: float,
-        timezone_str: str = "UTC",
         api_key: str | None = None,
         weather_model: str | None = None,
     ) -> None:
@@ -83,7 +80,6 @@ class PVForecastOpenMeteo(PVForecastProvider):
         self._planes = planes
         self._lat = latitude
         self._lon = longitude
-        self._tz = timezone_str
         self._api_key = api_key
         self._weather_model = weather_model
         # Per-plane cache: plane -> (forecast_days, past_days, fetched_at_mono, data)

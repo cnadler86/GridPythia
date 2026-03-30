@@ -10,10 +10,10 @@ from pydantic import BaseModel, model_validator
 class LoadProfileConfig(BaseModel):
     """Configuration for a file-based load profile provider.
 
-    The file format (JSON or CSV) is determined from the path suffix.
+    The file format is determined from the path suffix.
 
     Args:
-        path:                 Path to the profile file (``.json`` or ``.csv``).
+        path:                 Path to the profile file (``.csv``).
         country:              ISO-3166-1 alpha-2 country code used to look up
                               public holidays (e.g. ``"DE"``).  When ``None``,
                               holiday detection is disabled.
@@ -29,6 +29,6 @@ class LoadProfileConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_path_suffix(self) -> "LoadProfileConfig":
         suffix = self.path.suffix.lower()
-        if suffix not in (".json", ".csv"):
-            raise ValueError(f"Unsupported profile file extension: {suffix!r} (use .json or .csv)")
+        if suffix != ".csv":
+            raise ValueError(f"Unsupported profile file extension: {suffix!r} (use .csv)")
         return self

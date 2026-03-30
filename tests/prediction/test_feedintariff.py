@@ -7,7 +7,6 @@ import pytest
 
 from GridPythia.prediction.base import make_timestamps
 from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
-from GridPythia.prediction.feedintariff.import_ import FeedInTariffImport
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 
@@ -38,20 +37,3 @@ class TestFeedInTariffFixed:
         assert result.dtype == pl.Float32
 
 
-class TestFeedInTariffImport:
-    async def test_exact_length(self):
-        tariffs = [0.00008] * 24
-        provider = FeedInTariffImport(tariffs_wh=tariffs)
-        result = await provider.fetch(_ts())
-        assert len(result) == 24
-        assert list(result) == pytest.approx(tariffs)
-
-    async def test_padding(self):
-        tariffs = [0.00005, 0.00010]
-        provider = FeedInTariffImport(tariffs_wh=tariffs)
-        result = await provider.fetch(_ts())
-        assert len(result) == 24
-        assert result[23] == pytest.approx(0.00010)
-
-    async def test_provider_id(self):
-        assert FeedInTariffImport(tariffs_wh=[]).provider_id == "FeedInTariffImport"

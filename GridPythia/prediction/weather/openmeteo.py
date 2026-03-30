@@ -31,11 +31,9 @@ class WeatherOpenMeteo(WeatherProvider):
         self,
         latitude: float,
         longitude: float,
-        timezone_str: str = "UTC",
     ) -> None:
         self._lat = latitude
         self._lon = longitude
-        self._tz = timezone_str
 
     @property
     def provider_id(self) -> str:
@@ -57,7 +55,7 @@ class WeatherOpenMeteo(WeatherProvider):
             "latitude": self._lat,
             "longitude": self._lon,
             "hourly": ",".join(_HOURLY_FIELDS),
-            "timezone": self._tz,
+            "timezone": "UTC",
             "forecast_days": min(forecast_days, 16),
             "timeformat": "unixtime",
         }
