@@ -1,6 +1,7 @@
 """Weather data import from pre-built dictionaries."""
 
 import polars as pl
+
 from GridPythia.prediction.base import resample_to_timestamps
 from GridPythia.prediction.weather.provider import WeatherProvider
 

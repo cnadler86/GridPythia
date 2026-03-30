@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import aiohttp
 import polars as pl
+
 from GridPythia.prediction.base import resample_to_timestamps
 from GridPythia.prediction.weather.provider import WeatherProvider
 

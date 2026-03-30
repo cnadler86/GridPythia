@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 import aiohttp
 import polars as pl
+
 from GridPythia.prediction.base import resample_to_timestamps
 from GridPythia.prediction.pvforecast.provider import PVForecastProvider, PVPlaneConfig
 
@@ -137,7 +138,7 @@ class PVForecastAkkudoktor(PVForecastProvider):
         raw_values = await self._request_raw()
 
         results: list[_ForecastValue] = []
-        for per_plane in zip(*raw_values):
+        for per_plane in zip(*raw_values, strict=False):
             dt_str: str = per_plane[0]["datetime"]
             dt = datetime.fromisoformat(dt_str)
             if dt.tzinfo is None:
@@ -165,7 +166,7 @@ class PVForecastAkkudoktor(PVForecastProvider):
         hourly_by_inverter: dict[str, list[float]] = defaultdict(lambda: [0.0] * n_hourly)
 
         raw_values = await self._request_raw()
-        for plane, raw_plane in zip(self._planes, raw_values):
+        for plane, raw_plane in zip(self._planes, raw_values, strict=False):
             hourly = hourly_by_inverter[plane.inverter]
             for fv in self._parse_plane_values(raw_plane):
                 fv_utc = _to_utc(fv.dt)

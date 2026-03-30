@@ -5,8 +5,9 @@ from collections.abc import Mapping
 from typing import Optional, Sequence, Tuple
 
 import polars as pl
-from GridPythia.prediction.base import PredictionProvider
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from GridPythia.prediction.base import PredictionProvider
 
 
 class PVPlaneConfig(BaseModel):

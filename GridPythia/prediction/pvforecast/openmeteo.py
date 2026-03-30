@@ -21,9 +21,10 @@ from time import monotonic
 from typing import ClassVar, Sequence
 
 import polars as pl
+from open_meteo_solar_forecast import OpenMeteoSolarForecast
+
 from GridPythia.prediction.base import resample_to_timestamps
 from GridPythia.prediction.pvforecast.provider import PVForecastProvider, PVPlaneConfig
-from open_meteo_solar_forecast import OpenMeteoSolarForecast
 
 logger = logging.getLogger(__name__)
 

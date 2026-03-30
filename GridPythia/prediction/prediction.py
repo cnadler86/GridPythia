@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import polars as pl
+
 from GridPythia.prediction.base import make_timestamps
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 from GridPythia.prediction.feedintariff.provider import FeedInTariffProvider

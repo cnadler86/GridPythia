@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import aiohttp
 import polars as pl
+
 from GridPythia.prediction.base import resample_to_timestamps
 from GridPythia.prediction.weather.provider import WeatherProvider
 
@@ -75,7 +76,7 @@ class WeatherOpenMeteo(WeatherProvider):
         def _build(key: str) -> list[float]:
             raw = hourly.get(key, [])
             out = [0.0] * n_hourly
-            for ts_unix, val in zip(time_arr, raw):
+            for ts_unix, val in zip(time_arr, raw, strict=False):
                 dt_utc = datetime.fromtimestamp(ts_unix, tz=timezone.utc)
                 offset_h = (dt_utc - start_utc).total_seconds() / 3600.0
                 idx = round(offset_h)

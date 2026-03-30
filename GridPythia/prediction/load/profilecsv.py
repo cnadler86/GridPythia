@@ -29,6 +29,7 @@ import io
 
 import numpy as np
 import polars as pl
+
 from GridPythia.prediction.load.config import LoadProfileConfig
 from GridPythia.prediction.load.provider import DayType, LoadProvider
 

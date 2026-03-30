@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import polars as pl
-from GridPythia.prediction.base import PredictionProvider
 from scipy.ndimage import gaussian_filter1d
+
+from GridPythia.prediction.base import PredictionProvider
 
 if TYPE_CHECKING:
     from GridPythia.prediction.load.config import LoadProfileConfig

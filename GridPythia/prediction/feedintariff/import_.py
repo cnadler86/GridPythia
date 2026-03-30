@@ -1,6 +1,7 @@
 """Feed-in tariff import from a pre-built list."""
 
 import polars as pl
+
 from GridPythia.prediction.base import resample_to_timestamps
 from GridPythia.prediction.feedintariff.provider import FeedInTariffProvider
 

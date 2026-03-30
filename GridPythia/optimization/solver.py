@@ -16,12 +16,13 @@ from enum import Enum
 
 import cvxpy as cp
 import numpy as np
+from loguru import logger
+
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.inverterbase import InverterBase
 from GridPythia.simulation.grid_interpolator import FraunhoferSCModel
 from GridPythia.simulation.grid_simulation import GridSimulation, SimulationResult
-from loguru import logger
 
 
 class OptimizationObjective(str, Enum):
@@ -243,7 +244,6 @@ class LinearOptimizer:
         prep: _PreparedInputs,
     ) -> tuple[list[_InverterModelBlock], cp.Variable, cp.Variable, cp.Variable]:
         T = prep.T
-        dt = prep.dt
 
         self._constraints: list[cp.Constraint] = []
         self._mode_switch_costs: list[cp.Expression] = []  # Track mode switch costs

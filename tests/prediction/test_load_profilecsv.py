@@ -370,9 +370,8 @@ class TestLoadProfileConfig:
         cfg = LoadProfileConfig(path=p, country="DE", subdivision="BW")
         provider = load_provider_from_config(cfg)
         assert isinstance(provider, LoadProfileJSON)
-        assert provider._country == "DE"  # type: ignore[attr-defined]
-        assert provider._subdivision == "BW"  # type: ignore[attr-defined]
-
+        assert provider._country == "DE"
+        assert provider._subdivision == "BW"
     def test_factory_returns_csv_provider(self, tmp_path: Path) -> None:
         p = tmp_path / "prof.csv"
         rows = ["time,weekday,weekend"] + [f"{h:02d}:00,100,200" for h in range(24)]
@@ -380,4 +379,4 @@ class TestLoadProfileConfig:
         cfg = LoadProfileConfig(path=p, country="DE")
         provider = load_provider_from_config(cfg)
         assert isinstance(provider, LoadProfileCSV)
-        assert provider._country == "DE"  # type: ignore[attr-defined]
+        assert provider._country == "DE"

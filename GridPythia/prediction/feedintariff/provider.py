@@ -3,6 +3,7 @@
 from abc import abstractmethod
 
 import polars as pl
+
 from GridPythia.prediction.base import PredictionProvider
 
 

@@ -4,12 +4,13 @@ from array import array
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from loguru import logger
+
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.homeappliance import HomeAppliance
 from GridPythia.simulation.devices.inverterbase import InverterBase
 from GridPythia.simulation.grid_interpolator import FraunhoferSCModel
-from loguru import logger
 
 
 @dataclass(slots=True)

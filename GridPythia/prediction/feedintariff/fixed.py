@@ -1,6 +1,7 @@
 """Fixed feed-in tariff provider."""
 
 import polars as pl
+
 from GridPythia.prediction.feedintariff.provider import FeedInTariffProvider
 
 

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from GridPythia.config.models import BatteryParameters
 from loguru import logger
+
+from GridPythia.config.models import BatteryParameters
 
 
 class Battery:

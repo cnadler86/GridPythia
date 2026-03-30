@@ -45,8 +45,9 @@ from datetime import date, datetime, timedelta, timezone
 
 import aiohttp
 import polars as pl
-from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 from pydantic import BaseModel, Field, field_validator
+
+from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +145,7 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         # are applied later when serving values so that forecasts (ETS)
         # operate on the underlying market prices.
         result: list[tuple[datetime, float]] = []
-        for ts, price_mwh in zip(timestamps_s, prices_mwh):
+        for ts, price_mwh in zip(timestamps_s, prices_mwh, strict=False):
             if price_mwh is None:
                 continue
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
@@ -325,7 +326,7 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
                 "Forecasting %d/%d future slots via ETS/median", len(missing_pos), total_slots
             )
             forecast = self._forecast(history, len(missing_pos))
-            for pos, fc_val in zip(missing_pos, forecast):
+            for pos, fc_val in zip(missing_pos, forecast, strict=False):
                 new_map[target_buckets[pos]] = fc_val
         elif missing_pos:
             logger.warning(

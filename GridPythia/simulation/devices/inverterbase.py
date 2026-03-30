@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, Optional
 
+from loguru import logger
+
 from GridPythia.config.models import DEFAULT_AC_RATES, InverterParameters
 from GridPythia.simulation.devices import (
     EnergyFlowResult,
     InverterMode,
     SystemTopology,
 )
-from loguru import logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
