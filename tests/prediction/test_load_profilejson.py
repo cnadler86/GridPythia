@@ -1,4 +1,4 @@
-"""Tests for JSON-backed load profile provider with weekly cache."""
+"""Tests for JSON-backed load profile provider."""
 
 from datetime import datetime, timezone
 import json
@@ -6,6 +6,7 @@ import json
 import pytest
 
 from src.prediction.base import make_timestamps
+from src.prediction.load.config import LoadProfileConfig
 from src.prediction.load.profilejson import LoadProfileJSON
 
 
@@ -27,12 +28,12 @@ class TestLoadProfileJSON:
     async def test_provider_id(self, tmp_path):
         p = tmp_path / "profiles.json"
         _write_profiles(p, [100.0] * 24, [200.0] * 24)
-        assert LoadProfileJSON(data_path=p).provider_id == "LoadProfileJSON"
+        assert LoadProfileJSON(LoadProfileConfig(path=p)).provider_id == "LoadProfileJSON"
 
     async def test_weekday_and_weekend_profile_selection(self, tmp_path):
         p = tmp_path / "profiles.json"
         _write_profiles(p, [100.0] * 24, [200.0] * 24)
-        provider = LoadProfileJSON(data_path=p)
+        provider = LoadProfileJSON(LoadProfileConfig(path=p))
 
         ts_weekday = make_timestamps(datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc), 24, 0.25)
         weekday_values = (await provider.fetch(ts_weekday)).to_list()
@@ -48,41 +49,23 @@ class TestLoadProfileJSON:
         p = tmp_path / "profiles.json"
         weekday = [0.0, 100.0] + [100.0] * 22
         _write_profiles(p, weekday=weekday, weekend=[100.0] * 24)
-        provider = LoadProfileJSON(data_path=p)
+        provider = LoadProfileJSON(LoadProfileConfig(path=p))
 
         ts = make_timestamps(datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc), 1.25, 0.25)
         values = (await provider.fetch(ts)).to_list()
         # Interpolation runs in power-space, then converts to Wh for 15-minute slots.
         assert values == pytest.approx([0.0, 6.25, 12.5, 18.75, 25.0], abs=1e-6)
 
-    async def test_cache_file_created_and_reused(self, tmp_path):
+    async def test_data_loaded_once_into_memory(self, tmp_path):
         p = tmp_path / "profiles.json"
         _write_profiles(p, [100.0] * 24, [200.0] * 24)
-        provider = LoadProfileJSON(data_path=p)
+        provider = LoadProfileJSON(LoadProfileConfig(path=p))
 
         ts = make_timestamps(datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc), 2.0, 0.25)
+        assert provider._loaded_data is None
         await provider.fetch(ts)
-        cache_file = provider.cache_file
-        assert cache_file.exists()
-        mtime_before = cache_file.stat().st_mtime
-
+        loaded = provider._loaded_data
+        assert loaded is not None
+        # Second fetch reuses the same object
         await provider.fetch(ts)
-        mtime_after = cache_file.stat().st_mtime
-        assert mtime_after == pytest.approx(mtime_before)
-
-    async def test_cache_hash_changes_when_input_changes(self, tmp_path):
-        p = tmp_path / "profiles.json"
-        _write_profiles(p, [100.0] * 24, [200.0] * 24)
-
-        provider_before = LoadProfileJSON(data_path=p)
-        ts = make_timestamps(datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc), 1.0, 0.25)
-        await provider_before.fetch(ts)
-        old_cache = provider_before.cache_file
-
-        _write_profiles(p, [150.0] * 24, [200.0] * 24)
-        provider_after = LoadProfileJSON(data_path=p)
-        await provider_after.fetch(ts)
-        new_cache = provider_after.cache_file
-
-        assert old_cache != new_cache
-        assert new_cache.exists()
+        assert provider._loaded_data is loaded

@@ -12,8 +12,9 @@ dependencies = [
     "aiohttp>=3.9",
     "open-meteo-solar-forecast>=0.1.29",
     "statsmodels",
-    "cvxpy-base>=1.8.0",
-    "highspy>=1.13.0",
+    "cvxpy-base>=1.8",
+    "highspy>=1.13",
+    "holidays>=0.93",
 ]
 
 [dependency-groups]

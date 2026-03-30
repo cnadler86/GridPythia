@@ -2,6 +2,11 @@ cache/
 output/
 EOS.config.json
 uv.lock
+*.csv
+*.log
+*.pdf
+*.json
+*.xlsx
 
 # Default ignore folders and files for VS Code, Python
 

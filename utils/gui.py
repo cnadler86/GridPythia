@@ -16,7 +16,7 @@ import tkinter as tk
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Callable, Coroutine, List, Mapping, Optional, Tuple, cast
 from zoneinfo import ZoneInfo
 
@@ -44,8 +44,8 @@ from src.prediction.electricprice.provider import ElecPriceProvider
 from src.prediction.feedintariff.fixed import FeedInTariffFixed
 from src.prediction.feedintariff.import_ import FeedInTariffImport
 from src.prediction.feedintariff.provider import FeedInTariffProvider
-from src.prediction.load.profilejson import LoadProfileJSON
-from src.prediction.load.provider import LoadProvider
+from src.prediction.load.config import LoadProfileConfig
+from src.prediction.load.provider import LoadProvider, load_provider_from_config
 from src.prediction.prediction import Prediction, PredictionData, PredictionSetup
 from src.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
 from src.prediction.pvforecast.import_ import PVForecastImport
@@ -109,6 +109,32 @@ def _run_async(
 
 def _csv(text: str) -> list[float]:
     return [float(t) for t in re.split(r"[\s,;]+", text.strip()) if t]
+
+
+def _path_field(
+    parent: tk.Misc,
+    row: int,
+    label: str,
+    default: str = "",
+    filetypes: list[tuple[str, str]] | None = None,
+) -> tk.StringVar:
+    """Grid label + entry + browse button at *row*; return the StringVar."""
+    ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", **_PAD)
+    var = tk.StringVar(value=default)
+    ent = ttk.Entry(parent, textvariable=var, width=16)
+    ent.grid(row=row, column=1, sticky="ew", **_PAD)
+    parent.columnconfigure(1, weight=1)
+    ft = filetypes or [("All files", "*.*")]
+
+    def _browse() -> None:
+        path = filedialog.askopenfilename(filetypes=ft)
+        if path:
+            var.set(path)
+
+    ttk.Button(parent, text="\u2026", width=2, command=_browse).grid(
+        row=row, column=2, sticky="w", padx=(0, 4), pady=3
+    )
+    return var
 
 
 def _field(parent: tk.Misc, row: int, label: str, default: str = "") -> tk.StringVar:
@@ -572,34 +598,87 @@ class FeedInTariffTab(_Tab):
 
 
 class LoadTab(_Tab):
-    """Tab for load providers and plotting (ProfileJSON supported)."""
+    """Tab for load providers and plotting (ProfileJSON and ProfileCSV supported)."""
 
     TITLE = "Load"
-    PROVIDERS = ["ProfileJSON"]
+    PROVIDERS = ["ProfileJSON", "ProfileCSV"]
 
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
-        # Only ProfileJSON provider is supported here (other providers were removed)
-        self._profile_json_path = _field(
-            f,
-            row,
-            "Profile JSON",
-            str(Path("src/prediction/load/data/load_profiles.json")),
+        p = self._prov_var.get()
+        if p == "ProfileJSON":
+            self._profile_json_path = _path_field(
+                f,
+                row,
+                "Profile JSON",
+                str(Path("src/prediction/load/data/load_profiles.json")),
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            )
+            row += 1
+            self._vacation_profile = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                f,
+                text="Use vacation profile",
+                variable=self._vacation_profile,
+            ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
+            row += 1
+        else:  # ProfileCSV
+            self._profile_csv_path = _path_field(
+                f,
+                row,
+                "Profile CSV",
+                "",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            )
+            row += 1
+
+        # Holiday settings (shared by both providers)
+        ttk.Separator(f).grid(row=row, column=0, columnspan=2, sticky="ew", pady=4)
+        row += 1
+        ttk.Label(f, text="Holidays", foreground="#555", font=("TkDefaultFont", 8, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=4
         )
         row += 1
-        self._vacation_profile = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            f,
-            text="Use vacation profile",
-            variable=self._vacation_profile,
-        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
+        self._country = _field(f, row, "Country (ISO)", "DE")
+        row += 1
+        self._subdivision = _field(f, row, "Subdivision", "BW")
 
     def make_provider(self) -> object:
         """Create and return the configured load provider."""
-        # Only ProfileJSON provider supported in cleaned GUI
-        return LoadProfileJSON(
-            data_path=Path(self._profile_json_path.get()),
-            use_vacation_profile=self._vacation_profile.get(),
+        country = self._country.get().strip() or None
+        subdivision = self._subdivision.get().strip() or None
+        p = self._prov_var.get()
+        if p == "ProfileJSON":
+            cfg = LoadProfileConfig(
+                path=Path(self._profile_json_path.get()),
+                country=country,
+                subdivision=subdivision,
+            )
+        else:  # ProfileCSV
+            cfg = LoadProfileConfig(
+                path=Path(self._profile_csv_path.get().strip()),
+                country=country,
+                subdivision=subdivision,
+            )
+        return load_provider_from_config(cfg)
+
+    def fetch(self) -> None:
+        """Override to pass ``use_vacation_profile`` at runtime."""
+        try:
+            prov = self._get_provider()
+        except Exception as exc:
+            self._status.set(f"Config error: {exc}")
+            return
+        prov = cast(Any, prov)
+        start, hours, dt = self.app.get_time_params()
+        ts = make_timestamps(start, hours, dt)
+        vac_var = getattr(self, "_vacation_profile", None)
+        use_vac = vac_var.get() if vac_var is not None else False
+        self._status.set("Fetching…")
+        _run_async(
+            prov.fetch(ts, use_vacation_profile=use_vac),
+            on_done=lambda r: self.app.root.after(0, lambda: self._done(r, ts)),
+            on_error=lambda e, tb: self.app.root.after(0, lambda: self._fail(e, tb)),
         )
 
     def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
