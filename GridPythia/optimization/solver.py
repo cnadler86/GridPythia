@@ -370,7 +370,8 @@ class LinearOptimizer:
                 self._constraints.append(cp.sum(y_dc, axis=0) <= 1)
 
             # Add mode switch cost constraints
-            self._add_mode_switch_costs(inv, inv_id, y_ch, y_dc, T)
+            # Pass p_ch and p_dc so we can track continuous discharge too
+            self._add_mode_switch_costs(inv, inv_id, y_ch, y_dc, p_ch, p_dc, T)
 
         else:
             p_ch = cp.Constant(np.zeros(T, dtype=float))
@@ -438,6 +439,8 @@ class LinearOptimizer:
         inv_id: str,
         y_ch: cp.Variable | None,
         y_dc: cp.Variable | None,
+        p_ch: cp.Expression,
+        p_dc: cp.Expression,
         T: int,
     ) -> None:
         """Add mode switch cost constraints and track them in objective."""
@@ -468,12 +471,23 @@ class LinearOptimizer:
         if y_ch is not None:
             y_ch_sum = cp.sum(y_ch, axis=0)
             self._constraints.extend([mode_ch >= y_ch_sum, mode_ch <= y_ch_sum])
+        elif isinstance(p_ch, cp.Variable):
+            # Continuous charge: mode_ch = 1 if p_ch > 0
+            # Use big-M constraint: p_ch <= max_p_ch * mode_ch (where max_p_ch is arbitrarily large)
+            # Since p_ch is bounded by battery capacity constraints, we can use a reasonable bound
+            max_p_ch = inv.battery.max_charge_power_w * self.prediction.dt_hours * 1.1
+            self._constraints.append(p_ch <= max_p_ch * mode_ch)
         else:
             self._constraints.append(mode_ch == 0)
 
         if y_dc is not None:
             y_dc_sum = cp.sum(y_dc, axis=0)
             self._constraints.extend([mode_dc >= y_dc_sum, mode_dc <= y_dc_sum])
+        elif isinstance(p_dc, cp.Variable):
+            # Continuous discharge: mode_dc = 1 if p_dc > 0
+            # Use big-M constraint: p_dc <= max_p_dc * mode_dc
+            max_p_dc = inv.battery.max_discharge_power_w * self.prediction.dt_hours * 1.1
+            self._constraints.append(p_dc <= max_p_dc * mode_dc)
         else:
             self._constraints.append(mode_dc == 0)
 
