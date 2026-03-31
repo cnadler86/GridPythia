@@ -1,15 +1,15 @@
 """Open-Meteo weather provider (free, no API key required)."""
 
-import logging
 from datetime import datetime, timezone
 
 import aiohttp
 import polars as pl
+from structlog import get_logger
 
 from GridPythia.prediction.base import resample_to_timestamps
 from GridPythia.prediction.weather.provider import WeatherProvider
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _HOURLY_FIELDS = [
     "temperature_2m",
@@ -50,6 +50,13 @@ class WeatherOpenMeteo(WeatherProvider):
         start_utc = _to_utc(start)
         end_utc = _to_utc(end)
         forecast_days = max(1, int((end_utc - start_utc).total_seconds() / 86400) + 1)
+
+        logger.debug(
+            "openmeteo_weather_request",
+            lat=self._lat,
+            lon=self._lon,
+            forecast_days=min(forecast_days, 16),
+        )
 
         params = {
             "latitude": self._lat,

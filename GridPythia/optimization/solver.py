@@ -16,13 +16,15 @@ from enum import Enum
 
 import cvxpy as cp
 import numpy as np
-from loguru import logger
+from structlog import get_logger
 
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.inverterbase import InverterBase
 from GridPythia.simulation.grid_interpolator import FraunhoferSCModel
 from GridPythia.simulation.grid_simulation import GridSimulation, SimulationResult
+
+logger = get_logger(__name__)
 
 
 class OptimizationObjective(str, Enum):
@@ -111,6 +113,11 @@ class LinearOptimizer:
     ) -> None:
         self.inverters = inverters
         self.prediction = prediction
+        self._log = logger.bind(
+            component="optimizer",
+            inverter_ids=[inv.device_id for inv in inverters],
+            steps=prediction.steps,
+        )
         self.initial_modes: dict[str, InverterMode] = {}
         for inv in self.inverters:
             raw_mode = (
@@ -155,11 +162,11 @@ class LinearOptimizer:
 
         problem = cp.Problem(cp.Minimize(obj_expr), self._constraints)
         size = problem.size_metrics
-        logger.info(
-            "Solving modular linear problem with objective '{}' and {} scalar variables ({} constraints)",
-            objective.value,
-            size.num_scalar_variables,
-            size.num_scalar_eq_constr + size.num_scalar_leq_constr,
+        self._log.info(
+            "optimizer_solve_start",
+            objective=objective.value,
+            num_variables=size.num_scalar_variables,
+            num_constraints=size.num_scalar_eq_constr + size.num_scalar_leq_constr,
         )
 
         opts = {
@@ -182,13 +189,27 @@ class LinearOptimizer:
             accepted_statuses.add("user_limit")
 
         if status not in accepted_statuses:
+            self._log.error(
+                "optimizer_solve_failed",
+                solver_status=status,
+                solve_time_s=round(solve_time, 3),
+            )
             raise RuntimeError(
                 f"Optimisation did not converge: solver status='{status}'. "
                 "Check feasibility (battery bounds, rates, and capacities)."
             )
 
         if g_import.value is None or g_feedin.value is None:
+            self._log.error("optimizer_no_values", solver_status=status)
             raise RuntimeError("Solver returned no values for grid variables")
+
+        self._log.info(
+            "optimizer_solve_complete",
+            solver_status=status,
+            solve_time_s=round(solve_time, 3),
+            objective=objective.value,
+            objective_value=round(float(problem.value), 4) if problem.value is not None else None,
+        )
 
         solution = self._build_solution(
             prep=prep,
@@ -205,6 +226,16 @@ class LinearOptimizer:
             parity, sim_res = self._validate_with_simulation(solution, prep)
             solution.parity_report = parity
             solution.simulation_result = sim_res
+            if parity.ok:
+                self._log.debug("optimizer_parity_ok")
+            else:
+                self._log.warning(
+                    "optimizer_parity_mismatch",
+                    max_soc_error_wh=round(parity.max_abs_soc_error_wh, 4),
+                    max_grid_import_error_wh=round(parity.max_abs_grid_import_error_wh, 4),
+                    max_feedin_error_wh=round(parity.max_abs_feedin_error_wh, 4),
+                    max_cost_error_eur=round(parity.max_abs_cost_error_eur, 6),
+                )
 
         return solution
 

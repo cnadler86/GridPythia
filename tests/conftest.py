@@ -3,12 +3,15 @@
 import sys
 
 import pytest
-from loguru import logger
+import structlog
 
 
 @pytest.fixture(autouse=True)
 def suppress_loguru():
     """Suppress verbose loguru output during tests."""
-    logger.remove()
-    logger.add(sys.stderr, level="WARNING")
+    structlog.configure(
+        processors=[
+            structlog.processors.KeyValueRenderer(key_order=["event", "logger", "level", "timestamp"]),
+        ]
+    )   
     yield

@@ -1,15 +1,15 @@
 """BrightSky weather provider (free, no API key, good for Germany)."""
 
-import logging
 from datetime import datetime, timezone
 
 import aiohttp
 import polars as pl
+from structlog import get_logger
 
 from GridPythia.prediction.base import resample_to_timestamps
 from GridPythia.prediction.weather.provider import WeatherProvider
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class WeatherBrightSky(WeatherProvider):
@@ -36,6 +36,14 @@ class WeatherBrightSky(WeatherProvider):
         start = ts_list[0]
         end = ts_list[-1]
 
+        logger.debug(
+            "brightsky_fetch_start",
+            lat=self._lat,
+            lon=self._lon,
+            start=start.isoformat(),
+            end=end.isoformat(),
+        )
+
         def _fmt(dt: datetime) -> str:
             return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -55,6 +63,7 @@ class WeatherBrightSky(WeatherProvider):
                 body = await resp.json(content_type=None)
 
         records = body.get("weather", [])
+        logger.debug("brightsky_response_received", records=len(records))
 
         def _to_utc(dt: datetime) -> datetime:
             return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)

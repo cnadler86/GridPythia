@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 import polars as pl
+from structlog import get_logger
 
 from GridPythia.prediction.base import make_timestamps
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
@@ -12,6 +13,8 @@ from GridPythia.prediction.feedintariff.provider import FeedInTariffProvider
 from GridPythia.prediction.load.provider import LoadProvider
 from GridPythia.prediction.pvforecast.provider import PVForecastProvider
 from GridPythia.prediction.weather.provider import WeatherProvider
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -171,6 +174,27 @@ class Prediction:
                 provider_timestamps = timestamps.dt.convert_time_zone("UTC")
         n = len(timestamps)
 
+        providers = []
+        if self.setup.electricprice:
+            providers.append(self.setup.electricprice.provider_id)
+        if self.setup.feedintariff:
+            providers.append(self.setup.feedintariff.provider_id)
+        if self.setup.load:
+            providers.append(self.setup.load.provider_id)
+        for name in self.setup.pv:
+            providers.append(self.setup.pv[name].provider_id)
+        if self.setup.weather:
+            providers.append(self.setup.weather.provider_id)
+
+        logger.info(
+            "prediction_fetch_start",
+            start=start.isoformat(),
+            hours=hours,
+            dt_hours=dt_hours,
+            steps=n,
+            providers=providers,
+        )
+
         async def _zeros() -> pl.Series:
             return pl.Series([0.0] * n, dtype=pl.Float32)
 
@@ -225,5 +249,11 @@ class Prediction:
                 data[f"weather_{col_name}"] = weather_df[col_name]
 
         df = pl.DataFrame(data)
+
+        logger.info(
+            "prediction_fetch_complete",
+            steps=len(df),
+            columns=df.columns,
+        )
 
         return PredictionData(_df=df, dt_hours=dt_hours)

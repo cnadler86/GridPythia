@@ -15,6 +15,7 @@ import re
 import threading
 import tkinter as tk
 import traceback
+import uuid
 from array import array
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import Any, Callable, Coroutine, List, Mapping, Optional, Tuple, cas
 from zoneinfo import ZoneInfo
 
 import matplotlib
+import structlog
 from matplotlib.axes import Axes
 
 matplotlib.use("TkAgg")
@@ -30,9 +32,9 @@ import matplotlib.dates as mdates
 import numpy as np
 import polars as pl
 import yaml
-from loguru import logger
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from structlog import get_logger
 
 from GridPythia.config.models import BatteryParameters, InverterParameters
 from GridPythia.optimization.solver import LinearOptimizer, LinearSolution, OptimizationObjective
@@ -57,6 +59,8 @@ from GridPythia.prediction.weather.provider import WeatherProvider
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.battery import Battery
 from GridPythia.simulation.devices.inverterbase import InverterBase
+
+logger = get_logger(__name__)
 
 # ── constants ─────────────────────────────────────────────────────────────
 
@@ -110,6 +114,24 @@ def _run_async(
             on_error(exc, traceback.format_exc())
 
     threading.Thread(target=_worker, daemon=True).start()
+
+
+async def _with_context(
+    coro: Coroutine[Any, Any, Any],
+    **bindings: Any,
+) -> Any:
+    """Wrap *coro* so that structlog contextvars are bound for the whole call chain.
+
+    Every log call inside *coro* — including nested providers and the solver —
+    will automatically inherit the bound keys (e.g. ``run_id``, ``tab``,
+    ``operation``) without any changes to those modules.
+    """
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(**bindings)
+    try:
+        return await coro
+    finally:
+        structlog.contextvars.clear_contextvars()
 
 
 def _csv(text: str) -> list[float]:
@@ -496,7 +518,18 @@ class _Tab:
 
     def _fail(self, exc: Exception, tb: str) -> None:
         self._status.set(f"Error: {exc}")
-        messagebox.showerror("Fetch error", f"{exc}\n\n{tb[:1500]}", parent=self.frame)
+        logger.error(
+            "fetch_failed",
+            tab=self.TITLE,
+            exc_type=type(exc).__name__,
+            exc=str(exc),
+            traceback=tb,
+        )
+        messagebox.showerror(
+            "Fetch error",
+            "An error occurred. See console for details.",
+            parent=self.frame,
+        )
 
     def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
         ax = _setup_plot_axes(self._fig)
@@ -1172,7 +1205,12 @@ class OptimizationTab(_Tab):
         """Gather providers, fetch predictions and run the optimizer asynchronously."""
         try:
             start, hours, dt = self.app.get_time_params()
-            logger.info("Optimization start: start=%s hours=%s dt=%s", start, hours, dt)
+            logger.info(
+                "optimization_run_start",
+                start=start.isoformat(),
+                hours=hours,
+                dt_hours=dt,
+            )
         except Exception as exc:
             self.app.root.bell()
             messagebox.showerror("Time parsing", str(exc), parent=self.frame)
@@ -1313,7 +1351,11 @@ class OptimizationTab(_Tab):
                         inverters=[inv_obj],
                         prediction=pdata,
                     )
-                    logger.info("Starting LinearOptimizer with objective={}", objective.value)
+                    logger.info(
+                        "optimizer_build_start",
+                        objective=objective.value,
+                        inverters=1,
+                    )
                     sol: LinearSolution = await asyncio.to_thread(
                         lambda: optimizer.solve(
                             objective=objective,
@@ -1375,7 +1417,12 @@ class OptimizationTab(_Tab):
                         return
                     # Tell the type checker to treat `res` as dynamic here
                     res = cast(Any, res)
-                    logger.info("Simulation finished, preparing plots and JSON output")
+                    logger.info(
+                        "optimizer_result_ready",
+                        solver_status=sol.solver_status
+                        if isinstance(res_tuple, LinearSolution)
+                        else "legacy",
+                    )
                     out = res.to_dict()
                     if simulation_error is not None:
                         out["simulation_error"] = simulation_error
@@ -1630,23 +1677,46 @@ class OptimizationTab(_Tab):
                     suffix = f" · {solve_meta}" if solve_meta else ""
                     self._status.set(f"Done · Net: {res.net_balance:.2f} €{suffix}")
 
+                run_id = uuid.uuid4().hex[:8]
                 _run_async(
-                    _run_sim(),
+                    _with_context(
+                        _run_sim(),
+                        run_id=run_id,
+                        tab="optimization",
+                        operation="optimization",
+                    ),
                     on_done=lambda r: _sim_done(r),
-                    on_error=lambda e, tb: self._on_error(e, tb),
+                    on_error=lambda e, tb: self._on_error(e, tb, operation="optimization"),
                 )
             except Exception as exc:
-                self._on_error(exc, None)
+                self._on_error(exc, None, operation="optimization")
 
+        run_id = uuid.uuid4().hex[:8]
         _run_async(
-            pred.fetch(start=start, hours=hours, dt_hours=dt),
+            _with_context(
+                pred.fetch(start=start, hours=hours, dt_hours=dt),
+                run_id=run_id,
+                tab="optimization",
+                operation="prediction_fetch",
+            ),
             on_done=lambda r: on_pred_done(r),
-            on_error=lambda e, tb: self._on_error(e, tb),
+            on_error=lambda e, tb: self._on_error(e, tb, operation="prediction_fetch"),
         )
 
-    def _on_error(self, exc: Exception, tb: str | None) -> None:
+    def _on_error(self, exc: Exception, tb: str | None, *, operation: str = "unknown") -> None:
         self._status.set(f"Error: {exc}")
-        messagebox.showerror("Error", f"{exc}\n\n{(tb or '')[:1500]}", parent=self.frame)
+        logger.error(
+            "gui_task_error",
+            operation=operation,
+            exc_type=type(exc).__name__,
+            exc=str(exc),
+            traceback=tb or "",
+        )
+        messagebox.showerror(
+            "Error",
+            "An error occurred. See console for details.",
+            parent=self.frame,
+        )
 
 
 class App:
@@ -1835,11 +1905,24 @@ class App:
 
 def run() -> None:
     """Launch the interactive forecast preview GUI."""
-    # Keep third-party loggers quiet while retaining debug output from this package.
     import logging
 
+    import structlog
+
+    # Configure structlog: timestamp + log level + structured console output.
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.stdlib.add_log_level,
+            structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
+            structlog.dev.ConsoleRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+        context_class=dict,
+        logger_factory=structlog.PrintLoggerFactory(),
+    )
+    # Silence noisy third-party stdlib loggers.
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
-    logging.getLogger("GridPythia").setLevel(logging.DEBUG)
 
     app = App()
     app.root.mainloop()

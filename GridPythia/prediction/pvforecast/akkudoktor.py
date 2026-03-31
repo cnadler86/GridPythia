@@ -4,18 +4,18 @@ API documentation: https://akkudoktor.net
 Endpoint: https://api.akkudoktor.net/forecast
 """
 
-import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import aiohttp
 import polars as pl
+from structlog import get_logger
 
 from GridPythia.prediction.base import resample_to_timestamps
 from GridPythia.prediction.pvforecast.provider import PVForecastProvider, PVPlaneConfig
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _BASE_URL = "https://api.akkudoktor.net/forecast"
 
@@ -100,7 +100,7 @@ class PVForecastAkkudoktor(PVForecastProvider):
     async def _request_raw(self) -> list[list[dict]]:
         """Call the Akkudoktor API and return raw per-plane hourly values."""
         url = self._build_url()
-        logger.debug("Akkudoktor request: %s", url)
+        logger.debug("akkudoktor_request", url=url)
 
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -111,6 +111,7 @@ class PVForecastAkkudoktor(PVForecastProvider):
         raw_values: list[list[dict]] = data.get("values", [])
         if not raw_values:
             raise ValueError("Akkudoktor API returned no 'values'.")
+        logger.debug("akkudoktor_response_received", planes=len(raw_values))
         return raw_values
 
     def _parse_plane_values(self, raw_plane: list[dict]) -> list[_ForecastValue]:

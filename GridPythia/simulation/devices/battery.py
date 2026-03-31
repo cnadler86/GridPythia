@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from loguru import logger
+from structlog import get_logger
 
 from GridPythia.config.models import BatteryParameters
+
+logger = get_logger(__name__)
 
 
 class Battery:
@@ -28,11 +30,13 @@ class Battery:
         "max_soc_wh",
         "_initial_soc_wh",
         "_soc_pct_factor",
+        "_log",
     )
 
     def __init__(self, parameters: BatteryParameters, prediction_hours: int) -> None:
         self.parameters = parameters
         self.prediction_hours = prediction_hours
+        self._log = logger.bind(device_id=parameters.device_id, component="battery")
         self._setup()
 
     def _setup(self) -> None:
@@ -87,11 +91,12 @@ class Battery:
         self._initial_soc_wh: float = self.soc_wh
         self._soc_pct_factor: float = 100.0 / self.capacity_wh
 
-        logger.info(
-            "Initialized Battery '{}' with capacity {} Wh, initial SoC {}%.",
-            self.parameters.device_id,
-            self.capacity_wh,
-            self.initial_soc_percentage,
+        self._log.info(
+            "battery_setup_complete",
+            capacity_wh=self.capacity_wh,
+            initial_soc_pct=self.initial_soc_percentage,
+            min_soc_pct=self.min_soc_percentage,
+            max_soc_pct=self.max_soc_percentage,
         )
 
     def to_dict(self) -> dict[str, Any]:

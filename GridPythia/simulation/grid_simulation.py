@@ -4,13 +4,15 @@ from array import array
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from loguru import logger
+from structlog import get_logger
 
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.homeappliance import HomeAppliance
 from GridPythia.simulation.devices.inverterbase import InverterBase
 from GridPythia.simulation.grid_interpolator import FraunhoferSCModel
+
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -81,7 +83,7 @@ class SimulationResult:
                 try:
                     return obj.tolist()
                 except Exception:
-                    logger.warning("Failed to convert object with tolist(): {}", obj)
+                    logger.warning("simulation_result_tolist_failed", obj_type=type(obj).__name__)
             try:
                 return list(obj)
             except Exception:
@@ -125,7 +127,9 @@ class GridSimulation:
         else:
             self.electricity_price = array("f", [0.0] * prediction.steps)
             logger.warning(
-                "Electricity price column not found in prediction data; defaulting to 0.0 EUR/Wh for all steps."
+                "simulation_missing_electricity_price",
+                default_value=0.0,
+                steps=prediction.steps,
             )
         feedintariff = prediction.feedintariff
         if feedintariff is not None:
@@ -133,7 +137,9 @@ class GridSimulation:
         else:
             self.electricity_revenue = array("f", [0.0] * prediction.steps)
             logger.warning(
-                "Feed-in tariff column not found in prediction data; defaulting to 0.0 EUR/Wh for all steps."
+                "simulation_missing_feedin_tariff",
+                default_value=0.0,
+                steps=prediction.steps,
             )
 
         self.pv_prediction_map: Optional[Dict[str, array]] = None
@@ -174,6 +180,14 @@ class GridSimulation:
         self._fraunhofer_sc_model = FraunhoferSCModel(
             baseload_wh=max(float(min_load_wh), 1e-6),
             dt=dt,
+        )
+
+        logger.info(
+            "simulation_initialized",
+            steps=self.simulation_steps,
+            dt_hours=dt,
+            inverters=len(self.inverters),
+            home_appliances=len(self.home_appliances),
         )
 
     def reset(self) -> None:

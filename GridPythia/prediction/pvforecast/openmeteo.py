@@ -14,7 +14,6 @@ Caching:
     :attr:`PVForecastOpenMeteo._TTL_S` seconds (default 3600 = 1 h).
 """
 
-import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from time import monotonic
@@ -22,11 +21,12 @@ from typing import ClassVar, Sequence
 
 import polars as pl
 from open_meteo_solar_forecast import OpenMeteoSolarForecast
+from structlog import get_logger
 
 from GridPythia.prediction.base import resample_to_timestamps
 from GridPythia.prediction.pvforecast.provider import PVForecastProvider, PVPlaneConfig
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _userhorizon_to_map(
@@ -130,14 +130,14 @@ class PVForecastOpenMeteo(PVForecastProvider):
         """
         om_az = plane.azimuth - 180.0
         logger.debug(
-            "OpenMeteo request: lat=%s lon=%s az=%s tilt=%s kwp=%s forecast_days=%s past_days=%s",
-            self._lat,
-            self._lon,
-            om_az,
-            plane.tilt,
-            plane.peak_kw,
-            forecast_days,
-            past_days,
+            "openmeteo_pv_request",
+            lat=self._lat,
+            lon=self._lon,
+            azimuth=om_az,
+            tilt=plane.tilt,
+            peak_kw=plane.peak_kw,
+            forecast_days=forecast_days,
+            past_days=past_days,
         )
         async with OpenMeteoSolarForecast(
             azimuth=om_az,
@@ -161,10 +161,10 @@ class PVForecastOpenMeteo(PVForecastProvider):
         # The API already returns 15-minute timestamps; only normalize to UTC.
         result: dict[datetime, float] = {}
         logger.debug(
-            "OpenMeteo response: %d estimates for plane with az=%s tilt=%s.",
-            len(estimate.watts),
-            om_az,
-            plane.tilt,
+            "openmeteo_pv_response",
+            estimates=len(estimate.watts),
+            azimuth=om_az,
+            tilt=plane.tilt,
         )
         for ts, w in estimate.watts.items():
             result[ts.astimezone(timezone.utc)] = float(w)
@@ -197,10 +197,10 @@ class PVForecastOpenMeteo(PVForecastProvider):
                 self._cache[plane] = (forecast_days, past_days, now_mono, plane_data)
             else:
                 logger.debug(
-                    "OpenMeteo: using cached response for plane az=%s tilt=%s (age=%.0fs)",
-                    plane.azimuth - 180.0,
-                    plane.tilt,
-                    now_mono - cached[2],
+                    "openmeteo_pv_cache_hit",
+                    azimuth=plane.azimuth - 180.0,
+                    tilt=plane.tilt,
+                    cache_age_s=round(now_mono - cached[2]),
                 )
                 plane_data = cached[3]
             plane_data_by_inverter[plane.inverter].append(plane_data)

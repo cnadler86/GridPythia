@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, Optional
 
-from loguru import logger
+from structlog import get_logger
 
 from GridPythia.config.models import DEFAULT_AC_RATES, InverterParameters
 from GridPythia.simulation.devices import (
@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from GridPythia.simulation.devices.battery import Battery
+
+logger = get_logger(__name__)
 
 
 class InverterBase:
@@ -46,6 +48,7 @@ class InverterBase:
         "available_modes",
         "_mode_dispatch",
         "is_optimizable",
+        "_log",
     )
 
     def __init__(
@@ -57,6 +60,7 @@ class InverterBase:
         self.battery: Optional[Battery] = battery
         self.current_state: InverterMode = InverterMode.IDLE
         self.device_id = self.parameters.device_id
+        self._log = logger.bind(device_id=self.device_id, component="inverter")
 
         if self.battery and self.parameters.battery_id != self.battery.parameters.device_id:
             raise ValueError(
@@ -105,11 +109,12 @@ class InverterBase:
             InverterMode.AC_CHARGE: self._process_ac_charge,
             InverterMode.AC_CHARGE_ZERO_FEED_IN: self._process_ac_charge,
         }
-        logger.info(
-            "Inverter '{}' initialized with topology {} and pv source {}.",
-            self.device_id,
-            self.topology,
-            self.parameters.pv_source,
+        self._log.info(
+            "inverter_setup_complete",
+            topology=self.topology,
+            pv_source=self.parameters.pv_source,
+            available_modes=[m.name for m in self.available_modes],
+            is_optimizable=self.is_optimizable,
         )
 
     def _resolve_topology(self) -> SystemTopology:

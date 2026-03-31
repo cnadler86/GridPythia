@@ -40,16 +40,16 @@ pattern avoids unnecessary lock contention on the hot path.
 """
 
 import asyncio
-import logging
 from datetime import date, datetime, timedelta, timezone
 
 import aiohttp
 import polars as pl
 from pydantic import BaseModel, Field, field_validator
+from structlog import get_logger
 
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _HISTORY_WINDOW = timedelta(days=15)
 _HORIZON_BUFFER_DEFAULT = timedelta(hours=25)
@@ -175,7 +175,7 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
                 sp = daily_sp
 
             if sp is not None and len(history) >= 2 * sp:
-                logger.debug("Using ETS with seasonal_periods=%d (history=%d)", sp, len(history))
+                logger.debug("ets_forecast_selected", seasonal_periods=sp, history_len=len(history))
                 model = ExponentialSmoothing(history, seasonal="add", seasonal_periods=sp).fit(
                     optimized=True
                 )
@@ -220,9 +220,9 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
             and (now_utc.hour > 12 or (now_utc.hour == 12 and now_utc.minute >= 30))
         ):
             logger.debug(
-                "Poll window open: now=%s > last_real_ts=%s, within series, after 12:30 UTC",
-                now_utc.strftime("%H:%M"),
-                self._last_real_ts.strftime("%Y-%m-%dT%H:%M"),
+                "poll_window_open",
+                now_utc=now_utc.strftime("%H:%M"),
+                last_real_ts=self._last_real_ts.strftime("%Y-%m-%dT%H:%M"),
             )
             return True
         return False
@@ -242,16 +242,16 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         fetch_end = requested_end.replace(hour=23, minute=59, second=0, microsecond=0)
 
         logger.debug(
-            "Polling Energy-Charts (bzn=%s, history=[%s, map=[%s, %s UTC])",
-            self._bidding_zone,
-            hist_start.strftime("%Y-%m-%dT%H:%M"),
-            map_start.strftime("%Y-%m-%dT%H:%M"),
-            fetch_end.strftime("%Y-%m-%dT%H:%M"),
+            "energy_charts_polling",
+            bidding_zone=self._bidding_zone,
+            history_start=hist_start.strftime("%Y-%m-%dT%H:%M"),
+            map_start=map_start.strftime("%Y-%m-%dT%H:%M"),
+            fetch_end=fetch_end.strftime("%Y-%m-%dT%H:%M"),
         )
         raw = await self._request_prices(hist_start, fetch_end)
 
         if not raw:
-            logger.warning("Energy-Charts returned no data for bzn=%s", self._bidding_zone)
+            logger.warning("energy_charts_no_data", bidding_zone=self._bidding_zone)
             return
 
         last_real_ts = max(dt for dt, _ in raw)
@@ -269,19 +269,19 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
                 and requested_end.date() <= self._cache_end_day
             ):
                 logger.debug(
-                    "No new data beyond last_real_ts=%s (fetched last_real_ts=%s) – skipping refresh (requested range already cached)",
-                    self._last_real_ts.strftime("%Y-%m-%dT%H:%M"),
-                    last_real_ts.strftime("%Y-%m-%dT%H:%M"),
+                    "energy_charts_cache_hit",
+                    cached_last_real_ts=self._last_real_ts.strftime("%Y-%m-%dT%H:%M"),
+                    fetched_last_real_ts=last_real_ts.strftime("%Y-%m-%dT%H:%M"),
                 )
                 return
         horizon_end = max(last_real_ts + self._horizon_buffer, fetch_end)
 
         logger.info(
-            "Energy-Charts: %d real data points, last_real_ts=%s, forecast until %s (+%.0f h)",
-            len(raw),
-            last_real_ts.strftime("%Y-%m-%dT%H:%M"),
-            horizon_end.strftime("%Y-%m-%dT%H:%M"),
-            self._horizon_buffer.total_seconds() / 3600,
+            "energy_charts_refresh_complete",
+            real_data_points=len(raw),
+            last_real_ts=last_real_ts.strftime("%Y-%m-%dT%H:%M"),
+            forecast_until=horizon_end.strftime("%Y-%m-%dT%H:%M"),
+            horizon_buffer_h=self._horizon_buffer.total_seconds() / 3600,
         )
         self._build_price_map(raw, map_start, horizon_end)
         self._last_real_ts = last_real_ts
@@ -323,14 +323,17 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
 
         if missing_pos and history:
             logger.debug(
-                "Forecasting %d/%d future slots via ETS/median", len(missing_pos), total_slots
+                "energy_charts_forecasting_slots",
+                missing_slots=len(missing_pos),
+                total_slots=total_slots,
             )
             forecast = self._forecast(history, len(missing_pos))
             for pos, fc_val in zip(missing_pos, forecast, strict=False):
                 new_map[target_buckets[pos]] = fc_val
         elif missing_pos:
             logger.warning(
-                "No history for ETS forecast – %d slots will default to 0.0", len(missing_pos)
+                "energy_charts_no_history_for_forecast",
+                missing_slots=len(missing_pos),
             )
 
         # Apply configured charges and VAT to every slot once here so the
@@ -342,10 +345,10 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
 
         self._price_map = new_map
         logger.info(
-            "Price map ready: %d API slots + %d forecast slots = %.1f h coverage",
-            api_hits,
-            len(missing_pos),
-            total_slots * 0.25,
+            "energy_charts_price_map_ready",
+            api_slots=api_hits,
+            forecast_slots=len(missing_pos),
+            coverage_hours=total_slots * 0.25,
         )
 
     # ── public API ────────────────────────────────────────────────────
@@ -387,9 +390,9 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
 
         if cache_misses:
             logger.warning(
-                "%d/%d requested timestamps not covered by price map (returning 0.0)",
-                cache_misses,
-                len(ts_list),
+                "energy_charts_cache_misses",
+                cache_misses=cache_misses,
+                total_timestamps=len(ts_list),
             )
 
         return pl.Series(result, dtype=pl.Float32)

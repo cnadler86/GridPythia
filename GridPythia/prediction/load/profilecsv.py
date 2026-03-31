@@ -29,9 +29,12 @@ import io
 
 import numpy as np
 import polars as pl
+from structlog import get_logger
 
 from GridPythia.prediction.load.config import LoadProfileConfig
 from GridPythia.prediction.load.provider import DayType, LoadProvider
+
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # column-name aliases (lower-cased)
@@ -122,6 +125,14 @@ class LoadProfileCSV(LoadProvider):
         profiles["vacations"] = [min_wh] * expected_slots
 
         self._profiles = profiles
+
+        logger.info(
+            "load_profile_loaded",
+            file=self._file_path.name,
+            source_dt_hours=dt_hours,
+            slots=expected_slots,
+            profiles=list(profiles.keys()),
+        )
 
     def _read_csv_stdlib(self) -> pl.DataFrame:
         """Read CSV using the stdlib ``csv`` module to avoid polars native crashes.
