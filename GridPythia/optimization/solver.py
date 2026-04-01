@@ -101,15 +101,12 @@ class LinearOptimizer:
         inverters: All inverters in the system. Topology determines which
             variables and constraints are instantiated per inverter.
         prediction: Aligned prediction channels for the horizon.
-        initial_modes: Prior inverter mode per device ID for correct t=0
-            mode-switch cost accounting.
     """
 
     def __init__(
         self,
         inverters: list[InverterBase],
         prediction: PredictionData,
-        initial_modes: Mapping[str, InverterMode | int] | None = None,
     ) -> None:
         self.inverters = inverters
         self.prediction = prediction
@@ -118,16 +115,6 @@ class LinearOptimizer:
             inverter_ids=[inv.device_id for inv in inverters],
             steps=prediction.steps,
         )
-        self.initial_modes: dict[str, InverterMode] = {}
-        for inv in self.inverters:
-            raw_mode = (
-                initial_modes.get(inv.device_id, InverterMode.IDLE)
-                if initial_modes is not None
-                else InverterMode.IDLE
-            )
-            self.initial_modes[inv.device_id] = (
-                raw_mode if isinstance(raw_mode, InverterMode) else InverterMode(int(raw_mode))
-            )
 
         min_load_wh = float(min(prediction.load_wh)) if prediction.steps > 0 else 1.0
         self._sc_model = FraunhoferSCModel(
@@ -140,10 +127,22 @@ class LinearOptimizer:
         objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
         solver_opts: dict | None = None,
         validate_with_simulation: bool = False,
+        initial_modes: Mapping[str, InverterMode | int] | None = None,
     ) -> LinearSolution:
         """Build MILP, solve with HiGHS, and return a :class:`LinearSolution`."""
         prep = self._prepare_inputs()
-        blocks, g_import, g_feedin, pv_self = self._build_problem(prep)
+        normalized_initial_modes: dict[str, InverterMode] = {}
+        for inv in self.inverters:
+            raw_mode = (
+                initial_modes.get(inv.device_id, InverterMode.IDLE)
+                if initial_modes is not None
+                else InverterMode.IDLE
+            )
+            normalized_initial_modes[inv.device_id] = (
+                raw_mode if isinstance(raw_mode, InverterMode) else InverterMode(int(raw_mode))
+            )
+
+        blocks, g_import, g_feedin, pv_self = self._build_problem(prep, normalized_initial_modes)
 
         terminal_value = self._estimate_terminal_value(prep, blocks)
         terminal_reward = self._terminal_reward(blocks, terminal_value)
@@ -273,6 +272,7 @@ class LinearOptimizer:
     def _build_problem(
         self,
         prep: _PreparedInputs,
+        initial_modes: Mapping[str, InverterMode],
     ) -> tuple[list[_InverterModelBlock], cp.Variable, cp.Variable, cp.Variable]:
         T = prep.T
 
@@ -291,7 +291,7 @@ class LinearOptimizer:
         mapped_pv_sources: set[str] = set()
 
         for inv in self.inverters:
-            block = self._build_inverter_block(inv, prep)
+            block = self._build_inverter_block(inv, prep, initial_modes)
             blocks.append(block)
 
             total_p_ch_terms.append(block.p_ch)
@@ -332,7 +332,10 @@ class LinearOptimizer:
         return blocks, g_import, g_feedin, pv_self
 
     def _build_inverter_block(
-        self, inv: InverterBase, prep: _PreparedInputs
+        self,
+        inv: InverterBase,
+        prep: _PreparedInputs,
+        initial_modes: Mapping[str, InverterMode],
     ) -> _InverterModelBlock:
         T = prep.T
         dt = prep.dt
@@ -402,7 +405,16 @@ class LinearOptimizer:
 
             # Add mode switch cost constraints
             # Pass p_ch and p_dc so we can track continuous discharge too
-            self._add_mode_switch_costs(inv, inv_id, y_ch, y_dc, p_ch, p_dc, T)
+            self._add_mode_switch_costs(
+                inv,
+                inv_id,
+                initial_modes.get(inv_id, InverterMode.IDLE),
+                y_ch,
+                y_dc,
+                p_ch,
+                p_dc,
+                T,
+            )
 
         else:
             p_ch = cp.Constant(np.zeros(T, dtype=float))
@@ -468,6 +480,7 @@ class LinearOptimizer:
         self,
         inv: InverterBase,
         inv_id: str,
+        initial_mode: InverterMode,
         y_ch: cp.Variable | None,
         y_dc: cp.Variable | None,
         p_ch: cp.Expression,
@@ -482,8 +495,6 @@ class LinearOptimizer:
 
         if mode_switch_cost <= 0.0:
             return
-
-        initial_mode = self.initial_modes.get(inv_id, InverterMode.IDLE)
 
         def _mode_flags(mode: InverterMode) -> tuple[int, int]:
             if mode in (InverterMode.AC_CHARGE, InverterMode.AC_CHARGE_ZERO_FEED_IN):
