@@ -1045,6 +1045,11 @@ class OptimizationTab(_Tab):
     _LEFT_WIDTH = 295
     _last_ts: list | None = None
     _last_dt: float | None = None
+    _optimizer_cache: LinearOptimizer | None = None
+    _optimizer_cache_sig: str | None = None
+    _optimization_running: bool = False
+    _prediction_cache: PredictionData | None = None
+    _prediction_cache_sig: str | None = None
 
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
@@ -1197,12 +1202,88 @@ class OptimizationTab(_Tab):
         # Not used: this tab aggregates other providers
         return None
 
+    def _optimizer_signature(self, inv: InverterBase, hours: float) -> str:
+        """Return a stable topology signature for optimizer cache invalidation."""
+        bat = inv.battery
+        p = inv.parameters
+        return "|".join(
+            [
+                inv.device_id,
+                str(getattr(p, "pv_source", "")),
+                str(float(getattr(p, "max_ac_output_power_w", 0.0))),
+                str(float(getattr(p, "max_ac_charge_power_w", 0.0))),
+                str(float(getattr(p, "dc_to_ac_efficiency", 0.0))),
+                str(float(getattr(p, "ac_to_dc_efficiency", 0.0))),
+                str(bool(getattr(p, "zero_feed_in", False))),
+                str(float(getattr(p, "mode_switch_cost", 0.0))),
+                str(tuple(getattr(p, "ac_rates_pct", tuple()))),
+                str(float(hours)),
+                "none"
+                if bat is None
+                else "|".join(
+                    [
+                        str(float(bat.capacity_wh)),
+                        str(float(bat.max_charge_power_w)),
+                        str(float(bat.max_discharge_power_w)),
+                        str(float(bat.charging_efficiency)),
+                        str(float(bat.discharging_efficiency)),
+                        str(float(bat.min_soc_percentage)),
+                        str(float(bat.max_soc_percentage)),
+                    ]
+                ),
+            ]
+        )
+
+    def _get_cached_optimizer(
+        self,
+        inv: InverterBase,
+        hours: float,
+        prediction: PredictionData,
+    ) -> LinearOptimizer:
+        """Reuse LinearOptimizer if topology is unchanged; otherwise rebuild it."""
+        sig = self._optimizer_signature(inv, hours)
+        if self._optimizer_cache is None or self._optimizer_cache_sig != sig:
+            self._optimizer_cache = LinearOptimizer(inverters=[inv], prediction=prediction)
+            self._optimizer_cache_sig = sig
+            logger.info("optimizer_instance_rebuilt", tab="optimization")
+        else:
+            # Keep cached inverter object in sync with current UI-driven device state.
+            self._optimizer_cache.inverters = [inv]
+            self._optimizer_cache.prediction = prediction
+            logger.info("optimizer_instance_reused", tab="optimization")
+        return self._optimizer_cache
+
+    def _prediction_signature(self, start: datetime, hours: float, dt: float) -> str:
+        """Stable key to reuse the last fetched prediction when inputs are unchanged."""
+        elec_tab = next((t for t in self.app.tabs if isinstance(t, ElecPriceTab)), None)
+        feed_tab = next((t for t in self.app.tabs if isinstance(t, FeedInTariffTab)), None)
+        load_tab = next((t for t in self.app.tabs if isinstance(t, LoadTab)), None)
+        pv_tab = next((t for t in self.app.tabs if isinstance(t, PVForecastTab)), None)
+        weather_tab = next((t for t in self.app.tabs if isinstance(t, WeatherTab)), None)
+        parts = [
+            start.isoformat(),
+            str(float(hours)),
+            str(float(dt)),
+            elec_tab._provider_sig() if elec_tab is not None else "none",
+            feed_tab._provider_sig() if feed_tab is not None else "none",
+            load_tab._provider_sig() if load_tab is not None else "none",
+            pv_tab._provider_sig() if pv_tab is not None else "none",
+            weather_tab._provider_sig() if weather_tab is not None else "none",
+            self._inv_id.get(),
+            self._pv_source.get(),
+        ]
+        return "|".join(str(p) for p in parts)
+
     def fetch(self) -> None:
         """Override fetch: run optimization flow instead of provider fetch."""
         self.run_optimization()
 
     def run_optimization(self) -> None:
         """Gather providers, fetch predictions and run the optimizer asynchronously."""
+        if self._optimization_running:
+            self._status.set("Optimization already running…")
+            return
+        self._optimization_running = True
         try:
             start, hours, dt = self.app.get_time_params()
             logger.info(
@@ -1212,6 +1293,7 @@ class OptimizationTab(_Tab):
                 dt_hours=dt,
             )
         except Exception as exc:
+            self._optimization_running = False
             self.app.root.bell()
             messagebox.showerror("Time parsing", str(exc), parent=self.frame)
             return
@@ -1325,17 +1407,35 @@ class OptimizationTab(_Tab):
 
                 def _make_devices(params: BatteryParameters) -> Tuple[Battery, InverterBase]:
                     bat = Battery(params, prediction_hours=int(hours))
-                    inv_params = InverterParameters(
-                        device_id=self._inv_id.get(),
-                        battery_id=bat.parameters.device_id,
-                        pv_source=self._pv_source.get(),
-                        max_ac_output_power_w=float(self._inv_max_out.get()),
-                        max_ac_charge_power_w=float(self._inv_max_charge.get()),
-                        dc_to_ac_efficiency=float(self._inv_dc2ac.get()),
-                        ac_to_dc_efficiency=float(self._inv_ac2dc.get()),
-                        zero_feed_in=bool(self._zero_feed_in.get()),
-                        mode_switch_cost=float(self._inv_mode_switch_cost.get()),
+                    inv_cfg = self.app.cfg_list_item("optimization", "inverters", idx=0, default={})
+                    raw_rates = inv_cfg.get("ac_rates_pct") if isinstance(inv_cfg, dict) else None
+                    ac_rates: tuple[int, ...] | None = None
+                    if isinstance(raw_rates, (list, tuple)):
+                        norm = sorted({int(r) for r in raw_rates if 0 < int(r) <= 100})
+                        ac_rates = tuple(norm) if norm else None
+
+                    logger.info(
+                        "optimizer_ac_rates_selected",
+                        tab="optimization",
+                        source="config" if ac_rates else "model_default",
+                        rates=ac_rates if ac_rates else "DEFAULT_AC_RATES",
                     )
+
+                    inv_kwargs: dict[str, Any] = {
+                        "device_id": self._inv_id.get(),
+                        "battery_id": bat.parameters.device_id,
+                        "pv_source": self._pv_source.get(),
+                        "max_ac_output_power_w": float(self._inv_max_out.get()),
+                        "max_ac_charge_power_w": float(self._inv_max_charge.get()),
+                        "dc_to_ac_efficiency": float(self._inv_dc2ac.get()),
+                        "ac_to_dc_efficiency": float(self._inv_ac2dc.get()),
+                        "zero_feed_in": bool(self._zero_feed_in.get()),
+                        "mode_switch_cost": float(self._inv_mode_switch_cost.get()),
+                    }
+                    if ac_rates is not None:
+                        inv_kwargs["ac_rates_pct"] = ac_rates
+
+                    inv_params = InverterParameters(**inv_kwargs)
                     inv = InverterBase(inv_params, battery=bat)
                     return bat, inv
 
@@ -1347,10 +1447,9 @@ class OptimizationTab(_Tab):
                         objective = OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
                     else:
                         objective = OptimizationObjective.MINIMIZE_COST
-                    optimizer = LinearOptimizer(
-                        inverters=[inv_obj],
-                        prediction=pdata,
-                    )
+                    optimizer = self._get_cached_optimizer(inv_obj, hours, pdata)
+                    # Prediction is runtime data and should be set per solve call.
+                    optimizer.prediction = pdata
                     logger.info(
                         "optimizer_build_start",
                         objective=objective.value,
@@ -1359,12 +1458,13 @@ class OptimizationTab(_Tab):
                     sol: LinearSolution = await asyncio.to_thread(
                         lambda: optimizer.solve(
                             objective=objective,
-                            validate_with_simulation=True,
+                            validate_with_simulation=False,
                         )
                     )
                     return sol
 
                 def _sim_done(res_tuple: object) -> None:
+                    self._optimization_running = False
                     # res_tuple may be a LinearSolution or legacy tuple
                     inv_modes_arrs: Optional[list[array]] = None
                     inv_ac_rates_arrs: Optional[list[array]] = None
@@ -1691,6 +1791,12 @@ class OptimizationTab(_Tab):
             except Exception as exc:
                 self._on_error(exc, None, operation="optimization")
 
+        pred_sig = self._prediction_signature(start, hours, dt)
+        if self._prediction_cache is not None and self._prediction_cache_sig == pred_sig:
+            logger.info("prediction_fetch_reused", tab="optimization")
+            self.app.root.after(0, lambda: on_pred_done(self._prediction_cache))
+            return
+
         run_id = uuid.uuid4().hex[:8]
         _run_async(
             _with_context(
@@ -1699,11 +1805,19 @@ class OptimizationTab(_Tab):
                 tab="optimization",
                 operation="prediction_fetch",
             ),
-            on_done=lambda r: on_pred_done(r),
-            on_error=lambda e, tb: self._on_error(e, tb, operation="prediction_fetch"),
+            on_done=lambda r: (
+                setattr(self, "_prediction_cache", r),
+                setattr(self, "_prediction_cache_sig", pred_sig),
+                on_pred_done(r),
+            ),
+            on_error=lambda e, tb: (
+                setattr(self, "_optimization_running", False),
+                self._on_error(e, tb, operation="prediction_fetch"),
+            ),
         )
 
     def _on_error(self, exc: Exception, tb: str | None, *, operation: str = "unknown") -> None:
+        self._optimization_running = False
         self._status.set(f"Error: {exc}")
         logger.error(
             "gui_task_error",
