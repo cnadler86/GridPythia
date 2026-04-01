@@ -1,42 +1,21 @@
 """Energy-Charts electricity price provider.
 
-Caching strategy
-----------------
-Day-ahead prices are published by ENTSO-E around 12:00-13:00 CET each day.
-The provider fetches complete calendar days (from midnight of the first
-requested date to midnight of the last) and stores the result in a single
-in-memory price map.
+This provider uses a generic time-bucket cache with source-validity metadata.
+Real API values carry a validity timestamp (the newest fetched real timestamp).
+Any synthesized extension (forecast) inherits that same source validity timestamp.
 
-Cache invalidation rules (checked on every ``fetch()`` call):
+Refresh is transactional:
 
-1. Cache is empty.
-2. The requested date range is not fully covered by the cached date range.
-3. **Poll window** - all three conditions are true simultaneously:
+1. Fetch raw API values.
+2. Build a candidate map that covers the requested window plus horizon buffer.
+3. Commit cache only when step 2 succeeded.
 
-   - The real current time (``datetime.now(UTC)``) is *beyond* the last
-     real API timestamp in the cache, meaning cached real prices no longer
-     cover "now".
-   - The real current time falls *within* the requested series
-     (``requested_start ≤ now ≤ requested_end``).
-   - The real current time is at or after **12:30 UTC** - the earliest
-     realistic day-ahead publication time.
+If a refresh fails:
+  - If the previous cache still covers the requested range, it is served.
+  - Otherwise, an error is raised for the decorator chain to handle fallback.
 
-Outside that narrow publishing window the cache is served as-is, avoiding
-repeated API calls.  Once new day-ahead data extends ``_last_real_ts``
-beyond ``now``, the poll condition becomes false and no further fetches
-happen until the next publication cycle.
-
-Price map construction
-----------------------
-Real API prices cover the available portion of the requested window.
-Any remaining future slots (up to ``last_real_ts + horizon_buffer``) are
-filled by ETS (``statsmodels``, optional) or a median fallback.
-
-Concurrency
------------
-An ``asyncio.Lock`` serialises rebuilds so that concurrent ``fetch()``
-callers do not each trigger a separate API round-trip.  A double-checked
-pattern avoids unnecessary lock contention on the hot path.
+Errors are propagated to allow decorator-based fallback chains (e.g.,
+FallbackProvider) to switch to alternative providers.
 """
 
 import asyncio
@@ -47,12 +26,18 @@ import polars as pl
 from pydantic import BaseModel, Field, field_validator
 from structlog import get_logger
 
+from GridPythia.prediction.cache import TimeBucketCache, to_utc
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 
 logger = get_logger(__name__)
 
 _HISTORY_WINDOW = timedelta(days=15)
 _HORIZON_BUFFER_DEFAULT = timedelta(hours=25)
+
+# Day-ahead prices are published once per day around 12:30–12:45 UTC.
+_DAY_AHEAD_PUB_HOUR = 12
+_DAY_AHEAD_PUB_MINUTE = 30  # check from 12:30; publication usually at ~12:45
+_RETRY_AFTER_FAILED_REFRESH = timedelta(minutes=15)
 
 
 class EnergyChartsConfig(BaseModel):
@@ -74,8 +59,7 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
     """Fetch day-ahead electricity prices from the Energy-Charts API.
 
     Prices beyond the last available API timestamp are extended using
-    Exponential Smoothing (requires ``statsmodels``, optional) or a simple
-    median fallback.
+    Exponential Smoothing (requires ``statsmodels``, optional).
 
     Parameters
     ----------
@@ -106,15 +90,13 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         self._vat_rate = config.vat_rate
         self._horizon_buffer = config.horizon_buffer
 
-        # ── cache state ───────────────────────────────────────────────
-        # bucket = unix_timestamp // 900  (15-min granularity)
-        self._price_map: dict[int, float] = {}
-        # Last real (API-provided) timestamp in the price map; everything
-        # beyond this was filled by ETS/median forecast.
+        self._cache = TimeBucketCache(bucket_seconds=900)
+        # Compatibility aliases used by existing tests.
+        self._price_map: dict[int, float] = self._cache.values
         self._last_real_ts: datetime | None = None
-        # Calendar-day bounds of the currently cached window.
         self._cache_start_day: date | None = None
         self._cache_end_day: date | None = None
+        self._min_history_points = 8
         self._lock = asyncio.Lock()
 
     @property
@@ -181,8 +163,8 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
                 )
                 # Ensure forecasts are non-negative (floor at 0.0)
                 return [max(0.0, float(v)) for v in model.forecast(steps)]
-        except Exception:  # noqa: S110
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ets_forecast_failed_using_median", error=str(exc))
         from statistics import median
 
         med = median(history) if history else 0.0
@@ -191,164 +173,225 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
 
     # ── cache management ──────────────────────────────────────────────
 
+    def _next_pub_time(self, now_utc: datetime) -> datetime:
+        """Return the next expected day-ahead publication time (rolling 12:30 UTC)."""
+        today_pub = now_utc.replace(
+            hour=_DAY_AHEAD_PUB_HOUR, minute=_DAY_AHEAD_PUB_MINUTE, second=0, microsecond=0
+        )
+        if now_utc < today_pub:
+            return today_pub
+        return today_pub + timedelta(days=1)
+
+    def _compute_source_valid_until(self, now_utc: datetime, last_real_ts: datetime) -> datetime:
+        """Return until-when the newly fetched data is valid.
+
+        Day-ahead prices for the next delivery day are published around 12:30–12:45 UTC.
+
+        * If *last_real_ts* is **beyond tomorrow's** publication time we already have
+          next-day prices.  The cache is valid until that deadline (tomorrow 12:30 UTC)
+          because that is when fresher prices will supersede ours.
+        * If we only have today's prices and we are **before** today's publication time,
+          the cache is valid until today's publication time (we re-check then).
+        * If we only have today's prices but we are already **past** today's publication
+          time, the publication is delayed; we set a short retry window so we check
+          again soon instead of waiting until tomorrow.
+        """
+        tomorrow = (now_utc + timedelta(days=1)).date()
+        tomorrow_pub = datetime(
+            tomorrow.year,
+            tomorrow.month,
+            tomorrow.day,
+            _DAY_AHEAD_PUB_HOUR,
+            _DAY_AHEAD_PUB_MINUTE,
+            tzinfo=timezone.utc,
+        )
+        if last_real_ts > tomorrow_pub:
+            # We have next-day prices → valid until tomorrow's publication.
+            return tomorrow_pub
+
+        # Only today's (or earlier) prices.
+        today_pub = now_utc.replace(
+            hour=_DAY_AHEAD_PUB_HOUR, minute=_DAY_AHEAD_PUB_MINUTE, second=0, microsecond=0
+        )
+        if now_utc >= today_pub:
+            # Past today's publication window but still no next-day prices →
+            # publication is delayed; schedule a short retry.
+            return now_utc + _RETRY_AFTER_FAILED_REFRESH
+
+        # Before today's publication time → valid until then.
+        return today_pub
+
     def _needs_refresh(
         self, now_utc: datetime, requested_start: datetime, requested_end: datetime
     ) -> bool:
-        """Return True when the price map must be rebuilt before serving.
-
-        Rebuild if:
-
-        - the cache is empty,
-        - the requested date range is not fully covered by the cache, or
-        - the poll window is open: ``now_utc`` is past the last real API
-          data point, falls within the requested series, and is at or
-          after 12:30 UTC (earliest realistic day-ahead publication time).
-        """
-        if not self._price_map:
+        """Return True when cache should be refreshed before serving."""
+        if not self._cache.has_data():
             return True
-        if (
-            self._cache_start_day is None
-            or self._cache_end_day is None
-            or requested_start.date() < self._cache_start_day
-            or requested_end.date() > self._cache_end_day
-        ):
+        if not self._cache.covers(requested_start, requested_end):
             return True
-        if (
-            self._last_real_ts is not None
-            and (now_utc + timedelta(days=1)) > self._last_real_ts
-            and requested_start <= now_utc <= requested_end
-            and (now_utc.hour > 12 or (now_utc.hour == 12 and now_utc.minute >= 30))
-        ):
+        if self._cache.source_valid_until is not None and now_utc >= self._cache.source_valid_until:
             logger.debug(
-                "poll_window_open",
-                now_utc=now_utc.strftime("%H:%M"),
-                last_real_ts=self._last_real_ts.strftime("%Y-%m-%dT%H:%M"),
+                "cache_stale",
+                now_utc=now_utc.isoformat(),
+                source_valid_until=self._cache.source_valid_until.isoformat(),
             )
             return True
         return False
 
-    async def _refresh(
-        self, now_utc: datetime, requested_start: datetime, requested_end: datetime
-    ) -> None:
-        """Fetch full calendar days and rebuild the price map.
-
-        Fetches from midnight of *requested_start*'s day through 23:59 of
-        *requested_end*'s day.  ``_last_real_ts`` is set to the maximum
-        timestamp returned by the API; forecast slots are appended up to
-        ``_last_real_ts + horizon_buffer``.
-        """
-        map_start = requested_start.replace(hour=0, minute=0, second=0, microsecond=0)
-        hist_start = now_utc - _HISTORY_WINDOW
-        fetch_end = requested_end.replace(hour=23, minute=59, second=0, microsecond=0)
-
-        logger.debug(
-            "energy_charts_polling",
-            bidding_zone=self._bidding_zone,
-            history_start=hist_start.strftime("%Y-%m-%dT%H:%M"),
-            map_start=map_start.strftime("%Y-%m-%dT%H:%M"),
-            fetch_end=fetch_end.strftime("%Y-%m-%dT%H:%M"),
-        )
-        raw = await self._request_prices(hist_start, fetch_end)
-
-        if not raw:
-            logger.warning("energy_charts_no_data", bidding_zone=self._bidding_zone)
-            return
-
-        last_real_ts = max(dt for dt, _ in raw)
-
-        if self._last_real_ts is not None and last_real_ts <= self._last_real_ts:
-            # Only skip rebuilding the cache if the requested range is
-            # already fully covered by the existing cached window. If the
-            # requested range extends beyond the cached days we must rebuild
-            # (even if no newer API data was found) so that the price map
-            # covers the requested timestamps.
-            if (
-                self._cache_start_day is not None
-                and self._cache_end_day is not None
-                and requested_start.date() >= self._cache_start_day
-                and requested_end.date() <= self._cache_end_day
-            ):
-                logger.debug(
-                    "energy_charts_cache_hit",
-                    cached_last_real_ts=self._last_real_ts.strftime("%Y-%m-%dT%H:%M"),
-                    fetched_last_real_ts=last_real_ts.strftime("%Y-%m-%dT%H:%M"),
-                )
-                return
-        horizon_end = max(last_real_ts + self._horizon_buffer, fetch_end)
-
-        logger.info(
-            "energy_charts_refresh_complete",
-            real_data_points=len(raw),
-            last_real_ts=last_real_ts.strftime("%Y-%m-%dT%H:%M"),
-            forecast_until=horizon_end.strftime("%Y-%m-%dT%H:%M"),
-            horizon_buffer_h=self._horizon_buffer.total_seconds() / 3600,
-        )
-        self._build_price_map(raw, map_start, horizon_end)
-        self._last_real_ts = last_real_ts
-        self._cache_start_day = requested_start.date()
-        self._cache_end_day = requested_end.date()
-
     def _build_price_map(
-        self, raw: list[tuple[datetime, float]], map_start: datetime, horizon_end: datetime
-    ) -> None:
-        """Populate ``_price_map`` from *raw* API data plus ETS/median forecast.
+        self,
+        raw: list[tuple[datetime, float]],
+        map_start: datetime,
+        horizon_end: datetime,
+        fallback_map: dict[int, float],
+    ) -> tuple[dict[int, float], int, int, int]:
+        """Build a complete 15-minute map for ``[map_start, horizon_end]``.
 
-        The map covers ``[map_start, horizon_end]`` at 15-minute granularity.
-        Slots present in *raw* use the real API price; remaining slots are
-        filled by :meth:`_forecast`.
+        Missing slots are filled in this order:
+
+        1. Existing cache values (same bucket).
+        2. Forecast from fresh history values.
+
+        Raises:
+            ValueError: If resulting map cannot fully cover the target range.
         """
         start_bucket = int(map_start.timestamp()) // 900
         end_bucket = int(horizon_end.timestamp()) // 900
-        total_slots = end_bucket - start_bucket + 1
-        target_buckets = [start_bucket + i for i in range(total_slots)]
+        target_buckets = list(range(start_bucket, end_bucket + 1))
 
-        # Separate history (for ETS input) from API-covered future buckets
-        history: list[float] = []
         lookup: dict[int, float] = {}
-        for dt, price in raw:
-            b = int(dt.timestamp()) // 900
+        history: list[float] = []
+        for dt, price in sorted(raw, key=lambda item: item[0]):
+            b = int(to_utc(dt).timestamp()) // 900
             history.append(price)
             if b >= start_bucket:
                 lookup[b] = price
 
         new_map: dict[int, float] = {}
-        missing_pos: list[int] = []
-        for i, b in enumerate(target_buckets):
+        missing_buckets: list[int] = []
+        fallback_hits = 0
+
+        for b in target_buckets:
             if b in lookup:
                 new_map[b] = lookup[b]
-            else:
-                missing_pos.append(i)
+                continue
+            fallback_val = fallback_map.get(b)
+            if fallback_val is not None:
+                new_map[b] = fallback_val
+                fallback_hits += 1
+                continue
+            missing_buckets.append(b)
 
-        api_hits = len(new_map)
-
-        if missing_pos and history:
+        if missing_buckets:
+            if len(history) < self._min_history_points:
+                raise ValueError(
+                    f"Insufficient fresh history for forecast: {len(history)} points "
+                    f"(< {self._min_history_points})"
+                )
             logger.debug(
                 "energy_charts_forecasting_slots",
-                missing_slots=len(missing_pos),
-                total_slots=total_slots,
+                missing_slots=len(missing_buckets),
+                total_slots=len(target_buckets),
             )
-            forecast = self._forecast(history, len(missing_pos))
-            for pos, fc_val in zip(missing_pos, forecast, strict=False):
-                new_map[target_buckets[pos]] = fc_val
-        elif missing_pos:
-            logger.warning(
-                "energy_charts_no_history_for_forecast",
-                missing_slots=len(missing_pos),
-            )
+            forecast = self._forecast(history, len(missing_buckets))
+            for b, fc_val in zip(missing_buckets, forecast, strict=False):
+                new_map[b] = fc_val
 
-        # Apply configured charges and VAT to every slot once here so the
-        # in-memory price map contains final end-prices.
+        if len(new_map) != len(target_buckets):
+            raise ValueError("Could not build a fully covered price map.")
+
         charges_wh = self._charges_kwh / 1000.0
         if charges_wh != 0.0 or self._vat_rate != 0.0:
             for k in list(new_map.keys()):
                 new_map[k] = (new_map[k] + charges_wh) * (1 + self._vat_rate)
 
-        self._price_map = new_map
+        api_hits = sum(1 for b in target_buckets if b in lookup)
+        forecast_hits = len(missing_buckets)
+        return new_map, api_hits, forecast_hits, fallback_hits
+
+    async def _refresh(
+        self, now_utc: datetime, requested_start: datetime, requested_end: datetime
+    ) -> None:
+        """Fetch fresh data and transactionally rebuild cache.
+
+        Fetch window logic:
+        - Expand requested window with history for forecast context and current-day context.
+        - Replace cache entirely with new data (no fallback to old cache values).
+        - If fetch does not cover the requested range, raise to let fallbacks handle it.
+        """
+        # Expand fetch window: history for forecast context, horizon for forecasted slots
+        fetch_start = requested_start - _HISTORY_WINDOW
+        fetch_end = requested_end + self._horizon_buffer
+
+        logger.debug(
+            "energy_charts_polling",
+            bidding_zone=self._bidding_zone,
+            fetch_start=fetch_start.strftime("%Y-%m-%dT%H:%M"),
+            fetch_end=fetch_end.strftime("%Y-%m-%dT%H:%M"),
+            requested_start=requested_start.strftime("%Y-%m-%dT%H:%M"),
+            requested_end=requested_end.strftime("%Y-%m-%dT%H:%M"),
+        )
+        raw = await self._request_prices(fetch_start, fetch_end)
+
+        if not raw:
+            raise ValueError("Energy-Charts returned no usable data.")
+
+        last_real_ts = max(to_utc(dt) for dt, _ in raw)
+
+        # Determine coverage bounds from fetched data
+        map_start = min(to_utc(dt) for dt, _ in raw)
+        map_end = max(to_utc(dt) for dt, _ in raw)
+
+        # Horizon extends to ensure we have buffer for forecasts
+        horizon_end = max(map_end, requested_end) + self._horizon_buffer
+
+        # Build price map without fallback to old cache (complete replacement)
+        new_map, api_hits, forecast_hits, fallback_hits = self._build_price_map(
+            raw=raw,
+            map_start=map_start,
+            horizon_end=horizon_end,
+            fallback_map={},  # No fallback to old cache; replace entirely
+        )
+
+        # Verify that the new cache covers at least the start of the requested range
+        # (remaining gaps into the future will be filled by forecast)
+        if map_start > requested_start:
+            raise ValueError(
+                f"Fetched data starts at {map_start} but requested range starts at "
+                f"{requested_start}; cannot cover historical gap."
+            )
+
+        source_valid_until = self._compute_source_valid_until(now_utc, last_real_ts)
+        self._cache.update(
+            values=new_map,
+            coverage_start=map_start,
+            coverage_end=horizon_end,
+            source_valid_until=source_valid_until,
+        )
+
+        # Compatibility aliases used by existing tests.
+        self._price_map = self._cache.values
+        self._last_real_ts = last_real_ts
+        self._cache_start_day = (
+            self._cache.coverage_start.date() if self._cache.coverage_start else None
+        )
+        self._cache_end_day = self._cache.coverage_end.date() if self._cache.coverage_end else None
+
         logger.info(
-            "energy_charts_price_map_ready",
+            "energy_charts_refresh_complete",
+            real_data_points=len(raw),
+            source_valid_until=source_valid_until.strftime("%Y-%m-%dT%H:%M"),
+            last_real_api_ts=last_real_ts.strftime("%Y-%m-%dT%H:%M"),
+            coverage_start=self._cache.coverage_start.strftime("%Y-%m-%dT%H:%M")
+            if self._cache.coverage_start
+            else None,
+            coverage_end=self._cache.coverage_end.strftime("%Y-%m-%dT%H:%M")
+            if self._cache.coverage_end
+            else None,
             api_slots=api_hits,
-            forecast_slots=len(missing_pos),
-            coverage_hours=total_slots * 0.25,
+            forecast_slots=forecast_hits,
+            fallback_slots=fallback_hits,
+            horizon_buffer_h=self._horizon_buffer.total_seconds() / 3600,
         )
 
     # ── public API ────────────────────────────────────────────────────
@@ -362,27 +405,41 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         """
         ts_list: list[datetime] = timestamps.to_list()
 
-        def _to_utc(dt: datetime) -> datetime:
-            return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-        requested_start = _to_utc(ts_list[0])
-        requested_end = _to_utc(ts_list[-1])
+        requested_start = to_utc(ts_list[0])
+        requested_end = to_utc(ts_list[-1])
         now_utc = datetime.now(timezone.utc)
 
-        # Fast path: avoid lock acquisition when no refresh is required
         if self._needs_refresh(now_utc, requested_start, requested_end):
             async with self._lock:
-                # Re-check inside the lock – another coroutine may have just
-                # finished a refresh while we were waiting
                 if self._needs_refresh(now_utc, requested_start, requested_end):
-                    await self._refresh(now_utc, requested_start, requested_end)
+                    try:
+                        await self._refresh(now_utc, requested_start, requested_end)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "energy_charts_refresh_failed_cache_fallback",
+                            error=str(exc),
+                            cache_covers_request=self._cache.covers(requested_start, requested_end),
+                        )
+                        if not self._cache.covers(requested_start, requested_end):
+                            raise RuntimeError(
+                                "Energy-Charts refresh failed and cache does not cover request."
+                            ) from exc
+                        # Cache still covers; schedule a short retry to avoid
+                        # hammering the API while the publication is delayed.
+                        retry_at = now_utc + _RETRY_AFTER_FAILED_REFRESH
+                        if (
+                            self._cache.source_valid_until is None
+                            or retry_at < self._cache.source_valid_until
+                        ):
+                            self._cache.source_valid_until = retry_at
 
-        # Serve from the price map (pure in-memory, no I/O)
+        if not self._cache.covers(requested_start, requested_end):
+            raise RuntimeError("Energy-Charts cache does not cover requested timestamps.")
+
         result: list[float] = []
         cache_misses = 0
         for ts in ts_list:
-            b = int(_to_utc(ts).timestamp()) // 900
-            val = self._price_map.get(b)
+            val = self._cache.value_at(ts)
             if val is None:
                 cache_misses += 1
                 val = 0.0

@@ -1,6 +1,6 @@
 """Tests for electricity price providers."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import polars as pl
@@ -8,6 +8,7 @@ import pytest
 
 from GridPythia.prediction.base import make_timestamps
 from GridPythia.prediction.electricprice.fixed import ElecPriceFixed, TimeWindow
+from GridPythia.prediction.electricprice.provider import ElecPriceFallbackChain
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 
@@ -55,6 +56,33 @@ class TestElecPriceFixed:
         result = await ElecPriceFixed().fetch(_ts())
         assert isinstance(result, pl.Series)
         assert result.dtype == pl.Float32
+
+
+class _FailingElecPriceProvider(ElecPriceFixed):
+    @property
+    def provider_id(self) -> str:
+        return "FailingElecPrice"
+
+    async def fetch(self, timestamps: pl.Series) -> pl.Series:
+        raise RuntimeError("primary provider failed")
+
+
+class TestElecPriceFallbackChain:
+    async def test_uses_primary_when_primary_succeeds(self):
+        primary = ElecPriceFixed(price_kwh=0.25)
+        fallback = ElecPriceFixed(price_kwh=0.40)
+        provider = ElecPriceFallbackChain(primary=primary, fallback=fallback)
+
+        result = await provider.fetch(_ts(hours=2))
+        assert all(v == pytest.approx(0.25 / 1000.0) for v in result.to_list())
+
+    async def test_switches_to_fallback_when_primary_raises(self):
+        primary = _FailingElecPriceProvider()
+        fallback = ElecPriceFixed(price_kwh=0.40)
+        provider = ElecPriceFallbackChain(primary=primary, fallback=fallback)
+
+        result = await provider.fetch(_ts(hours=2))
+        assert all(v == pytest.approx(0.40 / 1000.0) for v in result.to_list())
 
 
 class TestElecPriceEnergyChartsCache:
@@ -130,35 +158,23 @@ class TestElecPriceEnergyChartsCache:
 
         assert provider._request_prices.call_count == 1
 
-    async def test_poll_interval_triggers_recheck(self):
-        """After poll_interval expires the provider re-checks Energy-Charts."""
-        from datetime import timedelta
-        from unittest.mock import patch
-
+    async def test_expired_source_validity_triggers_recheck(self):
+        """When source_valid_until is in the past, the provider re-fetches."""
         provider = self._provider()
-        # Use a deterministic 'now' in the early afternoon so the poll
-        # window condition (after 12:30 UTC) can be satisfied reliably.
-        now = datetime.now(timezone.utc).replace(hour=13, minute=0, second=0, microsecond=0)
-        # Short future coverage so that last_real_ts < now + 1 day and a
-        # recheck becomes possible when time advances.
-        raw = self._make_raw(now, n_future=4)
+        now = datetime.now(timezone.utc)
+        raw = self._make_raw(now)
         provider._request_prices = AsyncMock(return_value=raw)
 
         ts = make_timestamps(now, hours=24, dt_hours=1.0)
-        # First call
         await provider.fetch(ts)
         assert provider._request_prices.call_count == 1
 
-        # Simulate time has passed beyond poll by patching the module's
-        # `datetime.now()` so the provider sees the bumped current time
-        # and decides to recheck.
-        expired = now + timedelta(minutes=31)
-        ts_expired = make_timestamps(expired, hours=24, dt_hours=1.0)
-        with patch("GridPythia.prediction.electricprice.energycharts.datetime") as mock_dt:
-            mock_dt.now.return_value = expired
-            await provider.fetch(ts_expired)
+        # Manually expire source validity to force a re-check on next fetch.
+        provider._cache.source_valid_until = now - timedelta(seconds=1)
 
-        assert provider._request_prices.call_count == 2
+        provider._request_prices = AsyncMock(return_value=self._make_raw(now))
+        await provider.fetch(ts)
+        assert provider._request_prices.call_count == 1  # new mock, one call
 
     async def test_unchanged_ec_data_keeps_existing_map(self):
         """When EC max bucket does not advance, the price map is not rebuilt."""
@@ -182,9 +198,7 @@ class TestElecPriceEnergyChartsCache:
         from datetime import timedelta
 
         provider = self._provider()
-        # Use a deterministic afternoon time so the poll window can trigger
-        # when we advance the perceived current time.
-        now = datetime.now(timezone.utc).replace(hour=13, minute=0, second=0, microsecond=0)
+        now = datetime.now(timezone.utc)
 
         raw_day1 = self._make_raw(now, n_future=24 * 4, base_price=10.0)
         raw_day2 = self._make_raw(now, n_future=48 * 4, base_price=20.0)  # more future + higher
@@ -196,14 +210,9 @@ class TestElecPriceEnergyChartsCache:
         bucket1 = int(ts.to_list()[0].timestamp()) // 900
         price1 = provider._price_map.get(bucket1, 0.0)
 
-        # Advance perceived current time so the provider re-checks and
-        # fetches fresh data (side_effect returns raw_day2).
-        later = now + timedelta(hours=2)
-        from unittest.mock import patch
-
-        with patch("GridPythia.prediction.electricprice.energycharts.datetime") as mock_dt:
-            mock_dt.now.return_value = later
-            result2 = await provider.fetch(ts)
+        # Expire source validity to force re-check and fetch raw_day2.
+        provider._cache.source_valid_until = now - timedelta(seconds=1)
+        result2 = await provider.fetch(ts)
 
         price2 = provider._price_map.get(bucket1, 0.0)
 
@@ -233,22 +242,20 @@ class TestElecPriceEnergyChartsCache:
 
     async def test_coverage_gap_triggers_refresh(self):
         """If requested timestamps exceed cache horizon a refresh is triggered."""
-        from datetime import timedelta
-
-        # Small buffer (6 h) so we can easily exceed it:
-        # ts_short last = now+3h → map covers [now, now+9h].
-        # ts_long last = now+23h > now+9h → cache miss → refresh.
+        # With the transactional cache build, coverage starts at midnight and
+        # can extend well beyond the immediate request. We therefore request a
+        # much longer window to force a true coverage miss.
         provider = self._provider(buffer_hours=6)
         now = datetime.now(timezone.utc)
-        raw = self._make_raw(now, n_future=30 * 4)  # 30 h covers 3 h last_ts + 6 h buffer + slack
+        raw = self._make_raw(now, n_future=30 * 4)
         provider._request_prices = AsyncMock(return_value=raw)
 
         ts_short = make_timestamps(now, hours=4, dt_hours=1.0)
         await provider.fetch(ts_short)
         assert provider._request_prices.call_count == 1
 
-        # Now ask for timestamps far beyond the map horizon
-        ts_long = make_timestamps(now, hours=24, dt_hours=1.0)
+        # Ask for timestamps clearly beyond the first cache horizon.
+        ts_long = make_timestamps(now, hours=72, dt_hours=1.0)
         provider._request_prices = AsyncMock(return_value=self._make_raw(now, n_future=50 * 4))
         await provider.fetch(ts_long)
         assert provider._request_prices.call_count == 1  # new mock, fresh counter
@@ -311,17 +318,75 @@ class TestElecPriceEnergyChartsCache:
         assert call_count == 1
         assert all(len(r) == 24 for r in results)
 
-    async def test_empty_api_response_returns_zeros(self):
-        """If the API returns no data, fetch() returns all-zero prices."""
+    async def test_empty_api_response_without_cache_raises(self):
+        """Without usable cache, an empty API response raises a clear error."""
         provider = self._provider()
         provider._request_prices = AsyncMock(return_value=[])
 
         now = datetime.now(timezone.utc)
         ts = make_timestamps(now, hours=6, dt_hours=1.0)
-        result = await provider.fetch(ts)
+        with pytest.raises(RuntimeError, match="refresh failed"):
+            await provider.fetch(ts)
 
-        assert len(result) == 6
-        assert all(v == pytest.approx(0.0) for v in result.to_list())
+    async def test_refresh_error_uses_existing_covering_cache(self):
+        """If refresh fails later, provider serves still-covering cache."""
+        provider = self._provider()
+        now = datetime.now(timezone.utc)
+        raw = self._make_raw(now, n_history=400, n_future=40 * 4)
+
+        # Initial successful fill
+        provider._request_prices = AsyncMock(return_value=raw)
+        ts = make_timestamps(now, hours=12, dt_hours=1.0)
+        warm = await provider.fetch(ts)
+        assert all(v > 0.0 for v in warm.to_list())
+
+        # Expire source validity to force a re-check that will fail.
+        provider._request_prices = AsyncMock(side_effect=RuntimeError("network down"))
+        provider._cache.source_valid_until = now - timedelta(seconds=1)
+        cached = await provider.fetch(ts)
+        assert len(cached) == 12
+        assert all(v > 0.0 for v in cached.to_list())
+
+    async def test_refresh_error_without_cache_raises(self):
+        """If EnergyCharts fails and cache is empty, error is raised for decorator chain."""
+        from datetime import timedelta
+        from GridPythia.prediction.electricprice.energycharts import (
+            ElecPriceEnergyCharts,
+            EnergyChartsConfig,
+        )
+
+        provider = ElecPriceEnergyCharts(
+            EnergyChartsConfig(horizon_buffer=timedelta(hours=12)),
+        )
+        provider._request_prices = AsyncMock(side_effect=RuntimeError("network down"))
+
+        now = datetime.now(timezone.utc)
+        ts = make_timestamps(now, hours=6, dt_hours=1.0)
+        
+        # Without cache, refresh error should propagate
+        with pytest.raises(RuntimeError, match="Energy-Charts refresh failed"):
+            await provider.fetch(ts)
+
+    async def test_too_few_fresh_points_uses_cache_fallback_slots(self):
+        """Sparse fresh fetch can still succeed by reusing cached buckets."""
+        provider = self._provider(buffer_hours=24)
+        now = datetime.now(timezone.utc)
+
+        # Build a solid initial cache.
+        raw_full = self._make_raw(now, n_history=400, n_future=60 * 4)
+        provider._request_prices = AsyncMock(return_value=raw_full)
+        ts = make_timestamps(now, hours=24, dt_hours=1.0)
+        first = await provider.fetch(ts)
+        assert all(v > 0.0 for v in first.to_list())
+
+        # Next refresh only returns very few fresh points.
+        sparse = raw_full[-2:]
+        provider._request_prices = AsyncMock(return_value=sparse)
+        provider._cache.source_valid_until = now - timedelta(seconds=1)
+
+        second = await provider.fetch(ts)
+        assert len(second) == 24
+        assert second.null_count() == 0
 
     async def test_charges_and_vat_applied(self):
         """charges_kwh and vat_rate are factored into the cached prices."""
@@ -349,6 +414,66 @@ class TestElecPriceEnergyChartsCache:
         charges_wh = provider._charges_kwh / 1000.0
         expected = (raw_price_wh + charges_wh) * (1+provider._vat_rate)
         assert all(v == pytest.approx(expected, rel=1e-3) for v in result.to_list())
+
+
+class TestEnergyChartsSourceValidUntil:
+    """Unit tests for _compute_source_valid_until publication-time semantics."""
+
+    @staticmethod
+    def _provider():
+        from GridPythia.prediction.electricprice.energycharts import (
+            ElecPriceEnergyCharts,
+            EnergyChartsConfig,
+        )
+        return ElecPriceEnergyCharts(EnergyChartsConfig())
+
+    def test_before_pub_today_data_valid_until_today_pub(self):
+        """5 am with only today's prices → valid until today 12:30 UTC."""
+        from GridPythia.prediction.electricprice.energycharts import (
+            _DAY_AHEAD_PUB_HOUR,
+            _DAY_AHEAD_PUB_MINUTE,
+        )
+
+        provider = self._provider()
+        today = datetime(2025, 6, 15, tzinfo=timezone.utc)
+        now = today.replace(hour=5, minute=0)
+        last_real_ts = today.replace(hour=23, minute=45)  # only today's prices
+
+        result = provider._compute_source_valid_until(now, last_real_ts)
+        expected = today.replace(
+            hour=_DAY_AHEAD_PUB_HOUR, minute=_DAY_AHEAD_PUB_MINUTE, second=0, microsecond=0
+        )
+        assert result == expected
+
+    def test_after_pub_next_day_data_valid_until_tomorrow_pub(self):
+        """2 pm with next-day prices → valid until tomorrow 12:30 UTC."""
+        from GridPythia.prediction.electricprice.energycharts import (
+            _DAY_AHEAD_PUB_HOUR,
+            _DAY_AHEAD_PUB_MINUTE,
+        )
+
+        provider = self._provider()
+        today = datetime(2025, 6, 15, tzinfo=timezone.utc)
+        now = today.replace(hour=14, minute=0)
+        last_real_ts = (today + timedelta(days=1)).replace(hour=23, minute=45)
+
+        result = provider._compute_source_valid_until(now, last_real_ts)
+        expected = (today + timedelta(days=1)).replace(
+            hour=_DAY_AHEAD_PUB_HOUR, minute=_DAY_AHEAD_PUB_MINUTE, second=0, microsecond=0
+        )
+        assert result == expected
+
+    def test_after_pub_no_next_day_data_short_retry(self):
+        """2 pm, publication delayed, only today's prices → short retry window."""
+        from GridPythia.prediction.electricprice.energycharts import _RETRY_AFTER_FAILED_REFRESH
+
+        provider = self._provider()
+        today = datetime(2025, 6, 15, tzinfo=timezone.utc)
+        now = today.replace(hour=14, minute=0)
+        last_real_ts = today.replace(hour=23, minute=45)  # only today's despite being 2 pm
+
+        result = provider._compute_source_valid_until(now, last_real_ts)
+        assert result == now + _RETRY_AFTER_FAILED_REFRESH
 
 
 async def test_energycharts_fetch_today():
