@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field, field_validator
 _INVERTER_COUNTER = count(1)
 _BATTERY_COUNTER = count(1)
 
-# Default charge/discharge rates as percent values.
-DEFAULT_AC_RATES: tuple[int, ...] = tuple(range(5, 101, 5))
+# Default charge/discharge rates as percent values (10% steps).
+DEFAULT_AC_RATES: tuple[int, ...] = tuple(range(10, 101, 10))
 
 
 class BatteryParameters(BaseModel):

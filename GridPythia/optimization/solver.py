@@ -101,15 +101,12 @@ class LinearOptimizer:
         inverters: All inverters in the system. Topology determines which
             variables and constraints are instantiated per inverter.
         prediction: Aligned prediction channels for the horizon.
-        initial_modes: Prior inverter mode per device ID for correct t=0
-            mode-switch cost accounting.
     """
 
     def __init__(
         self,
         inverters: list[InverterBase],
         prediction: PredictionData,
-        initial_modes: Mapping[str, InverterMode | int] | None = None,
     ) -> None:
         self.inverters = inverters
         self.prediction = prediction
@@ -118,16 +115,6 @@ class LinearOptimizer:
             inverter_ids=[inv.device_id for inv in inverters],
             steps=prediction.steps,
         )
-        self.initial_modes: dict[str, InverterMode] = {}
-        for inv in self.inverters:
-            raw_mode = (
-                initial_modes.get(inv.device_id, InverterMode.IDLE)
-                if initial_modes is not None
-                else InverterMode.IDLE
-            )
-            self.initial_modes[inv.device_id] = (
-                raw_mode if isinstance(raw_mode, InverterMode) else InverterMode(int(raw_mode))
-            )
 
         min_load_wh = float(min(prediction.load_wh)) if prediction.steps > 0 else 1.0
         self._sc_model = FraunhoferSCModel(
@@ -140,10 +127,22 @@ class LinearOptimizer:
         objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
         solver_opts: dict | None = None,
         validate_with_simulation: bool = False,
+        initial_modes: Mapping[str, InverterMode | int] | None = None,
     ) -> LinearSolution:
         """Build MILP, solve with HiGHS, and return a :class:`LinearSolution`."""
         prep = self._prepare_inputs()
-        blocks, g_import, g_feedin, pv_self = self._build_problem(prep)
+        normalized_initial_modes: dict[str, InverterMode] = {}
+        for inv in self.inverters:
+            raw_mode = (
+                initial_modes.get(inv.device_id, InverterMode.IDLE)
+                if initial_modes is not None
+                else InverterMode.IDLE
+            )
+            normalized_initial_modes[inv.device_id] = (
+                raw_mode if isinstance(raw_mode, InverterMode) else InverterMode(int(raw_mode))
+            )
+
+        blocks, g_import, g_feedin, pv_self = self._build_problem(prep, normalized_initial_modes)
 
         terminal_value = self._estimate_terminal_value(prep, blocks)
         terminal_reward = self._terminal_reward(blocks, terminal_value)
@@ -271,6 +270,7 @@ class LinearOptimizer:
     def _build_problem(
         self,
         prep: _PreparedInputs,
+        initial_modes: Mapping[str, InverterMode],
     ) -> tuple[list[_InverterModelBlock], cp.Variable, cp.Variable, cp.Variable]:
         T = prep.T
 
@@ -289,7 +289,7 @@ class LinearOptimizer:
         mapped_pv_sources: set[str] = set()
 
         for inv in self.inverters:
-            block = self._build_inverter_block(inv, prep)
+            block = self._build_inverter_block(inv, prep, initial_modes)
             blocks.append(block)
 
             total_p_ch_terms.append(block.p_ch)
@@ -308,18 +308,24 @@ class LinearOptimizer:
         total_p_dc = self._sum_terms(total_p_dc_terms, prep.T)
         total_pv_ac = self._sum_terms(total_pv_ac_terms, prep.T)
 
+        # Precompute per-step linearisation coefficients.
+        # total_pv_ac.value is None before solve, so pv_0 always uses the load operating point.
+        c_pv_arr = np.empty(T, dtype=float)
+        rhs_arr = np.empty(T, dtype=float)
         for t in range(T):
-            pv0 = max(
-                float(total_pv_ac.value[t]) if total_pv_ac.value is not None else prep.load_wh[t],
-                1e-6,
-            )
             load0 = max(float(prep.load_wh[t]), 1e-6)
-            lc = self._sc_model.linearize(pv_0=pv0, load_0=load0)
-            rhs_fixed = lc.rhs_fixed_load(load=load0)
+            lc = self._sc_model.linearize(pv_0=load0, load_0=load0)
+            c_pv_arr[t] = lc.c_pv
+            rhs_arr[t] = lc.rhs_fixed_load(load=load0)
 
-            self._constraints.append(pv_self[t] - lc.c_pv * total_pv_ac[t] <= rhs_fixed)
-            self._constraints.append(pv_self[t] <= total_pv_ac[t])
-            self._constraints.append(pv_self[t] <= prep.load_wh[t])
+        # 3 vectorized array constraints instead of 3*T individual scalar constraints.
+        self._constraints.extend(
+            [
+                pv_self - cp.multiply(c_pv_arr, total_pv_ac) <= rhs_arr,
+                pv_self <= total_pv_ac,
+                pv_self <= prep.load_wh,
+            ]
+        )
 
         # Mirrors current simulation correction logic:
         # corrected_end_load = load + p_ch - p_dc + pv_ac - pv_self
@@ -330,7 +336,10 @@ class LinearOptimizer:
         return blocks, g_import, g_feedin, pv_self
 
     def _build_inverter_block(
-        self, inv: InverterBase, prep: _PreparedInputs
+        self,
+        inv: InverterBase,
+        prep: _PreparedInputs,
+        initial_modes: Mapping[str, InverterMode],
     ) -> _InverterModelBlock:
         T = prep.T
         dt = prep.dt
@@ -400,7 +409,16 @@ class LinearOptimizer:
 
             # Add mode switch cost constraints
             # Pass p_ch and p_dc so we can track continuous discharge too
-            self._add_mode_switch_costs(inv, inv_id, y_ch, y_dc, p_ch, p_dc, T)
+            self._add_mode_switch_costs(
+                inv,
+                inv_id,
+                initial_modes.get(inv_id, InverterMode.IDLE),
+                y_ch,
+                y_dc,
+                p_ch,
+                p_dc,
+                T,
+            )
 
         else:
             p_ch = cp.Constant(np.zeros(T, dtype=float))
@@ -444,9 +462,8 @@ class LinearOptimizer:
             self._constraints.append(p_dc / eta_d <= start_soc - bat.min_soc_wh)
             self._constraints.append(p_ch * eta_c_ac <= bat.max_soc_wh - start_soc)
 
-            self._constraints.append(soc[0] == soc_init + delta[0])
-            if T > 1:
-                self._constraints.append(soc[1:] == soc[:-1] + delta[1:])
+            # start_soc is already shaped (T,); one vectorized equality covers t=0..T-1.
+            self._constraints.append(soc == start_soc + delta)
             self._constraints.extend([soc >= bat.min_soc_wh, soc <= bat.max_soc_wh])
         else:
             soc = None
@@ -466,6 +483,7 @@ class LinearOptimizer:
         self,
         inv: InverterBase,
         inv_id: str,
+        initial_mode: InverterMode,
         y_ch: cp.Variable | None,
         y_dc: cp.Variable | None,
         p_ch: cp.Expression,
@@ -481,8 +499,6 @@ class LinearOptimizer:
         if mode_switch_cost <= 0.0:
             return
 
-        initial_mode = self.initial_modes.get(inv_id, InverterMode.IDLE)
-
         def _mode_flags(mode: InverterMode) -> tuple[int, int]:
             if mode in (InverterMode.AC_CHARGE, InverterMode.AC_CHARGE_ZERO_FEED_IN):
                 return 1, 0
@@ -492,52 +508,57 @@ class LinearOptimizer:
 
         init_ch, init_dc = _mode_flags(initial_mode)
 
-        # Create binary variables for mode switches
-        delta_mode = cp.Variable(T, boolean=True, name=f"delta_mode_{inv_id}")
-        mode_ch = cp.Variable(T, boolean=True, name=f"mode_ch_{inv_id}")
-        mode_dc = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
+        # Derive mode-active indicators without extra binary variables when possible.
+        # y_ch/y_dc already encode mode state (sum in {0,1}); reuse them directly
+        # instead of introducing redundant mode_ch/mode_dc binaries (saves 2*T binaries).
+        is_ch: cp.Expression | np.ndarray
+        is_dc: cp.Expression | np.ndarray
 
         if y_ch is not None:
-            y_ch_sum = cp.sum(y_ch, axis=0)
-            self._constraints.extend([mode_ch >= y_ch_sum, mode_ch <= y_ch_sum])
+            is_ch = cp.sum(y_ch, axis=0)
         elif isinstance(p_ch, cp.Variable):
-            # Continuous charge: mode_ch = 1 if p_ch > 0
-            # Use big-M constraint: p_ch <= max_p_ch * mode_ch (where max_p_ch is arbitrarily large)
-            # Since p_ch is bounded by battery capacity constraints, we can use a reasonable bound
+            is_ch_var = cp.Variable(T, boolean=True, name=f"mode_ch_{inv_id}")
             max_p_ch = inv.battery.max_charge_power_w * self.prediction.dt_hours * 1.1
-            self._constraints.append(p_ch <= max_p_ch * mode_ch)
+            self._constraints.append(p_ch <= max_p_ch * is_ch_var)
+            is_ch = is_ch_var
         else:
-            self._constraints.append(mode_ch == 0)
+            is_ch = np.zeros(T, dtype=float)
 
         if y_dc is not None:
-            y_dc_sum = cp.sum(y_dc, axis=0)
-            self._constraints.extend([mode_dc >= y_dc_sum, mode_dc <= y_dc_sum])
+            is_dc = cp.sum(y_dc, axis=0)
         elif isinstance(p_dc, cp.Variable):
-            # Continuous discharge: mode_dc = 1 if p_dc > 0
-            # Use big-M constraint: p_dc <= max_p_dc * mode_dc
+            is_dc_var = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
             max_p_dc = inv.battery.max_discharge_power_w * self.prediction.dt_hours * 1.1
-            self._constraints.append(p_dc <= max_p_dc * mode_dc)
+            self._constraints.append(p_dc <= max_p_dc * is_dc_var)
+            is_dc = is_dc_var
         else:
-            self._constraints.append(mode_dc == 0)
+            is_dc = np.zeros(T, dtype=float)
 
-        # At t=0, compare against configured initial mode (default: IDLE).
-        self._constraints.append(delta_mode[0] >= mode_ch[0] - init_ch)
-        self._constraints.append(delta_mode[0] >= init_ch - mode_ch[0])
-        self._constraints.append(delta_mode[0] >= mode_dc[0] - init_dc)
-        self._constraints.append(delta_mode[0] >= init_dc - mode_dc[0])
+        # PASS 2 OPT: delta_mode continuous instead of binary.
+        # The constraints delta_mode >= |mode_change| naturally limit delta_mode in [0,1]
+        # since each mode_change is at most 1. This eliminates binary branching overhead.
+        delta_mode = cp.Variable(T, nonneg=True, name=f"delta_mode_{inv_id}")
 
-        # For t > 0, add constraints to detect mode changes
+        # t=0: compare against prior mode (4 scalar constraints).
+        self._constraints.extend(
+            [
+                delta_mode[0] >= is_ch[0] - init_ch,
+                delta_mode[0] >= init_ch - is_ch[0],
+                delta_mode[0] >= is_dc[0] - init_dc,
+                delta_mode[0] >= init_dc - is_dc[0],
+            ]
+        )
+
+        # t>0: 4 vectorized array constraints instead of 4*(T-1) individual scalar constraints.
         if T > 1:
-            # delta_mode[t] = 1 if mode changed from t-1 to t
-            # This means: (mode_ch[t] != mode_ch[t-1]) or (mode_dc[t] != mode_dc[t-1])
-            # Simplified: delta_mode[t] >= |mode_ch[t] - mode_ch[t-1]| + |mode_dc[t] - mode_dc[t-1]|
-            # Since these are binary, |a - b| = max(a - b, b - a)
-            for t in range(1, T):
-                # If mode_ch changes, mode_dc changes, or both change, delta_mode[t] = 1
-                self._constraints.append(delta_mode[t] >= (mode_ch[t] - mode_ch[t - 1]))
-                self._constraints.append(delta_mode[t] >= (mode_ch[t - 1] - mode_ch[t]))
-                self._constraints.append(delta_mode[t] >= (mode_dc[t] - mode_dc[t - 1]))
-                self._constraints.append(delta_mode[t] >= (mode_dc[t - 1] - mode_dc[t]))
+            self._constraints.extend(
+                [
+                    delta_mode[1:] >= is_ch[1:] - is_ch[:-1],
+                    delta_mode[1:] >= is_ch[:-1] - is_ch[1:],
+                    delta_mode[1:] >= is_dc[1:] - is_dc[:-1],
+                    delta_mode[1:] >= is_dc[:-1] - is_dc[1:],
+                ]
+            )
 
         # Add mode switch costs to objective (cost is EUR per mode change, not per Wh)
         mode_switch_cost_expr = cp.sum(delta_mode) * mode_switch_cost

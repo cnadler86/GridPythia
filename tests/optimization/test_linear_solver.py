@@ -386,11 +386,10 @@ class TestLinearSolverHybridEconomics:
         plan_idle_start = sol_idle_start.inverter_plans[0]
 
         inv_charge_start = _make_switching_case_inverter(prediction_hours=3, switch_cost=0.020)
-        sol_charge_start = LinearOptimizer(
-            [inv_charge_start],
-            pred,
+        sol_charge_start = LinearOptimizer([inv_charge_start], pred).solve(
+            OptimizationObjective.MINIMIZE_COST,
             initial_modes={"hybrid_sw": InverterMode.AC_CHARGE},
-        ).solve(OptimizationObjective.MINIMIZE_COST)
+        )
         plan_charge_start = sol_charge_start.inverter_plans[0]
 
         # Starting in AC_CHARGE should never make t=0 charging less attractive than idle start.
