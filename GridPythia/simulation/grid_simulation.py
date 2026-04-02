@@ -293,6 +293,9 @@ class GridSimulation:
         dt: float = 1.0,
     ) -> SimulationResult | None:
         """Simulate energy flows and costs for a contiguous time window."""
+        if start_idx < 0 or start_idx > self.simulation_steps:
+            raise ValueError(f"start_idx must be in [0, {self.simulation_steps}], got {start_idx}")
+
         total_idx = self.simulation_steps - start_idx
         if total_idx <= 0:
             return None
@@ -318,6 +321,14 @@ class GridSimulation:
             )
             for inv in inv_list
         ]
+
+        for inv, arr in zip(inv_list, modes_arrs, strict=False):
+            if inv.device_id in inverter_modes and len(arr) < self.simulation_steps:
+                raise ValueError(
+                    f"inverter_modes[{inv.device_id!r}] must have at least "
+                    f"{self.simulation_steps} entries, got {len(arr)}"
+                )
+
         rates_arrs = [
             np.asarray(
                 inverter_ac_rates.get(inv.device_id, np.zeros(self.simulation_steps)),
@@ -325,6 +336,13 @@ class GridSimulation:
             )
             for inv in inv_list
         ]
+
+        for inv, arr in zip(inv_list, rates_arrs, strict=False):
+            if inv.device_id in inverter_ac_rates and len(arr) < self.simulation_steps:
+                raise ValueError(
+                    f"inverter_ac_rates[{inv.device_id!r}] must have at least "
+                    f"{self.simulation_steps} entries, got {len(arr)}"
+                )
 
         _step = self._simulate_step
         pv_lens = [len(a) for a in pv_arrs]
@@ -431,6 +449,13 @@ class GridSimulation:
             dtype=np.float32,
         )
 
+        appliance_load_series: np.ndarray | None = None
+        if appl_arr is not None:
+            appliance_load_series = np.zeros(total_idx, dtype=np.float32)
+            if start_idx < appl_len:
+                copy_len = min(total_idx, appl_len - start_idx)
+                appliance_load_series[:copy_len] = appl_arr[start_idx : start_idx + copy_len]
+
         return SimulationResult(
             costs_per_dt=costs_per_dt,
             revenue_per_dt=revenue_per_dt,
@@ -444,5 +469,5 @@ class GridSimulation:
             inverter_modes_per_dt=inverter_modes_per_dt,
             inverter_ac_rate_per_dt=inverter_ac_rate_per_dt,
             electricity_price_per_dt=elec_price_series,
-            home_appliance_load_per_dt=appl_arr.copy() if appl_arr is not None else None,
+            home_appliance_load_per_dt=appliance_load_series,
         )

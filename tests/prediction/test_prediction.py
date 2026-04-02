@@ -9,6 +9,7 @@ import pytest
 from GridPythia.prediction.electricprice.fixed import ElecPriceFixed
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
+from GridPythia.prediction.load.provider import LoadProvider
 from GridPythia.prediction.prediction import Prediction, PredictionData, PredictionSetup
 from GridPythia.prediction.pvforecast.provider import PVForecastProvider
 from GridPythia.prediction.weather.provider import WeatherProvider
@@ -252,3 +253,97 @@ class TestPrediction:
 
         assert str(provider.seen_tzinfo) == "UTC"
         assert str(data.timestamps[0].tzinfo) in {"Europe/Berlin", "CEST", "CET"}
+
+    async def test_timezone_contract_load_keeps_original_timezone(self):
+        class CapturePrice(ElecPriceProvider):
+            def __init__(self) -> None:
+                self.seen_tzinfo = None
+
+            @property
+            def provider_id(self) -> str:
+                return "CapturePrice"
+
+            async def fetch(self, timestamps: list) -> np.ndarray:
+                self.seen_tzinfo = timestamps[0].tzinfo
+                return np.zeros(len(timestamps), dtype=np.float32)
+
+        class CaptureLoad(LoadProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.seen_tzinfo = None
+
+            @property
+            def provider_id(self) -> str:
+                return "CaptureLoad"
+
+            def _get_day_profile_w(self, day_type):
+                return [0.0] * 24, 1.0
+
+            async def fetch(self, timestamps: list, *, use_vacation_profile: bool = False) -> np.ndarray:
+                self.seen_tzinfo = timestamps[0].tzinfo
+                return np.zeros(len(timestamps), dtype=np.float32)
+
+        price = CapturePrice()
+        load = CaptureLoad()
+        pred = Prediction(PredictionSetup(electricprice=price, load=load))
+        start_local = datetime(2025, 6, 15, 2, 0, tzinfo=ZoneInfo("Europe/Berlin"))
+        await pred.fetch(start=start_local, hours=2, dt_hours=1.0)
+
+        assert str(price.seen_tzinfo) == "UTC"
+        assert str(load.seen_tzinfo) in {"Europe/Berlin", "CEST", "CET"}
+
+    async def test_prediction_rejects_length_mismatch_from_provider(self):
+        class BadPrice(ElecPriceProvider):
+            @property
+            def provider_id(self) -> str:
+                return "BadPrice"
+
+            async def fetch(self, timestamps: list) -> np.ndarray:
+                return np.zeros(max(0, len(timestamps) - 1), dtype=np.float32)
+
+        pred = Prediction(PredictionSetup(electricprice=BadPrice()))
+        with pytest.raises(ValueError, match="length mismatch"):
+            await pred.fetch(start=START, hours=4, dt_hours=1.0)
+
+    async def test_prediction_rejects_non_finite_values(self):
+        class BadWeather(WeatherProvider):
+            @property
+            def provider_id(self) -> str:
+                return "BadWeather"
+
+            async def fetch(self, timestamps: list) -> dict[str, np.ndarray]:
+                n = len(timestamps)
+                arr = np.zeros(n, dtype=np.float32)
+                arr[0] = np.nan
+                return {"temperature_c": arr}
+
+        pred = Prediction(PredictionSetup(weather=BadWeather()))
+        with pytest.raises(ValueError, match="non-finite"):
+            await pred.fetch(start=START, hours=4, dt_hours=1.0)
+
+    async def test_prediction_rejects_duplicate_pv_inverter_ids(self):
+        class PVOne(PVForecastProvider):
+            @property
+            def provider_id(self) -> str:
+                return "PVOne"
+
+            async def fetch(self, timestamps: list) -> np.ndarray:
+                return np.zeros(len(timestamps), dtype=np.float32)
+
+            async def fetch_by_inverter(self, timestamps: list) -> dict[str, np.ndarray]:
+                return {"shared": np.full(len(timestamps), 10.0, dtype=np.float32)}
+
+        class PVTwo(PVForecastProvider):
+            @property
+            def provider_id(self) -> str:
+                return "PVTwo"
+
+            async def fetch(self, timestamps: list) -> np.ndarray:
+                return np.zeros(len(timestamps), dtype=np.float32)
+
+            async def fetch_by_inverter(self, timestamps: list) -> dict[str, np.ndarray]:
+                return {"shared": np.full(len(timestamps), 20.0, dtype=np.float32)}
+
+        pred = Prediction(PredictionSetup(pv={"a": PVOne(), "b": PVTwo()}))
+        with pytest.raises(ValueError, match="Duplicate PV inverter id"):
+            await pred.fetch(start=START, hours=4, dt_hours=1.0)

@@ -1,8 +1,9 @@
 """Unified prediction orchestration."""
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 from structlog import get_logger
@@ -36,6 +37,23 @@ class PredictionData:
     _timestamps: list[datetime]
     _arrays: dict[str, np.ndarray]
     dt_hours: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.dt_hours <= 0:
+            raise ValueError(f"dt_hours must be > 0, got {self.dt_hours}")
+
+        n = len(self._timestamps)
+        for key, arr in list(self._arrays.items()):
+            arr_np = np.asarray(arr, dtype=np.float32)
+            if arr_np.ndim != 1:
+                raise ValueError(f"Prediction array '{key}' must be 1D, got shape {arr_np.shape}")
+            if len(arr_np) != n:
+                raise ValueError(
+                    f"Prediction array '{key}' length mismatch: expected {n}, got {len(arr_np)}"
+                )
+            if not np.all(np.isfinite(arr_np)):
+                raise ValueError(f"Prediction array '{key}' contains non-finite values")
+            self._arrays[key] = arr_np
 
     def __getitem__(self, key: str) -> np.ndarray:
         """Direct column access; prefer typed properties for public API."""
@@ -120,6 +138,29 @@ class Prediction:
     def __init__(self, setup: PredictionSetup) -> None:
         self.setup = setup
 
+    @staticmethod
+    def _to_utc_timestamps(timestamps: list[datetime]) -> list[datetime]:
+        """Normalize timestamps to UTC for internet-backed provider calls."""
+        return [
+            ts.astimezone(timezone.utc)
+            if ts.tzinfo is not None
+            else ts.replace(tzinfo=timezone.utc)
+            for ts in timestamps
+        ]
+
+    @staticmethod
+    def _validate_series(name: str, values: np.ndarray | list[float], n: int) -> np.ndarray:
+        arr = np.asarray(values, dtype=np.float32)
+        if arr.ndim != 1:
+            raise ValueError(f"Prediction provider result '{name}' must be 1D, got {arr.shape}")
+        if len(arr) != n:
+            raise ValueError(
+                f"Prediction provider result '{name}' length mismatch: expected {n}, got {len(arr)}"
+            )
+        if not np.all(np.isfinite(arr)):
+            raise ValueError(f"Prediction provider result '{name}' contains non-finite values")
+        return arr
+
     async def fetch(
         self,
         start: datetime,
@@ -128,17 +169,17 @@ class Prediction:
     ) -> PredictionData:
         """Fetch all prediction channels in parallel for the next *hours* from *start*.
 
-        Providers are always called with UTC timestamps when *start* is timezone-aware.
-        Returned timestamps keep the original requested timezone.
+        Timezone contract:
+        - Internet-backed providers (electricity price, feed-in tariff, PV, weather)
+          are always called with UTC timestamps.
+        - Load providers are called with the original requested timestamps
+          (load profiles are timezone-invariant by design).
+
+        Returned timestamps keep the original requested timezone representation.
         """
         timestamps = make_timestamps(start, hours, dt_hours)
-        provider_timestamps = timestamps
-        if start.tzinfo is not None:
-            tz_name: str = getattr(start.tzinfo, "key", None) or str(start.tzinfo)
-            if tz_name not in ("UTC", "utc"):
-                from datetime import timezone as _utc_mod
-
-                provider_timestamps = [ts.astimezone(_utc_mod.utc) for ts in timestamps]
+        internet_provider_timestamps = self._to_utc_timestamps(timestamps)
+        load_provider_timestamps = timestamps
         n = len(timestamps)
 
         providers = []
@@ -165,22 +206,25 @@ class Prediction:
         async def _zeros() -> np.ndarray:
             return np.zeros(n, dtype=np.float32)
 
-        # Build all coroutines; run in parallel with asyncio.gather
         eprice_coro = (
-            self.setup.electricprice.fetch(provider_timestamps)
+            self.setup.electricprice.fetch(internet_provider_timestamps)
             if self.setup.electricprice
             else _zeros()
         )
         ftariff_coro = (
-            self.setup.feedintariff.fetch(provider_timestamps)
+            self.setup.feedintariff.fetch(internet_provider_timestamps)
             if self.setup.feedintariff
             else _zeros()
         )
-        load_coro = self.setup.load.fetch(provider_timestamps) if self.setup.load else _zeros()
-        weather_coro = self.setup.weather.fetch(provider_timestamps) if self.setup.weather else None
+        load_coro = self.setup.load.fetch(load_provider_timestamps) if self.setup.load else _zeros()
+        weather_coro = (
+            self.setup.weather.fetch(internet_provider_timestamps) if self.setup.weather else None
+        )
 
         pv_names = list(self.setup.pv)
-        pv_coros = [self.setup.pv[name].fetch_by_inverter(provider_timestamps) for name in pv_names]
+        pv_coros = [
+            self.setup.pv[name].fetch_by_inverter(internet_provider_timestamps) for name in pv_names
+        ]
 
         all_coros = [eprice_coro, ftariff_coro, load_coro] + pv_coros
         if weather_coro is not None:
@@ -188,26 +232,46 @@ class Prediction:
 
         results = await asyncio.gather(*all_coros)
 
-        # Unpack results
         eprice, ftariff, load_wh, *rest = results
+        eprice = self._validate_series("electricprice_eur_wh", eprice, n)
+        ftariff = self._validate_series("feedintariff_eur_wh", ftariff, n)
+        load_wh = self._validate_series("load_wh", load_wh, n)
+
         if weather_coro is not None:
             pv_series = rest[: len(pv_names)]
-            weather_dict: dict[str, np.ndarray] | None = rest[len(pv_names)]
+            weather_raw = rest[len(pv_names)]
+            if not isinstance(weather_raw, Mapping):
+                raise ValueError("Weather provider must return a mapping of channel -> 1D array")
+            weather_dict: dict[str, np.ndarray] | None = {
+                str(ch_name): self._validate_series(f"weather_{ch_name}", arr, n)
+                for ch_name, arr in weather_raw.items()
+            }
         else:
             pv_series = rest
             weather_dict = None
 
-        # Build the channel dict (numpy float32 arrays)
         arrays: dict[str, np.ndarray] = {
             "electricprice_eur_wh": eprice,
             "feedintariff_eur_wh": ftariff,
             "load_wh": load_wh,
         }
 
-        # Add PV data: key format is pv_{inverter_id}_wh (energy in Wh)
-        for _, series_by_inverter in zip(pv_names, pv_series, strict=False):
+        for provider_name, series_by_inverter in zip(pv_names, pv_series, strict=False):
+            if not isinstance(series_by_inverter, Mapping):
+                raise ValueError(
+                    f"PV provider '{provider_name}' must return a mapping of inverter_id -> 1D array"
+                )
             for inverter, arr in series_by_inverter.items():
-                arrays[f"pv_{inverter}_wh"] = arr
+                if not isinstance(inverter, str) or not inverter:
+                    raise ValueError(
+                        f"PV provider '{provider_name}' returned invalid inverter id: {inverter!r}"
+                    )
+                key = f"pv_{inverter}_wh"
+                if key in arrays:
+                    raise ValueError(
+                        f"Duplicate PV inverter id '{inverter}' returned by multiple providers"
+                    )
+                arrays[key] = self._validate_series(key, arr, n)
 
         if weather_dict is not None:
             for ch_name, arr in weather_dict.items():

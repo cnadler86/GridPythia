@@ -317,3 +317,57 @@ def test_simulation_reset(grid_simulation: GridSimulation) -> None:
     assert r1 is not None and r2 is not None
     assert r1.net_balance == pytest.approx(r2.net_balance, abs=1e-5)
     assert r1.total_cost == pytest.approx(r2.total_cost, abs=1e-5)
+
+
+def test_simulation_rejects_too_short_mode_array(grid_simulation: GridSimulation) -> None:
+    sim = grid_simulation
+    n_hours = sim.simulation_steps
+    inv_id = sim._inv_list[0].device_id
+
+    inverter_modes = {inv_id: np.full(n_hours - 1, int(InverterMode.IDLE), dtype=np.int32)}
+    inverter_ac_rates = {inv_id: np.zeros(n_hours, dtype=np.int32)}
+
+    with pytest.raises(ValueError, match="inverter_modes"):
+        sim.simulate(inverter_modes=inverter_modes, inverter_ac_rates=inverter_ac_rates)
+
+
+def test_simulation_rejects_too_short_rate_array(grid_simulation: GridSimulation) -> None:
+    sim = grid_simulation
+    n_hours = sim.simulation_steps
+    inv_id = sim._inv_list[0].device_id
+
+    inverter_modes = {inv_id: np.full(n_hours, int(InverterMode.IDLE), dtype=np.int32)}
+    inverter_ac_rates = {inv_id: np.zeros(n_hours - 1, dtype=np.int32)}
+
+    with pytest.raises(ValueError, match="inverter_ac_rates"):
+        sim.simulate(inverter_modes=inverter_modes, inverter_ac_rates=inverter_ac_rates)
+
+
+def test_simulation_appliance_output_matches_window(grid_simulation: GridSimulation) -> None:
+    sim = grid_simulation
+    n_hours = sim.simulation_steps
+
+    inverter_modes = {
+        inv.device_id: np.full(n_hours, int(InverterMode.IDLE), dtype=np.int32)
+        for inv in sim._inv_list
+    }
+    inverter_ac_rates = {
+        inv.device_id: np.zeros(n_hours, dtype=np.int32)
+        for inv in sim._inv_list
+    }
+
+    # Short array with explicit values for easier assertions.
+    appliance_load = np.array([10.0, 20.0, 30.0], dtype=np.float32)
+    result = sim.simulate(
+        inverter_modes=inverter_modes,
+        inverter_ac_rates=inverter_ac_rates,
+        appliance_load=appliance_load,
+        start_idx=1,
+    )
+
+    assert result is not None
+    assert result.home_appliance_load_per_dt is not None
+    assert len(result.home_appliance_load_per_dt) == n_hours - 1
+    assert result.home_appliance_load_per_dt[0] == pytest.approx(20.0)
+    assert result.home_appliance_load_per_dt[1] == pytest.approx(30.0)
+    assert np.all(result.home_appliance_load_per_dt[2:] == 0.0)

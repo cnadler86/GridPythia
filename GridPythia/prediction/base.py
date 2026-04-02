@@ -18,6 +18,9 @@ def make_timestamps(start: datetime, hours: float, dt_hours: float) -> list[date
     Returns:
         ``list[datetime]`` with length ``max(1, round(hours / dt_hours))``.
     """
+    if dt_hours <= 0:
+        raise ValueError(f"dt_hours must be > 0, got {dt_hours}")
+
     n = max(1, round(hours / dt_hours))
     step = timedelta(hours=dt_hours)
     return [start + i * step for i in range(n)]
@@ -44,6 +47,9 @@ def resample_to_timestamps(
     Returns:
         ``np.ndarray`` of ``float32`` with the same length as *timestamps*.
     """
+    if source_dt_hours <= 0:
+        raise ValueError(f"source_dt_hours must be > 0, got {source_dt_hours}")
+
     n_src = len(values)
     n_tgt = len(timestamps)
     if n_tgt == 0:
