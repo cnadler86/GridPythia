@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import aiohttp
-import polars as pl
+import numpy as np
 from structlog import get_logger
 
 from GridPythia.prediction.base import resample_to_timestamps
@@ -61,10 +61,9 @@ class PVForecastAkkudoktor(PVForecastProvider):
         return "PVForecastAkkudoktor"
 
     @staticmethod
-    def _target_dt_hours(timestamps: pl.Series) -> float:
-        ts_list: list[datetime] = timestamps.to_list()
-        if len(ts_list) >= 2:
-            return (ts_list[1] - ts_list[0]).total_seconds() / 3600.0
+    def _target_dt_hours(timestamps: list) -> float:
+        if len(timestamps) >= 2:
+            return (timestamps[1] - timestamps[0]).total_seconds() / 3600.0
         return 1.0
 
     # ── URL builder ──────────────────────────────────────────────────────
@@ -150,8 +149,8 @@ class PVForecastAkkudoktor(PVForecastProvider):
 
         return results
 
-    async def fetch_by_inverter(self, timestamps: pl.Series) -> dict[str, pl.Series]:
-        ts_list: list[datetime] = timestamps.to_list()
+    async def fetch_by_inverter(self, timestamps: list) -> dict[str, np.ndarray]:
+        ts_list = timestamps
         start = ts_list[0]
         end = ts_list[-1]
         target_dt_hours = self._target_dt_hours(timestamps)
@@ -179,8 +178,8 @@ class PVForecastAkkudoktor(PVForecastProvider):
             for inverter, hourly in hourly_by_inverter.items()
         }
 
-    async def fetch(self, timestamps: pl.Series) -> pl.Series:
-        ts_list: list[datetime] = timestamps.to_list()
+    async def fetch(self, timestamps: list) -> np.ndarray:
+        ts_list = timestamps
         start = ts_list[0]
         end = ts_list[-1]
         target_dt_hours = self._target_dt_hours(timestamps)

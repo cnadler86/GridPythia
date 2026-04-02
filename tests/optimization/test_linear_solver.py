@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-import polars as pl
+from datetime import datetime, timedelta
+
+import numpy as np
 import pytest
 
 from GridPythia.config.models import BatteryParameters, InverterParameters
@@ -27,20 +29,18 @@ def _make_prediction(
     n = len(load_w)
     assert n == len(price_eur_wh)
 
-    # The linear solver only requires aligned columns; a simple integer
-    # timestamp keeps tests robust across Polars versions on Windows.
-    data: dict[str, pl.Series] = {
-        "timestamp": pl.Series(range(n), dtype=pl.Int64),
-        "electricprice_eur_wh": pl.Series(price_eur_wh, dtype=pl.Float32),
-        "feedintariff_eur_wh": pl.Series([0.0] * n, dtype=pl.Float32),
-        "load_wh": pl.Series(load_w, dtype=pl.Float32),
+    start = datetime(2025, 1, 1)
+    timestamps = [start + timedelta(hours=i) for i in range(n)]
+    arrays: dict[str, np.ndarray] = {
+        "electricprice_eur_wh": np.array(price_eur_wh, dtype=np.float32),
+        "feedintariff_eur_wh": np.zeros(n, dtype=np.float32),
+        "load_wh": np.array(load_w, dtype=np.float32),
     }
     for inverter_id, series in (pv_wh or {}).items():
         assert len(series) == n
-        data[f"pv_{inverter_id}_wh"] = pl.Series(series, dtype=pl.Float32)
+        arrays[f"pv_{inverter_id}_wh"] = np.array(series, dtype=np.float32)
 
-    df = pl.DataFrame(data)
-    return PredictionData(_df=df, dt_hours=1.0)
+    return PredictionData(_timestamps=timestamps, _arrays=arrays, dt_hours=1.0)
 
 
 def _make_hybrid_inverter(roundtrip_efficiency: float = 0.8) -> InverterBase:

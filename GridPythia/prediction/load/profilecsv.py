@@ -28,7 +28,6 @@ import csv
 import io
 
 import numpy as np
-import polars as pl
 from structlog import get_logger
 
 from GridPythia.prediction.load.config import LoadProfileConfig
@@ -78,17 +77,18 @@ class LoadProfileCSV(LoadProvider):
 
     def _load(self) -> None:
         """Parse the CSV and populate ``_profiles`` and ``_source_dt_hours``."""
-        df = self._read_csv_stdlib()
+        raw = self._read_csv_stdlib()
 
         # Normalise column names
-        df.columns = [c.strip().lower() for c in df.columns]
+        col_data: dict[str, list[str]] = {k.strip().lower(): v for k, v in raw.items()}
+        col_names = list(col_data.keys())
 
         # Identify time column (first column)
-        time_col = df.columns[0]
-        dt_hours = self._infer_dt_hours(df[time_col])
+        time_col = col_names[0]
+        dt_hours = self._infer_dt_hours(col_data[time_col])
         self._source_dt_hours = dt_hours
 
-        n = len(df)
+        n = len(col_data[time_col])
         expected_slots = round(24.0 / dt_hours)
         if n != expected_slots:
             raise ValueError(f"Expected {expected_slots} rows for dt={dt_hours} h, got {n}")
@@ -96,13 +96,13 @@ class LoadProfileCSV(LoadProvider):
         profiles: dict[str, list[float]] = {}
 
         def _col(name: str) -> list[float]:
-            if name not in df.columns:
+            if name not in col_data:
                 raise ValueError(f"Required column '{name}' not found in {self._file_path.name}")
-            return df[name].cast(pl.Float64).to_list()
+            return [float(v) for v in col_data[name]]
 
         profiles["weekday"] = _col(_COL_WEEKDAY)
 
-        if _COL_SATURDAY in df.columns and _COL_SUNDAY in df.columns:
+        if _COL_SATURDAY in col_data and _COL_SUNDAY in col_data:
             profiles["saturday"] = _col(_COL_SATURDAY)
             profiles["sunday"] = _col(_COL_SUNDAY)
             # Derive weekend as mean of sat+sun for convenience
@@ -110,7 +110,7 @@ class LoadProfileCSV(LoadProvider):
                 (s + su) / 2.0
                 for s, su in zip(profiles["saturday"], profiles["sunday"], strict=True)
             ]
-        elif _COL_WEEKEND in df.columns:
+        elif _COL_WEEKEND in col_data:
             profiles["weekend"] = _col(_COL_WEEKEND)
             profiles["saturday"] = profiles["weekend"]
             profiles["sunday"] = profiles["weekend"]
@@ -134,8 +134,8 @@ class LoadProfileCSV(LoadProvider):
             profiles=list(profiles.keys()),
         )
 
-    def _read_csv_stdlib(self) -> pl.DataFrame:
-        """Read CSV using the stdlib ``csv`` module to avoid polars native crashes.
+    def _read_csv_stdlib(self) -> dict[str, list[str]]:
+        """Read CSV and return a column-keyed dict of string values.
 
         Delimiter is auto-detected from the header line: if a semicolon is
         present the file is treated as semicolon-separated with comma decimal
@@ -164,18 +164,14 @@ class LoadProfileCSV(LoadProvider):
             if delimiter == ";":
                 col_data = {k: [v.replace(",", ".") for v in vals] for k, vals in col_data.items()}
 
-            series_map: dict[str, pl.Series] = {}
-            for col, values in col_data.items():
-                series_map[col] = pl.Series(col, values, dtype=pl.String)
-
-            return pl.DataFrame(series_map)
+            return col_data
         except Exception as exc:
             raise ValueError(f"Cannot read CSV '{self._file_path}': {exc}") from exc
 
     @staticmethod
-    def _infer_dt_hours(time_col: pl.Series) -> float:
+    def _infer_dt_hours(time_col: list[str]) -> float:
         """Derive the uniform step width from the time-of-day column."""
-        values = time_col.to_list()
+        values = time_col
         if len(values) < 2:
             raise ValueError("Time column must have at least 2 entries")
 

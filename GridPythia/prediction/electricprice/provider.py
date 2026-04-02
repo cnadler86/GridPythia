@@ -2,7 +2,7 @@
 
 from abc import abstractmethod
 
-import polars as pl
+import numpy as np
 from structlog import get_logger
 
 from GridPythia.prediction.base import PredictionProvider
@@ -14,8 +14,8 @@ class ElecPriceProvider(PredictionProvider):
     """Returns electricity market price in EUR/Wh per time step."""
 
     @abstractmethod
-    async def fetch(self, timestamps: pl.Series) -> pl.Series:
-        """Return Float32 Series of EUR/Wh, same length as *timestamps*."""
+    async def fetch(self, timestamps: list) -> np.ndarray:
+        """Return float32 ndarray of EUR/Wh, same length as *timestamps*."""
         ...
 
 
@@ -34,7 +34,7 @@ class ElecPriceFallbackChain(ElecPriceProvider):
     def provider_id(self) -> str:
         return f"{self._primary.provider_id}|fallback:{self._fallback.provider_id}"
 
-    async def fetch(self, timestamps: pl.Series) -> pl.Series:
+    async def fetch(self, timestamps: list) -> np.ndarray:
         try:
             return await self._primary.fetch(timestamps)
         except Exception as exc:  # noqa: BLE001

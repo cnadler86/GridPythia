@@ -8,7 +8,6 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 import numpy as np
-import polars as pl
 from scipy.ndimage import gaussian_filter1d
 
 from GridPythia.prediction.base import PredictionProvider
@@ -88,9 +87,7 @@ class LoadProvider(PredictionProvider):
         """
         ...
 
-    async def fetch(
-        self, timestamps: pl.Series, *, use_vacation_profile: bool = False
-    ) -> pl.Series:
+    async def fetch(self, timestamps: list, *, use_vacation_profile: bool = False) -> np.ndarray:
         """Return Float32 Series of Wh, same length as *timestamps*.
 
         Profile selection per timestamp:
@@ -106,9 +103,9 @@ class LoadProvider(PredictionProvider):
         Day profiles are cached per :class:`DayType` within each call to avoid
         redundant work across timestamps that share the same day type.
         """
-        ts_list = timestamps.to_list()
+        ts_list = list(timestamps)
         if not ts_list:
-            return pl.Series([], dtype=pl.Float32)
+            return np.zeros(0, dtype=np.float32)
 
         target_dt_h = (
             (ts_list[1] - ts_list[0]).total_seconds() / 3600.0 if len(ts_list) >= 2 else 1.0
@@ -136,11 +133,11 @@ class LoadProvider(PredictionProvider):
             pw = power_values_w[lo] * (1.0 - frac) + power_values_w[hi] * frac
             result.append(float(pw * target_dt_h))
 
-        return pl.Series(result, dtype=pl.Float32)
+        return np.array(result, dtype=np.float32)
 
     async def get_profile_series(
-        self, day_timestamps: pl.Series, day_types: list[DayType]
-    ) -> pl.Series:
+        self, day_timestamps: list, day_types: list[DayType]
+    ) -> np.ndarray:
         """Return a concatenated load series for the requested day types.
 
         Args:
@@ -152,7 +149,7 @@ class LoadProvider(PredictionProvider):
                 two days returned.
 
         Returns:
-            ``pl.Series(Float32)`` of length
+            ``np.ndarray`` of ``float32`` of length
             ``len(day_timestamps) * len(day_types)`` with Wh energy values.
 
         Notes:
@@ -161,12 +158,12 @@ class LoadProvider(PredictionProvider):
             a Gaussian smooth so that day-boundary transitions are seamless.
         """
         if not day_types:
-            return pl.Series([], dtype=pl.Float32)
+            return np.empty(0, dtype=np.float32)
 
-        ts_list: list = day_timestamps.to_list()
+        ts_list: list = day_timestamps
         n_per_day = len(ts_list)
         if n_per_day == 0:
-            return pl.Series([], dtype=pl.Float32)
+            return np.empty(0, dtype=np.float32)
 
         target_dt_h = (ts_list[1] - ts_list[0]).total_seconds() / 3600.0 if n_per_day >= 2 else 1.0
 
@@ -186,7 +183,7 @@ class LoadProvider(PredictionProvider):
         n_tgt = n_per_day * len(day_types)
 
         if n_src == 0:
-            return pl.Series([0.0] * n_tgt, dtype=pl.Float32)
+            return np.zeros(n_tgt, dtype=np.float32)
 
         # --- interpolate the full concatenated series to target resolution ---
         src_arr = np.asarray(src_values_w, dtype=np.float64)
@@ -213,8 +210,7 @@ class LoadProvider(PredictionProvider):
                 tgt_arr = gaussian_filter1d(tgt_arr, sigma=sigma)
 
         # Convert average power (W) → energy per target step (Wh)
-        result = (tgt_arr * target_dt_h).astype(np.float32).tolist()
-        return pl.Series(result, dtype=pl.Float32)
+        return (tgt_arr * target_dt_h).astype(np.float32)
 
 
 def load_provider_from_config(cfg: LoadProfileConfig) -> LoadProvider:

@@ -1,6 +1,8 @@
 """Tests for Fraunhofer self-consumption interpolation/model behavior."""
 
-import polars as pl
+from datetime import datetime, timedelta
+
+import numpy as np
 import pytest
 
 from GridPythia.prediction.prediction import PredictionData
@@ -74,15 +76,14 @@ def test_sc_ratio_increases_with_higher_baseload_for_same_inputs() -> None:
 
 def test_grid_simulation_uses_prediction_dt_and_min_load_for_fraunhofer_init() -> None:
     """GridSimulation should initialize Fraunhofer model from prediction metadata."""
-    df = pl.DataFrame(
-        {
-            "timestamp": pl.Series([0, 1, 2], dtype=pl.Int64),
-            "electricprice_eur_wh": pl.Series([0.0003, 0.0003, 0.0003], dtype=pl.Float32),
-            "feedintariff_eur_wh": pl.Series([0.0001, 0.0001, 0.0001], dtype=pl.Float32),
-            "load_wh": pl.Series([850.0, 400.0, 620.0], dtype=pl.Float32),
-        }
-    )
-    prediction = PredictionData(_df=df, dt_hours=0.25)
+    arrays = {
+        "electricprice_eur_wh": np.array([0.0003, 0.0003, 0.0003], dtype=np.float32),
+        "feedintariff_eur_wh": np.array([0.0001, 0.0001, 0.0001], dtype=np.float32),
+        "load_wh": np.array([850.0, 400.0, 620.0], dtype=np.float32),
+    }
+    start = datetime(2025, 1, 1)
+    timestamps = [start + timedelta(minutes=15 * i) for i in range(3)]
+    prediction = PredictionData(_timestamps=timestamps, _arrays=arrays, dt_hours=0.25)
 
     sim = GridSimulation(
         prediction=prediction,

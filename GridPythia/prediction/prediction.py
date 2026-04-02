@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 
-import polars as pl
+import numpy as np
 from structlog import get_logger
 
 from GridPythia.prediction.base import make_timestamps
@@ -21,105 +21,70 @@ logger = get_logger(__name__)
 class PredictionData:
     """All prediction channels aligned on a shared time axis.
 
-    The internal :attr:`_df` has the following columns:
+    Channels:
+    * ``electricprice_eur_wh`` — ``np.float32`` (EUR/Wh)
+    * ``feedintariff_eur_wh`` — ``np.float32`` (EUR/Wh)
+    * ``load_wh`` — ``np.float32`` (Wh, energy per timestep)
+    * ``pv_{inverter_id}_wh`` — ``np.float32`` (Wh, energy per timestep) per inverter
+    * ``weather_{channel}`` — ``np.float32`` for each weather channel
 
-    * ``timestamp`` — ``pl.Datetime``
-    * ``electricprice_eur_wh`` — ``pl.Float32`` (EUR/Wh)
-    * ``feedintariff_eur_wh`` — ``pl.Float32`` (EUR/Wh)
-    * ``load_wh`` — ``pl.Float32`` (Wh, energy per timestep)
-    * ``pv_{inverter_id}_wh`` — ``pl.Float32`` (Wh, energy per timestep) for each registered inverter with PV
-    * ``weather_{channel}`` — ``pl.Float32`` for each weather channel delivered
-      by the weather provider (e.g. ``weather_temperature_c``)
-
-    Quick access via properties: ``data.load_wh``, ``data.electricprice``, ``data.feedintariff``.
+    Quick access via properties: ``data.load_wh``, ``data.electricprice``,
+    ``data.feedintariff``.
     For PV: ``data.get_pv_series(inverter_id)`` or ``data.pv_by_inverter``.
     """
 
-    _df: pl.DataFrame
+    _timestamps: list[datetime]
+    _arrays: dict[str, np.ndarray]
     dt_hours: float = 0.0
 
-    def __getitem__(self, key: str) -> pl.Series:
-        """Direct column access for internal use; prefer properties for public API."""
-        return self._df[key]
+    def __getitem__(self, key: str) -> np.ndarray:
+        """Direct column access; prefer typed properties for public API."""
+        return self._arrays[key]
 
     @property
-    def df(self) -> pl.DataFrame:
-        """Read-only access to internal DataFrame for iteration/inspection only.
-
-        Prefer using typed properties (load_wh, electricprice, etc) for direct access.
-        """
-        return self._df
+    def columns(self) -> list[str]:
+        """Names of all numeric data channels."""
+        return list(self._arrays.keys())
 
     @property
-    def timestamps(self) -> pl.Series:
-        return self._df["timestamp"]
+    def timestamps(self) -> list[datetime]:
+        return self._timestamps
 
     @property
     def steps(self) -> int:
-        return len(self._df)
+        return len(self._timestamps)
 
     @property
-    def load_wh(self) -> pl.Series:
+    def load_wh(self) -> np.ndarray:
         """Load energy in Wh (integrated over dt_hours)."""
-        return self._df["load_wh"]
+        return self._arrays["load_wh"]
 
     @property
-    def electricprice(self) -> pl.Series | None:
-        """Electricity price in EUR/Wh.
-
-        Returns None if the column is not present in the prediction data.
-        """
-        try:
-            return self._df["electricprice_eur_wh"]
-        except pl.exceptions.ColumnNotFoundError:
-            return None
+    def electricprice(self) -> np.ndarray | None:
+        """Electricity price in EUR/Wh, or None when not configured."""
+        return self._arrays.get("electricprice_eur_wh")
 
     @property
-    def feedintariff(self) -> pl.Series | None:
-        """Feed-in tariff in EUR/Wh.
-
-        Returns None if the column is not present in the prediction data.
-        """
-        try:
-            return self._df["feedintariff_eur_wh"]
-        except pl.exceptions.ColumnNotFoundError:
-            return None
+    def feedintariff(self) -> np.ndarray | None:
+        """Feed-in tariff in EUR/Wh, or None when not configured."""
+        return self._arrays.get("feedintariff_eur_wh")
 
     @property
-    def pv_by_inverter(self) -> dict[str, pl.Series]:
-        """Return dict mapping inverter_id to corresponding PV Series (in Wh).
+    def pv_by_inverter(self) -> dict[str, np.ndarray]:
+        """Dict mapping inverter_id → PV energy array (Wh per step)."""
+        return {
+            k[len("pv_") : -len("_wh")]: v
+            for k, v in self._arrays.items()
+            if k.startswith("pv_") and k.endswith("_wh")
+        }
 
-        Useful for looking up PV forecast by inverter device ID.
-        Returns empty dict if no PV columns present.
-        """
-        result = {}
-        for col in self._df.columns:
-            if col.startswith("pv_") and col.endswith("_wh"):
-                inverter_id = col[len("pv_") : -len("_wh")]
-                result[inverter_id] = self._df[col]
-        return result
-
-    def get_pv_series(self, inverter_id: str) -> pl.Series | None:
-        """Get PV forecast Series in Wh for a specific inverter, or None if not found.
-
-        Args:
-            inverter_id: The inverter identifier.
-
-        Returns:
-            pl.Series with PV energy in Wh, or None if the inverter is not in the prediction.
-        """
-        col_name = f"pv_{inverter_id}_wh"
-        try:
-            return self._df[col_name]
-        except pl.exceptions.ColumnNotFoundError:
-            return None
+    def get_pv_series(self, inverter_id: str) -> np.ndarray | None:
+        """Return PV energy array (Wh) for *inverter_id*, or None if not found."""
+        return self._arrays.get(f"pv_{inverter_id}_wh")
 
     @property
     def pv_names(self) -> list[str]:
-        """PV inverter IDs extracted from ``pv_{inverter_id}_wh`` columns.
-
-        Deprecated: use pv_by_inverter.keys() instead.
-        """
+        """PV inverter IDs (from ``pv_{inverter_id}_wh`` keys)."""
         return list(self.pv_by_inverter.keys())
 
 
@@ -149,7 +114,7 @@ class Prediction:
             pv={"roof": my_pv_provider},
         ))
         data = await pred.fetch(start=datetime.now(), hours=24, dt_hours=1.0)
-        data.load_wh  # → pl.Series with energy in Wh
+        data.load_wh  # → np.ndarray with energy in Wh
     """
 
     def __init__(self, setup: PredictionSetup) -> None:
@@ -171,7 +136,9 @@ class Prediction:
         if start.tzinfo is not None:
             tz_name: str = getattr(start.tzinfo, "key", None) or str(start.tzinfo)
             if tz_name not in ("UTC", "utc"):
-                provider_timestamps = timestamps.dt.convert_time_zone("UTC")
+                from datetime import timezone as _utc_mod
+
+                provider_timestamps = [ts.astimezone(_utc_mod.utc) for ts in timestamps]
         n = len(timestamps)
 
         providers = []
@@ -195,8 +162,8 @@ class Prediction:
             providers=providers,
         )
 
-        async def _zeros() -> pl.Series:
-            return pl.Series([0.0] * n, dtype=pl.Float32)
+        async def _zeros() -> np.ndarray:
+            return np.zeros(n, dtype=np.float32)
 
         # Build all coroutines; run in parallel with asyncio.gather
         eprice_coro = (
@@ -225,35 +192,31 @@ class Prediction:
         eprice, ftariff, load_wh, *rest = results
         if weather_coro is not None:
             pv_series = rest[: len(pv_names)]
-            weather_df: pl.DataFrame | None = rest[len(pv_names)]
+            weather_dict: dict[str, np.ndarray] | None = rest[len(pv_names)]
         else:
             pv_series = rest
-            weather_df = None
+            weather_dict = None
 
-        # Build the unified DataFrame
-        data: dict[str, pl.Series] = {
-            "timestamp": timestamps,
+        # Build the channel dict (numpy float32 arrays)
+        arrays: dict[str, np.ndarray] = {
             "electricprice_eur_wh": eprice,
             "feedintariff_eur_wh": ftariff,
             "load_wh": load_wh,
         }
 
-        # Add PV data: column format is pv_{inverter_id}_wh (energy)
+        # Add PV data: key format is pv_{inverter_id}_wh (energy in Wh)
         for _, series_by_inverter in zip(pv_names, pv_series, strict=False):
-            for inverter, series in series_by_inverter.items():
-                # Only use inverter as key, not the provider name.
-                data[f"pv_{inverter}_wh"] = series
+            for inverter, arr in series_by_inverter.items():
+                arrays[f"pv_{inverter}_wh"] = arr
 
-        if weather_df is not None:
-            for col_name in weather_df.columns:
-                data[f"weather_{col_name}"] = weather_df[col_name]
-
-        df = pl.DataFrame(data)
+        if weather_dict is not None:
+            for ch_name, arr in weather_dict.items():
+                arrays[f"weather_{ch_name}"] = arr
 
         logger.info(
             "prediction_fetch_complete",
-            steps=len(df),
-            columns=df.columns,
+            steps=n,
+            columns=list(arrays.keys()),
         )
 
-        return PredictionData(_df=df, dt_hours=dt_hours)
+        return PredictionData(_timestamps=timestamps, _arrays=arrays, dt_hours=dt_hours)

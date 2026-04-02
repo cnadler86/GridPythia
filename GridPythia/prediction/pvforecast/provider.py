@@ -4,7 +4,7 @@ from abc import abstractmethod
 from collections.abc import Mapping
 from typing import Optional, Sequence, Tuple
 
-import polars as pl
+import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from GridPythia.prediction.base import PredictionProvider
@@ -53,19 +53,18 @@ class PVForecastProvider(PredictionProvider):
     """Returns PV energy output in Wh per time step."""
 
     @staticmethod
-    def _sum_series_by_key(series_by_key: Mapping[str, pl.Series]) -> pl.Series:
-        """Sum a mapping of aligned energy series into one total series."""
+    def _sum_series_by_key(series_by_key: Mapping[str, np.ndarray]) -> np.ndarray:
+        """Sum a mapping of aligned energy arrays into one total array."""
         if not series_by_key:
-            return pl.Series([], dtype=pl.Float32)
+            return np.empty(0, dtype=np.float32)
 
-        total = [0.0] * len(next(iter(series_by_key.values())))
-        for series in series_by_key.values():
-            for idx, value in enumerate(series):
-                total[idx] += float(value)
-        return pl.Series(total, dtype=pl.Float32)
+        total = np.zeros(len(next(iter(series_by_key.values()))), dtype=np.float32)
+        for arr in series_by_key.values():
+            total += arr
+        return total
 
-    async def fetch_by_inverter(self, timestamps: pl.Series) -> dict[str, pl.Series]:
-        """Return Wh series keyed by inverter name.
+    async def fetch_by_inverter(self, timestamps: list) -> dict[str, np.ndarray]:
+        """Return Wh arrays keyed by inverter name.
 
         Providers without inverter-specific information fall back to a single
         synthetic inverter named ``inverter1``.
@@ -73,6 +72,6 @@ class PVForecastProvider(PredictionProvider):
         return {"inverter1": await self.fetch(timestamps)}
 
     @abstractmethod
-    async def fetch(self, timestamps: pl.Series) -> pl.Series:
-        """Return Float32 Series of Wh, same length as *timestamps*."""
+    async def fetch(self, timestamps: list) -> np.ndarray:
+        """Return float32 ndarray of Wh, same length as *timestamps*."""
         ...

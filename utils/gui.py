@@ -30,7 +30,6 @@ from matplotlib.axes import Axes
 matplotlib.use("TkAgg")
 import matplotlib.dates as mdates
 import numpy as np
-import polars as pl
 import yaml
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
@@ -503,7 +502,7 @@ class _Tab:
             on_error=lambda e, tb: self.app.root.after(0, lambda: self._fail(e, tb)),
         )
 
-    def _done(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
+    def _done(self, result: np.ndarray | dict, ts: list) -> None:
         # Disconnect stale hover callbacks before clearing
         for cid in self._hover_cids:
             self._canvas.mpl_disconnect(cid)
@@ -531,15 +530,15 @@ class _Tab:
             parent=self.frame,
         )
 
-    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
+    def _do_plot(self, result: np.ndarray | dict, ts: list) -> None:
         ax = _setup_plot_axes(self._fig)
-        # Default plotting: if we got a Series, plot it; if DataFrame, plot first column
-        if isinstance(result, pl.Series):
-            ax.plot(ts.to_list(), result.to_list(), linewidth=1.4)
+        # Default plotting: if we got an array, plot it; if dict, plot first channel
+        if isinstance(result, np.ndarray):
+            ax.plot(ts, result, linewidth=1.4)
         else:
-            cols = result.columns
-            if cols:
-                ax.plot(ts.to_list(), result[cols[0]].to_list(), linewidth=1.4)
+            keys = list(result.keys())
+            if keys:
+                ax.plot(ts, result[keys[0]], linewidth=1.4)
         _finalize_plot(ax, title=self.TITLE)
 
 
@@ -617,11 +616,11 @@ class ElecPriceTab(_Tab):
         cfg = EnergyChartsConfig(bidding_zone=self._zone.get(), charges_kwh=ch, vat_rate=vat)
         return ElecPriceEnergyCharts(cfg)
 
-    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
+    def _do_plot(self, result: np.ndarray | dict, ts: list) -> None:
         ax = _setup_plot_axes(self._fig)
-        t = ts.to_list()
-        s = result if isinstance(result, pl.Series) else result[result.columns[0]]
-        v = [x * 1000 for x in s.to_list()]  # EUR/Wh → EUR/kWh
+        t = ts
+        s = result if isinstance(result, np.ndarray) else next(iter(result.values()))
+        v = [x * 1000 for x in s]  # EUR/Wh → EUR/kWh
         ax.step(t, v, color="#1565C0", linewidth=1.5, where="post", label="Electric Price")
         ax.fill_between(t, v, alpha=0.12, color="#1565C0", step="post")
         _finalize_plot(ax, ylabel="EUR / kWh", title="Electricity Price")
@@ -654,11 +653,11 @@ class FeedInTariffTab(_Tab):
         """Create and return the configured feed-in tariff provider."""
         return FeedInTariffFixed(tariff_kwh=float(self._tariff.get()))
 
-    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
+    def _do_plot(self, result: np.ndarray | dict, ts: list) -> None:
         ax = _setup_plot_axes(self._fig)
-        t = ts.to_list()
-        s = result if isinstance(result, pl.Series) else result[result.columns[0]]
-        v = [x * 1000 for x in s.to_list()]  # Convert to kWh
+        t = ts
+        s = result if isinstance(result, np.ndarray) else next(iter(result.values()))
+        v = [x * 1000 for x in s]  # Convert to kWh
         ax.step(t, v, color="#2E7D32", linewidth=1.5, where="post", label="Feed-in Tariff")
         ax.fill_between(t, v, alpha=0.12, color="#2E7D32", step="post")
         _finalize_plot(ax, ylabel="EUR / kWh", title="Feed-in Tariff")
@@ -741,11 +740,11 @@ class LoadTab(_Tab):
             on_error=lambda e, tb: self.app.root.after(0, lambda: self._fail(e, tb)),
         )
 
-    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
+    def _do_plot(self, result: np.ndarray | dict, ts: list) -> None:
         ax = _setup_plot_axes(self._fig)
-        t = ts.to_list()
-        s = result if isinstance(result, pl.Series) else result[result.columns[0]]
-        v = s.to_list()
+        t = ts
+        s = result if isinstance(result, np.ndarray) else next(iter(result.values()))
+        v = list(s)
         ax.step(t, v, color="#E65100", linewidth=1.5, where="post")
         ax.fill_between(t, v, alpha=0.12, color="#E65100", step="post")
         _finalize_plot(ax, ylabel="Energy [Wh / step]", title="Load")
@@ -917,11 +916,11 @@ class PVForecastTab(_Tab):
             longitude=float(self._lon.get()),
         )
 
-    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
+    def _do_plot(self, result: np.ndarray | dict, ts: list) -> None:
         ax = _setup_plot_axes(self._fig)
-        t = ts.to_list()
-        s = result if isinstance(result, pl.Series) else result[result.columns[0]]
-        v = s.to_list()
+        t = ts
+        s = result if isinstance(result, np.ndarray) else next(iter(result.values()))
+        v = list(s)
         dt_hours = ((t[1] - t[0]).total_seconds() / 3600) if len(t) > 1 else 1.0
         ax.plot(t, v, color="#F57F17", linewidth=1.5)
         ax.fill_between(t, v, alpha=0.20, color="#FDD835")
@@ -1001,16 +1000,14 @@ class WeatherTab(_Tab):
             return WeatherOpenMeteo(latitude=lat, longitude=lon)
         return WeatherBrightSky(latitude=lat, longitude=lon)
 
-    def _do_plot(self, result: pl.Series | pl.DataFrame, ts: pl.Series) -> None:
-        # Accept either a Series (single-column) or a DataFrame
-        if isinstance(result, pl.Series):
-            # Convert to single-column DataFrame for uniform handling
-            col_name = result.name if result.name is not None else "value"
-            df = pl.DataFrame({col_name: result})
+    def _do_plot(self, result: np.ndarray | dict, ts: list) -> None:
+        # Accept either an array (single-channel) or a dict of channels
+        if isinstance(result, np.ndarray):
+            weather_data = {"value": result}
         else:
-            df = result
-        t = ts.to_list()
-        cols = df.columns
+            weather_data = result
+        t = ts
+        cols = list(weather_data.keys())
         n = len(cols)
         if n == 0:
             ax = self._fig.add_subplot(111)
@@ -1021,7 +1018,7 @@ class WeatherTab(_Tab):
         nrows = (n + ncols - 1) // ncols
         for i, col in enumerate(cols):
             ax = self._fig.add_subplot(nrows, ncols, i + 1)
-            v = df[col].to_list()
+            v = list(weather_data[col])
             color = _WCOLS[i % len(_WCOLS)]
             ax.plot(t, v, color=color, linewidth=1.2)
             ax.fill_between(t, v, alpha=0.08, color=color)
@@ -1248,7 +1245,7 @@ class OptimizationTab(_Tab):
             try:
                 # cache timestamps and dt for plotting
                 try:
-                    self._last_ts = pdata.timestamps.to_list()
+                    self._last_ts = pdata.timestamps
                 except Exception:
                     self._last_ts = None
                 self._last_dt = getattr(pdata, "dt_hours", None)
@@ -1288,14 +1285,14 @@ class OptimizationTab(_Tab):
                                 logger.exception("Failed to sum PV series and update PV tab")
                         if weather_tab is not None:
                             try:
-                                # rebuild weather dataframe without the 'weather_' prefix
-                                weather_cols = [
-                                    c for c in pdata.df.columns if c.startswith("weather_")
-                                ]
-                                if weather_cols:
-                                    data = {c[len("weather_") :]: pdata.df[c] for c in weather_cols}
-                                    wf = pl.DataFrame(data)
-                                    weather_tab._done(wf, ts)
+                                # collect weather channels (strip 'weather_' prefix)
+                                weather_data = {
+                                    k[len("weather_") :]: v
+                                    for k, v in pdata._arrays.items()
+                                    if k.startswith("weather_")
+                                }
+                                if weather_data:
+                                    weather_tab._done(weather_data, ts)
                             except Exception:
                                 logger.exception(
                                     "Failed to rebuild weather dataframe and update weather tab"

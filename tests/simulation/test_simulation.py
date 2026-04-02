@@ -1,8 +1,9 @@
 """Tests for the GridSimulation engine."""
 
 from array import array
+from datetime import datetime, timedelta
 
-import polars as pl
+import numpy as np
 import pytest
 
 from GridPythia.config.models import BatteryParameters, InverterParameters
@@ -175,16 +176,15 @@ OPTIMIZATION_HOURS = 24
 def _make_prediction(steps: int) -> PredictionData:
     """Build PredictionData from the test constants (first *steps* entries)."""
     n = steps
-    df = pl.DataFrame(
-        {
-            "timestamp": pl.Series(range(n), dtype=pl.Int64),
-            "electricprice_eur_wh": pl.Series(PRICES[:n], dtype=pl.Float32),
-            "feedintariff_eur_wh": pl.Series([0.00007] * n, dtype=pl.Float32),
-            "load_wh": pl.Series(LOAD[:n], dtype=pl.Float32),
-            "pv_inverter1_wh": pl.Series(PV_WH[:n], dtype=pl.Float32),
-        }
-    )
-    return PredictionData(_df=df, dt_hours=1.0)
+    arrays = {
+        "electricprice_eur_wh": np.array(PRICES[:n], dtype=np.float32),
+        "feedintariff_eur_wh": np.full(n, 0.00007, dtype=np.float32),
+        "load_wh": np.array(LOAD[:n], dtype=np.float32),
+        "pv_inverter1_wh": np.array(PV_WH[:n], dtype=np.float32),
+    }
+    start = datetime(2025, 1, 1)
+    timestamps = [start + timedelta(hours=i) for i in range(n)]
+    return PredictionData(_timestamps=timestamps, _arrays=arrays, dt_hours=1.0)
 
 
 @pytest.fixture

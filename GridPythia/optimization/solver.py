@@ -248,18 +248,16 @@ class LinearOptimizer:
         if price_series is None:
             price = np.zeros(T, dtype=float)
         else:
-            price = np.array(price_series.to_list(), dtype=float)
+            price = np.asarray(price_series, dtype=float)
 
         tariff_series = pred.feedintariff
         if tariff_series is None:
             feedin_tariff = np.zeros(T, dtype=float)
         else:
-            feedin_tariff = np.array(tariff_series.to_list(), dtype=float)
+            feedin_tariff = np.asarray(tariff_series, dtype=float)
 
-        load_wh = np.array(pred.load_wh.to_list(), dtype=float)
-        pv_by_source = {
-            k: np.array(v.to_list(), dtype=float) for k, v in pred.pv_by_inverter.items()
-        }
+        load_wh = np.asarray(pred.load_wh, dtype=float)
+        pv_by_source = {k: np.asarray(v, dtype=float) for k, v in pred.pv_by_inverter.items()}
 
         return _PreparedInputs(
             T=T,

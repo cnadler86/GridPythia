@@ -22,7 +22,7 @@ import asyncio
 from datetime import date, datetime, timedelta, timezone
 
 import aiohttp
-import polars as pl
+import numpy as np
 from pydantic import BaseModel, Field, field_validator
 from structlog import get_logger
 
@@ -396,14 +396,14 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
 
     # ── public API ────────────────────────────────────────────────────
 
-    async def fetch(self, timestamps: pl.Series) -> pl.Series:
+    async def fetch(self, timestamps: list) -> np.ndarray:
         """Return prices in EUR/Wh for each timestamp in *timestamps*.
 
         Contacts Energy-Charts only when the cache is stale (see module
         docstring); all other calls are served from the in-memory price map
         without any I/O.
         """
-        ts_list: list[datetime] = timestamps.to_list()
+        ts_list = timestamps
 
         requested_start = to_utc(ts_list[0])
         requested_end = to_utc(ts_list[-1])
@@ -452,4 +452,4 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
                 total_timestamps=len(ts_list),
             )
 
-        return pl.Series(result, dtype=pl.Float32)
+        return np.array(result, dtype=np.float32)

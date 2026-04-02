@@ -79,7 +79,7 @@ class TestLoadProfileCSVFetch:
         result = await provider.fetch(ts)
         assert len(result) == 24
         # Source is 1-h, target is 1-h → each slot must be exactly 100 Wh
-        assert all(v == pytest.approx(100.0) for v in result.to_list())
+        assert all(v == pytest.approx(100.0) for v in result)
 
     async def test_saturday_returns_saturday_values(self, tmp_path):
         p = tmp_path / "p.csv"
@@ -87,7 +87,7 @@ class TestLoadProfileCSVFetch:
         provider = LoadProfileCSV(LoadProfileConfig(path=p))
         ts = make_timestamps(_START_SAT, 24, 1.0)
         result = await provider.fetch(ts)
-        assert all(v == pytest.approx(200.0) for v in result.to_list())
+        assert all(v == pytest.approx(200.0) for v in result)
 
     async def test_sunday_returns_sunday_values(self, tmp_path):
         p = tmp_path / "p.csv"
@@ -95,7 +95,7 @@ class TestLoadProfileCSVFetch:
         provider = LoadProfileCSV(LoadProfileConfig(path=p))
         ts = make_timestamps(_START_SUN, 24, 1.0)
         result = await provider.fetch(ts)
-        assert all(v == pytest.approx(300.0) for v in result.to_list())
+        assert all(v == pytest.approx(300.0) for v in result)
 
     async def test_downsample_1h_source_to_1h_target_gives_exact_energy(self, tmp_path):
         p = tmp_path / "p.csv"
@@ -123,7 +123,7 @@ class TestLoadProfileCSVFetch:
         # Saturday → should use weekend column = 150 Wh
         ts = make_timestamps(_START_SAT, 24, 1.0)
         result = await provider.fetch(ts)
-        assert all(v == pytest.approx(150.0) for v in result.to_list())
+        assert all(v == pytest.approx(150.0) for v in result)
 
     async def test_15min_source_file(self, tmp_path):
         p = tmp_path / "p15.csv"
@@ -132,7 +132,7 @@ class TestLoadProfileCSVFetch:
         ts = make_timestamps(_START_MON, 24, 0.25)
         result = await provider.fetch(ts)
         assert len(result) == 96
-        assert all(v == pytest.approx(25.0) for v in result.to_list())
+        assert all(v == pytest.approx(25.0) for v in result)
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +173,7 @@ class TestLoadProfileCSVGetProfileSeries:
         provider = LoadProfileCSV(LoadProfileConfig(path=p))
         day_ts = make_timestamps(_START_MON, 24, 0.25)
         result = await provider.get_profile_series(day_ts, [DayType.WEEKDAY, DayType.WEEKEND])
-        values = result.to_list()
+        values = result
         # With smoothing the boundary transition shouldn't be a step > source wh/4
         boundary_idx = 96  # last slot of day 1 / first slot of day 2
         jump = abs(values[boundary_idx] - values[boundary_idx - 1])
@@ -260,7 +260,7 @@ class TestLoadProfileCSVHolidays:
         # 2025-01-01 is New Year's Day (holiday) → treated as Sunday → weekend = 200 Wh
         ts = make_timestamps(datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc), 24, 1.0)
         result = await provider.fetch(ts)
-        assert all(v == pytest.approx(200.0) for v in result.to_list())
+        assert all(v == pytest.approx(200.0) for v in result)
 
     async def test_non_holiday_weekday_unaffected(self, tmp_path: Path) -> None:
         p = tmp_path / "p.csv"
@@ -269,7 +269,7 @@ class TestLoadProfileCSVHolidays:
         # 2025-06-16 is a regular Monday
         ts = make_timestamps(datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc), 24, 1.0)
         result = await provider.fetch(ts)
-        assert all(v == pytest.approx(100.0) for v in result.to_list())
+        assert all(v == pytest.approx(100.0) for v in result)
 
 
 # ---------------------------------------------------------------------------

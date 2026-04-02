@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 
 import aiohttp
-import polars as pl
+import numpy as np
 from structlog import get_logger
 
 from GridPythia.prediction.base import resample_to_timestamps
@@ -39,8 +39,8 @@ class WeatherOpenMeteo(WeatherProvider):
     def provider_id(self) -> str:
         return "OpenMeteo"
 
-    async def fetch(self, timestamps: pl.Series) -> pl.DataFrame:
-        ts_list: list[datetime] = timestamps.to_list()
+    async def fetch(self, timestamps: list) -> dict[str, np.ndarray]:
+        ts_list = timestamps
         start = ts_list[0]
         end = ts_list[-1]
 
@@ -89,34 +89,32 @@ class WeatherOpenMeteo(WeatherProvider):
                     out[idx] = float(val)
             return out
 
-        return pl.DataFrame(
-            {
-                "temperature_c": resample_to_timestamps(
-                    _build("temperature_2m"), 1.0, timestamps, pad_value=0.0
-                ),
-                "humidity_pct": resample_to_timestamps(
-                    _build("relative_humidity_2m"), 1.0, timestamps, pad_value=0.0
-                ),
-                "cloud_cover_pct": resample_to_timestamps(
-                    _build("cloud_cover"), 1.0, timestamps, pad_value=0.0
-                ),
-                "wind_speed_kmh": resample_to_timestamps(
-                    _build("wind_speed_10m"), 1.0, timestamps, pad_value=0.0
-                ),
-                "precipitation_mm": resample_to_timestamps(
-                    _build("precipitation"), 1.0, timestamps, pad_value=0.0
-                ),
-                "pressure_hpa": resample_to_timestamps(
-                    _build("pressure_msl"), 1.0, timestamps, pad_value=0.0
-                ),
-                "ghi_wm2": resample_to_timestamps(
-                    _build("shortwave_radiation"), 1.0, timestamps, pad_value=0.0
-                ),
-                "dni_wm2": resample_to_timestamps(
-                    _build("direct_radiation"), 1.0, timestamps, pad_value=0.0
-                ),
-                "dhi_wm2": resample_to_timestamps(
-                    _build("diffuse_radiation"), 1.0, timestamps, pad_value=0.0
-                ),
-            }
-        )
+        return {
+            "temperature_c": resample_to_timestamps(
+                _build("temperature_2m"), 1.0, timestamps, pad_value=0.0
+            ),
+            "humidity_pct": resample_to_timestamps(
+                _build("relative_humidity_2m"), 1.0, timestamps, pad_value=0.0
+            ),
+            "cloud_cover_pct": resample_to_timestamps(
+                _build("cloud_cover"), 1.0, timestamps, pad_value=0.0
+            ),
+            "wind_speed_kmh": resample_to_timestamps(
+                _build("wind_speed_10m"), 1.0, timestamps, pad_value=0.0
+            ),
+            "precipitation_mm": resample_to_timestamps(
+                _build("precipitation"), 1.0, timestamps, pad_value=0.0
+            ),
+            "pressure_hpa": resample_to_timestamps(
+                _build("pressure_msl"), 1.0, timestamps, pad_value=0.0
+            ),
+            "ghi_wm2": resample_to_timestamps(
+                _build("shortwave_radiation"), 1.0, timestamps, pad_value=0.0
+            ),
+            "dni_wm2": resample_to_timestamps(
+                _build("direct_radiation"), 1.0, timestamps, pad_value=0.0
+            ),
+            "dhi_wm2": resample_to_timestamps(
+                _build("diffuse_radiation"), 1.0, timestamps, pad_value=0.0
+            ),
+        }

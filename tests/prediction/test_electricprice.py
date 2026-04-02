@@ -1,9 +1,10 @@
 """Tests for electricity price providers."""
 
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
-import polars as pl
+import numpy as np
 import pytest
 
 from GridPythia.prediction.base import make_timestamps
@@ -13,7 +14,7 @@ from GridPythia.prediction.electricprice.provider import ElecPriceFallbackChain
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 
 
-def _ts(hours: float = 24, dt: float = 1.0) -> pl.Series:
+def _ts(hours: float = 24, dt: float = 1.0) -> list:
     return make_timestamps(START, hours, dt)
 
 
@@ -23,7 +24,7 @@ class TestElecPriceFixed:
         result = await provider.fetch(_ts())
         assert len(result) == 24
         assert result[0] == pytest.approx(0.30 / 1000.0)
-        assert all(v == pytest.approx(result[0]) for v in result.to_list())
+        assert all(v == pytest.approx(result[0]) for v in result)
 
     async def test_flat_price_with_charges_and_vat(self):
         provider = ElecPriceFixed(price_kwh=0.25, charges_kwh=0.05, vat_rate=1.19)
@@ -54,8 +55,8 @@ class TestElecPriceFixed:
 
     async def test_returns_polars_series(self):
         result = await ElecPriceFixed().fetch(_ts())
-        assert isinstance(result, pl.Series)
-        assert result.dtype == pl.Float32
+        assert isinstance(result, np.ndarray)
+        assert result.dtype == np.float32
 
 
 class _FailingElecPriceProvider(ElecPriceFixed):
@@ -63,7 +64,7 @@ class _FailingElecPriceProvider(ElecPriceFixed):
     def provider_id(self) -> str:
         return "FailingElecPrice"
 
-    async def fetch(self, timestamps: pl.Series) -> pl.Series:
+    async def fetch(self, timestamps: list) -> np.ndarray:
         raise RuntimeError("primary provider failed")
 
 
@@ -74,7 +75,7 @@ class TestElecPriceFallbackChain:
         provider = ElecPriceFallbackChain(primary=primary, fallback=fallback)
 
         result = await provider.fetch(_ts(hours=2))
-        assert all(v == pytest.approx(0.25 / 1000.0) for v in result.to_list())
+        assert all(v == pytest.approx(0.25 / 1000.0) for v in result)
 
     async def test_switches_to_fallback_when_primary_raises(self):
         primary = _FailingElecPriceProvider()
@@ -82,7 +83,7 @@ class TestElecPriceFallbackChain:
         provider = ElecPriceFallbackChain(primary=primary, fallback=fallback)
 
         result = await provider.fetch(_ts(hours=2))
-        assert all(v == pytest.approx(0.40 / 1000.0) for v in result.to_list())
+        assert all(v == pytest.approx(0.40 / 1000.0) for v in result)
 
 
 class TestElecPriceEnergyChartsCache:
@@ -137,7 +138,7 @@ class TestElecPriceEnergyChartsCache:
         ts = make_timestamps(now, hours=24, dt_hours=1.0)
         result = await provider.fetch(ts)
 
-        assert isinstance(result, pl.Series)
+        assert isinstance(result, np.ndarray)
         assert len(result) == 24
         assert provider._request_prices.call_count == 1
         assert len(provider._price_map) > 0
@@ -207,7 +208,7 @@ class TestElecPriceEnergyChartsCache:
 
         ts = make_timestamps(now, hours=24, dt_hours=1.0)
         result1 = await provider.fetch(ts)
-        bucket1 = int(ts.to_list()[0].timestamp()) // 900
+        bucket1 = int(ts[0].timestamp()) // 900
         price1 = provider._price_map.get(bucket1, 0.0)
 
         # Expire source validity to force re-check and fetch raw_day2.
@@ -235,8 +236,6 @@ class TestElecPriceEnergyChartsCache:
         result = await provider.fetch(ts)
 
         assert len(result) == 48
-        # All entries must be non-None floats; zeros only for genuinely missing slots
-        assert result.null_count() == 0
         # At least the first hour should have a real API price (non-zero)
         assert result[0] > 0.0
 
@@ -276,8 +275,8 @@ class TestElecPriceEnergyChartsCache:
         ts1 = make_timestamps(now, hours=24, dt_hours=1.0)
         result1 = await provider.fetch(ts1)
         assert provider._request_prices.call_count == 1
-        assert result1.null_count() == 0
-        assert all(v > 0 for v in result1.to_list())
+        assert not np.any(np.isnan(result1))
+        assert np.all(result1 > 0)
 
         # Advance beyond buffer: last ts now+8+23=now+31h > map ceiling now+29h
         later = now + timedelta(hours=buffer_h + 2)
@@ -287,8 +286,8 @@ class TestElecPriceEnergyChartsCache:
         ts2 = make_timestamps(later, hours=24, dt_hours=1.0)
         result2 = await provider.fetch(ts2)
 
-        assert result2.null_count() == 0
-        assert all(v > 0 for v in result2.to_list()), (
+        assert not np.any(np.isnan(result2))
+        assert all(v > 0 for v in result2), (
             "Map should have been re-anchored; zeros mean stale coverage"
         )
 
@@ -338,14 +337,16 @@ class TestElecPriceEnergyChartsCache:
         provider._request_prices = AsyncMock(return_value=raw)
         ts = make_timestamps(now, hours=12, dt_hours=1.0)
         warm = await provider.fetch(ts)
-        assert all(v > 0.0 for v in warm.to_list())
+        assert all(v > 0.0 for v in warm)
 
         # Expire source validity to force a re-check that will fail.
-        provider._request_prices = AsyncMock(side_effect=RuntimeError("network down"))
+        provider._request_prices = cast(
+            Any, AsyncMock(side_effect=RuntimeError("network down"))
+        )
         provider._cache.source_valid_until = now - timedelta(seconds=1)
         cached = await provider.fetch(ts)
         assert len(cached) == 12
-        assert all(v > 0.0 for v in cached.to_list())
+        assert all(v > 0.0 for v in cached)
 
     async def test_refresh_error_without_cache_raises(self):
         """If EnergyCharts fails and cache is empty, error is raised for decorator chain."""
@@ -358,7 +359,9 @@ class TestElecPriceEnergyChartsCache:
         provider = ElecPriceEnergyCharts(
             EnergyChartsConfig(horizon_buffer=timedelta(hours=12)),
         )
-        provider._request_prices = AsyncMock(side_effect=RuntimeError("network down"))
+        provider._request_prices = cast(
+            Any, AsyncMock(side_effect=RuntimeError("network down"))
+        )
 
         now = datetime.now(timezone.utc)
         ts = make_timestamps(now, hours=6, dt_hours=1.0)
@@ -377,7 +380,7 @@ class TestElecPriceEnergyChartsCache:
         provider._request_prices = AsyncMock(return_value=raw_full)
         ts = make_timestamps(now, hours=24, dt_hours=1.0)
         first = await provider.fetch(ts)
-        assert all(v > 0.0 for v in first.to_list())
+        assert all(v > 0.0 for v in first)
 
         # Next refresh only returns very few fresh points.
         sparse = raw_full[-2:]
@@ -386,7 +389,7 @@ class TestElecPriceEnergyChartsCache:
 
         second = await provider.fetch(ts)
         assert len(second) == 24
-        assert second.null_count() == 0
+        assert not np.any(np.isnan(second))
 
     async def test_charges_and_vat_applied(self):
         """charges_kwh and vat_rate are factored into the cached prices."""
@@ -413,7 +416,7 @@ class TestElecPriceEnergyChartsCache:
         # configured charges and VAT when building the in-memory price map.
         charges_wh = provider._charges_kwh / 1000.0
         expected = (raw_price_wh + charges_wh) * (1+provider._vat_rate)
-        assert all(v == pytest.approx(expected, rel=1e-3) for v in result.to_list())
+        assert all(v == pytest.approx(expected, rel=1e-3) for v in result)
 
 
 class TestEnergyChartsSourceValidUntil:
@@ -508,4 +511,4 @@ async def test_energycharts_fetch_today():
         pytest.skip(f"Energy-Charts fetch failed: {exc}")
 
     assert len(prices) == 24
-    assert isinstance(prices, pl.Series)
+    assert isinstance(prices, np.ndarray)

@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 
 import aiohttp
-import polars as pl
+import numpy as np
 from structlog import get_logger
 
 from GridPythia.prediction.base import resample_to_timestamps
@@ -31,8 +31,8 @@ class WeatherBrightSky(WeatherProvider):
     def provider_id(self) -> str:
         return "BrightSky"
 
-    async def fetch(self, timestamps: pl.Series) -> pl.DataFrame:
-        ts_list: list[datetime] = timestamps.to_list()
+    async def fetch(self, timestamps: list) -> dict[str, np.ndarray]:
+        ts_list = timestamps
         start = ts_list[0]
         end = ts_list[-1]
 
@@ -99,14 +99,12 @@ class WeatherBrightSky(WeatherProvider):
                 # BrightSky 'solar' is in kJ/m²; convert to W/m² (÷ 3.6 for hourly avg)
                 ghi[idx] = float(rec.get("solar", 0) or 0) / 3.6
 
-        return pl.DataFrame(
-            {
-                "temperature_c": resample_to_timestamps(tmp, 1.0, timestamps, pad_value=0.0),
-                "cloud_cover_pct": resample_to_timestamps(cld, 1.0, timestamps, pad_value=0.0),
-                "wind_speed_kmh": resample_to_timestamps(wnd, 1.0, timestamps, pad_value=0.0),
-                "humidity_pct": resample_to_timestamps(hum, 1.0, timestamps, pad_value=0.0),
-                "precipitation_mm": resample_to_timestamps(pcp, 1.0, timestamps, pad_value=0.0),
-                "pressure_hpa": resample_to_timestamps(prs, 1.0, timestamps, pad_value=0.0),
-                "ghi_wm2": resample_to_timestamps(ghi, 1.0, timestamps, pad_value=0.0),
-            }
-        )
+        return {
+            "temperature_c": resample_to_timestamps(tmp, 1.0, timestamps, pad_value=0.0),
+            "cloud_cover_pct": resample_to_timestamps(cld, 1.0, timestamps, pad_value=0.0),
+            "wind_speed_kmh": resample_to_timestamps(wnd, 1.0, timestamps, pad_value=0.0),
+            "humidity_pct": resample_to_timestamps(hum, 1.0, timestamps, pad_value=0.0),
+            "precipitation_mm": resample_to_timestamps(pcp, 1.0, timestamps, pad_value=0.0),
+            "pressure_hpa": resample_to_timestamps(prs, 1.0, timestamps, pad_value=0.0),
+            "ghi_wm2": resample_to_timestamps(ghi, 1.0, timestamps, pad_value=0.0),
+        }

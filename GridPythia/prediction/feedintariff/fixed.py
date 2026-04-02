@@ -1,6 +1,6 @@
 """Fixed feed-in tariff provider."""
 
-import polars as pl
+import numpy as np
 
 from GridPythia.prediction.feedintariff.provider import FeedInTariffProvider
 
@@ -18,5 +18,5 @@ class FeedInTariffFixed(FeedInTariffProvider):
     def provider_id(self) -> str:
         return "FeedInTariffFixed"
 
-    async def fetch(self, timestamps: pl.Series) -> pl.Series:
-        return pl.Series([self._tariff_wh] * len(timestamps), dtype=pl.Float32)
+    async def fetch(self, timestamps: list) -> np.ndarray:
+        return np.full(len(timestamps), self._tariff_wh, dtype=np.float32)

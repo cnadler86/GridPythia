@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-import polars as pl
+import numpy as np
 import pytest
 
 from GridPythia.prediction.base import make_timestamps
@@ -10,5 +10,5 @@ from GridPythia.prediction.base import make_timestamps
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 
 
-def _ts(hours: float = 24, dt: float = 1.0) -> pl.Series:
+def _ts(hours: float = 24, dt: float = 1.0) -> list:
     return make_timestamps(START, hours, dt)

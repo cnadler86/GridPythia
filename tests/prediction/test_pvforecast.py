@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
-import polars as pl
+import numpy as np
 import pytest
 
 from GridPythia.prediction.base import make_timestamps
@@ -15,7 +15,7 @@ START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 _PLANE = PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0)
 
 
-def _ts(hours: float = 24, dt: float = 1.0) -> pl.Series:
+def _ts(hours: float = 24, dt: float = 1.0) -> list:
     return make_timestamps(START, hours, dt)
 
 
@@ -144,7 +144,7 @@ class TestPVForecastAkkudoktor:
         mock_req.return_value = values
         provider = PVForecastAkkudoktor(planes=[_PLANE], latitude=52.52, longitude=13.405)
         result = await provider.fetch(_ts())
-        assert all(v >= 0.0 for v in result.to_list())
+        assert all(v >= 0.0 for v in result)
 
     @patch.object(PVForecastAkkudoktor, "_request_raw", new_callable=AsyncMock)
     async def test_fetch_by_inverter_groups_planes(self, mock_req_raw):

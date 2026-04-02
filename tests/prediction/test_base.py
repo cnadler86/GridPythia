@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-import polars as pl
+import numpy as np
 import pytest
 
 from GridPythia.prediction.base import make_timestamps, resample_to_timestamps
@@ -13,10 +13,9 @@ START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 def test_make_timestamps_hourly():
     ts = make_timestamps(START, hours=3, dt_hours=1.0)
     assert len(ts) == 3
-    vals = ts.to_list()
-    assert vals[0] == START
-    assert vals[1] == START + timedelta(hours=1)
-    assert vals[2] == START + timedelta(hours=2)
+    assert ts[0] == START
+    assert ts[1] == START + timedelta(hours=1)
+    assert ts[2] == START + timedelta(hours=2)
 
 
 def test_make_timestamps_quarter_hour():
@@ -73,4 +72,4 @@ def test_resample_empty_source():
 def test_resample_dtype():
     ts = make_timestamps(START, hours=2, dt_hours=1.0)
     out = resample_to_timestamps([1.0, 2.0], 1.0, ts)
-    assert out.dtype == pl.Float32
+    assert out.dtype == np.float32

@@ -1,9 +1,8 @@
 """Fixed / time-of-use electricity price provider."""
 
 from dataclasses import dataclass
-from datetime import datetime
 
-import polars as pl
+import numpy as np
 
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 
@@ -52,7 +51,6 @@ class ElecPriceFixed(ElecPriceProvider):
                     return (w.value / 1000.0 + self._charges_kwh / 1000.0) * self._vat_rate
         return (self._price_kwh / 1000.0 + self._charges_kwh / 1000.0) * self._vat_rate
 
-    async def fetch(self, timestamps: pl.Series) -> pl.Series:
-        ts_list: list[datetime] = timestamps.to_list()
-        values = [self._price_at(t.hour + t.minute / 60.0) for t in ts_list]
-        return pl.Series(values, dtype=pl.Float32)
+    async def fetch(self, timestamps: list) -> np.ndarray:
+        values = [self._price_at(t.hour + t.minute / 60.0) for t in timestamps]
+        return np.array(values, dtype=np.float32)

@@ -120,10 +120,10 @@ class GridSimulation:
         self.simulation_steps = prediction.steps  # number of simulation steps
 
         # Load is already in Wh (no conversion needed)
-        self.load_energy_array = array("f", prediction.load_wh.to_list())
+        self.load_energy_array = array("f", prediction.load_wh)
         electricprice = prediction.electricprice
         if electricprice is not None:
-            self.electricity_price = array("f", electricprice.to_list())
+            self.electricity_price = array("f", electricprice)
         else:
             self.electricity_price = array("f", [0.0] * prediction.steps)
             logger.warning(
@@ -133,7 +133,7 @@ class GridSimulation:
             )
         feedintariff = prediction.feedintariff
         if feedintariff is not None:
-            self.electricity_revenue = array("f", feedintariff.to_list())
+            self.electricity_revenue = array("f", feedintariff)
         else:
             self.electricity_revenue = array("f", [0.0] * prediction.steps)
             logger.warning(
@@ -146,7 +146,7 @@ class GridSimulation:
         pv_by_inv = prediction.pv_by_inverter
         if pv_by_inv:
             # PV is already in Wh (no conversion needed)
-            self.pv_prediction_map = {k: array("f", v.to_list()) for k, v in pv_by_inv.items()}
+            self.pv_prediction_map = {k: array("f", v) for k, v in pv_by_inv.items()}
 
         # Build mapping of inverter id -> inverter and ensure uniqueness
         self.inverters: Dict[str, InverterBase] = {}

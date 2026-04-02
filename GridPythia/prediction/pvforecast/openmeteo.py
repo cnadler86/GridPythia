@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from time import monotonic
 from typing import ClassVar, Sequence
 
-import polars as pl
+import numpy as np
 from open_meteo_solar_forecast import OpenMeteoSolarForecast
 from structlog import get_logger
 
@@ -93,10 +93,9 @@ class PVForecastOpenMeteo(PVForecastProvider):
         return "PVForecastOpenMeteo"
 
     @staticmethod
-    def _target_dt_hours(timestamps: pl.Series) -> float:
-        ts_list: list[datetime] = timestamps.to_list()
-        if len(ts_list) >= 2:
-            return (ts_list[1] - ts_list[0]).total_seconds() / 3600.0
+    def _target_dt_hours(timestamps: list) -> float:
+        if len(timestamps) >= 2:
+            return (timestamps[1] - timestamps[0]).total_seconds() / 3600.0
         return 1.0
 
     # ── internal helpers ──────────────────────────────────────────────
@@ -172,8 +171,8 @@ class PVForecastOpenMeteo(PVForecastProvider):
 
     # ── public API ────────────────────────────────────────────────────
 
-    async def fetch_by_inverter(self, timestamps: pl.Series) -> dict[str, pl.Series]:
-        ts_list: list[datetime] = timestamps.to_list()
+    async def fetch_by_inverter(self, timestamps: list) -> dict[str, np.ndarray]:
+        ts_list = timestamps
         target_dt_hours = self._target_dt_hours(timestamps)
 
         def _to_utc(dt: datetime) -> datetime:
@@ -206,7 +205,7 @@ class PVForecastOpenMeteo(PVForecastProvider):
             plane_data_by_inverter[plane.inverter].append(plane_data)
 
         n_slots = max(1, round((end_utc - start_utc).total_seconds() / 900) + 4)
-        result: dict[str, pl.Series] = {}
+        result: dict[str, np.ndarray] = {}
         for inverter, plane_data_list in plane_data_by_inverter.items():
             quarterly = [0.0] * n_slots
             for plane_data in plane_data_list:
@@ -220,5 +219,5 @@ class PVForecastOpenMeteo(PVForecastProvider):
 
         return result
 
-    async def fetch(self, timestamps: pl.Series) -> pl.Series:
+    async def fetch(self, timestamps: list) -> np.ndarray:
         return self._sum_series_by_key(await self.fetch_by_inverter(timestamps))
