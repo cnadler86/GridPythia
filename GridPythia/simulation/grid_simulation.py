@@ -1,9 +1,10 @@
 """Grid simulation engine."""
 
-from array import array
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any
 
+import numpy as np
 from structlog import get_logger
 
 from GridPythia.prediction.prediction import PredictionData
@@ -22,56 +23,56 @@ class InverterSimulationDataStep:
     inverter: InverterBase
     mode: InverterMode
     generation: float = 0.0
-    ac_rate_pct: Optional[int] = None
+    ac_rate_pct: int | None = None
 
 
 @dataclass(slots=True)
 class SimulationResult:
-    costs_per_dt: array[float]
-    revenue_per_dt: array[float]
-    grid_import_wh_per_dt: array[float]
-    self_consumption_wh_per_dt: array[float]
-    feedin_wh_per_dt: array[float]
-    losses_wh_per_dt: array[float]
-    electricity_price_per_dt: array[float]
-    inverter_modes_per_dt: Dict[str, array[int]]
-    inverter_ac_rate_per_dt: Dict[str, array[int]] = field(default_factory=dict)
-    solar_generation_wh_per_dt: Dict[str, array[float]] = field(default_factory=dict)
-    battery_wh_per_dt: Dict[str, array[float]] = field(default_factory=dict)
-    battery_soc_percentage_per_dt: Dict[str, array[float]] = field(default_factory=dict)
+    costs_per_dt: np.ndarray
+    revenue_per_dt: np.ndarray
+    grid_import_wh_per_dt: np.ndarray
+    self_consumption_wh_per_dt: np.ndarray
+    feedin_wh_per_dt: np.ndarray
+    losses_wh_per_dt: np.ndarray
+    electricity_price_per_dt: np.ndarray
+    inverter_modes_per_dt: dict[str, np.ndarray]
+    inverter_ac_rate_per_dt: dict[str, np.ndarray] = field(default_factory=dict)
+    solar_generation_wh_per_dt: dict[str, np.ndarray] = field(default_factory=dict)
+    battery_wh_per_dt: dict[str, np.ndarray] = field(default_factory=dict)
+    battery_soc_percentage_per_dt: dict[str, np.ndarray] = field(default_factory=dict)
 
-    home_appliance_load_per_dt: Optional[array[float]] = None
+    home_appliance_load_per_dt: np.ndarray | None = None
 
     @property
     def total_losses(self) -> float:
-        return sum(self.losses_wh_per_dt)
+        return float(np.sum(self.losses_wh_per_dt))
 
     @property
     def total_grid_import(self) -> float:
-        return sum(self.grid_import_wh_per_dt)
+        return float(np.sum(self.grid_import_wh_per_dt))
 
     @property
     def total_feedin(self) -> float:
-        return sum(self.feedin_wh_per_dt)
+        return float(np.sum(self.feedin_wh_per_dt))
 
     @property
     def total_self_consumption(self) -> float:
-        return sum(self.self_consumption_wh_per_dt)
+        return float(np.sum(self.self_consumption_wh_per_dt))
 
     @property
     def total_cost(self) -> float:
-        return sum(self.costs_per_dt)
+        return float(np.sum(self.costs_per_dt))
 
     @property
     def total_revenue(self) -> float:
-        return sum(self.revenue_per_dt)
+        return float(np.sum(self.revenue_per_dt))
 
     @property
     def net_balance(self) -> float:
         """Net balance of the simulation in Euros (revenue - cost)."""
         return self.total_revenue - self.total_cost
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert the simulation result to a dictionary."""
 
         def _conv(obj: Any) -> Any:
@@ -113,19 +114,19 @@ class GridSimulation:
     def __init__(
         self,
         prediction: PredictionData,
-        inverters: Optional[list[InverterBase]] = None,
-        home_appliances: Optional[list[HomeAppliance]] = None,
+        inverters: list[InverterBase] | None = None,
+        home_appliances: list[HomeAppliance] | None = None,
     ) -> None:
         dt = prediction.dt_hours
         self.simulation_steps = prediction.steps  # number of simulation steps
 
         # Load is already in Wh (no conversion needed)
-        self.load_energy_array = array("f", prediction.load_wh)
+        self.load_energy_array = np.asarray(prediction.load_wh, dtype=np.float32)
         electricprice = prediction.electricprice
         if electricprice is not None:
-            self.electricity_price = array("f", electricprice)
+            self.electricity_price = np.asarray(electricprice, dtype=np.float32)
         else:
-            self.electricity_price = array("f", [0.0] * prediction.steps)
+            self.electricity_price = np.zeros(prediction.steps, dtype=np.float32)
             logger.warning(
                 "simulation_missing_electricity_price",
                 default_value=0.0,
@@ -133,23 +134,25 @@ class GridSimulation:
             )
         feedintariff = prediction.feedintariff
         if feedintariff is not None:
-            self.electricity_revenue = array("f", feedintariff)
+            self.electricity_revenue = np.asarray(feedintariff, dtype=np.float32)
         else:
-            self.electricity_revenue = array("f", [0.0] * prediction.steps)
+            self.electricity_revenue = np.zeros(prediction.steps, dtype=np.float32)
             logger.warning(
                 "simulation_missing_feedin_tariff",
                 default_value=0.0,
                 steps=prediction.steps,
             )
 
-        self.pv_prediction_map: Optional[Dict[str, array]] = None
+        self.pv_prediction_map: dict[str, np.ndarray] | None = None
         pv_by_inv = prediction.pv_by_inverter
         if pv_by_inv:
             # PV is already in Wh (no conversion needed)
-            self.pv_prediction_map = {k: array("f", v) for k, v in pv_by_inv.items()}
+            self.pv_prediction_map = {
+                k: np.asarray(v, dtype=np.float32) for k, v in pv_by_inv.items()
+            }
 
         # Build mapping of inverter id -> inverter and ensure uniqueness
-        self.inverters: Dict[str, InverterBase] = {}
+        self.inverters: dict[str, InverterBase] = {}
         if inverters:
             for inv in inverters:
                 inv_id = inv.device_id
@@ -161,7 +164,7 @@ class GridSimulation:
 
         self._inv_list: list[InverterBase] = list(self.inverters.values())
 
-        self._pv_per_inv: list[array[float]] = [
+        self._pv_per_inv: list[np.ndarray] = [
             self._get_pv_for_inverter(inv) for inv in self._inv_list
         ]
 
@@ -176,7 +179,7 @@ class GridSimulation:
         self.home_appliance_start_hours = [None] * len(self.home_appliances)
         self.home_appliance_start_hour = None
 
-        min_load_wh = min(self.load_energy_array) if self.load_energy_array else 0.0
+        min_load_wh = float(np.min(self.load_energy_array)) if self.load_energy_array.size else 0.0
         self._fraunhofer_sc_model = FraunhoferSCModel(
             baseload_wh=max(float(min_load_wh), 1e-6),
             dt=dt,
@@ -199,13 +202,13 @@ class GridSimulation:
         if self.home_appliance_start_hours:
             self.home_appliance_start_hours = [None] * len(self.home_appliances)
 
-    def _get_pv_for_inverter(self, inv: InverterBase) -> array[float]:
+    def _get_pv_for_inverter(self, inv: InverterBase) -> np.ndarray:
         if not inv._has_pv:
-            return array("f")
+            return np.empty(0, dtype=np.float32)
         pv_source = inv.parameters.pv_source
         if self.pv_prediction_map and pv_source and pv_source in self.pv_prediction_map:
             return self.pv_prediction_map[pv_source]
-        return array("f")
+        return np.empty(0, dtype=np.float32)
 
     def _simulate_step(
         self,
@@ -283,12 +286,12 @@ class GridSimulation:
 
     def simulate(
         self,
-        inverter_modes: Dict[str, array[InverterMode]],
-        inverter_ac_rates: Dict[str, array[int]],
-        appliance_load: Optional[array[float]] = None,
+        inverter_modes: Mapping[str, Sequence[InverterMode | int] | np.ndarray],
+        inverter_ac_rates: Mapping[str, Sequence[int] | np.ndarray],
+        appliance_load: Sequence[float] | np.ndarray | None = None,
         start_idx: int = 0,
         dt: float = 1.0,
-    ) -> Optional[SimulationResult]:
+    ) -> SimulationResult | None:
         """Simulate energy flows and costs for a contiguous time window."""
         total_idx = self.simulation_steps - start_idx
         if total_idx <= 0:
@@ -306,32 +309,50 @@ class GridSimulation:
         calc_sc_ratio = self._fraunhofer_sc_model.sc_ratio
 
         # Extract ordered arrays for the hot loop (avoids per-step dict lookups)
-        modes_arrs = [inverter_modes.get(inv.device_id, array("i", [])) for inv in inv_list]
-        rates_arrs = [inverter_ac_rates.get(inv.device_id, array("i", [])) for inv in inv_list]
+        modes_arrs = [
+            np.asarray(
+                inverter_modes.get(
+                    inv.device_id, np.full(self.simulation_steps, int(InverterMode.IDLE))
+                ),
+                dtype=np.int32,
+            )
+            for inv in inv_list
+        ]
+        rates_arrs = [
+            np.asarray(
+                inverter_ac_rates.get(inv.device_id, np.zeros(self.simulation_steps)),
+                dtype=np.int32,
+            )
+            for inv in inv_list
+        ]
 
         _step = self._simulate_step
         pv_lens = [len(a) for a in pv_arrs]
-        appl_len = len(appliance_load) if appliance_load is not None else -1
-        appl_arr = appliance_load
+        mode_lens = [len(a) for a in modes_arrs]
+        rate_lens = [len(a) for a in rates_arrs]
+        appl_arr = (
+            np.asarray(appliance_load, dtype=np.float32) if appliance_load is not None else None
+        )
+        appl_len = len(appl_arr) if appl_arr is not None else -1
 
-        costs_per_dt = array("f", [0.0] * total_idx)
-        revenue_per_dt = array("f", [0.0] * total_idx)
-        grid_import_wh_per_dt = array("f", [0.0] * total_idx)
-        feedin_wh_per_dt = array("f", [0.0] * total_idx)
-        self_consumption_wh_per_dt = array("f", [0.0] * total_idx)
-        losses_wh_per_dt = array("f", [0.0] * total_idx)
+        costs_per_dt = np.zeros(total_idx, dtype=np.float32)
+        revenue_per_dt = np.zeros(total_idx, dtype=np.float32)
+        grid_import_wh_per_dt = np.zeros(total_idx, dtype=np.float32)
+        feedin_wh_per_dt = np.zeros(total_idx, dtype=np.float32)
+        self_consumption_wh_per_dt = np.zeros(total_idx, dtype=np.float32)
+        losses_wh_per_dt = np.zeros(total_idx, dtype=np.float32)
 
-        battery_wh_per_dt: Dict[str, array[float]] = {}
-        battery_soc_percentage_per_dt: Dict[str, array[float]] = {}
+        battery_wh_per_dt: dict[str, np.ndarray] = {}
+        battery_soc_percentage_per_dt: dict[str, np.ndarray] = {}
         for inv in inv_list:
             if inv.battery is not None:
-                battery_wh_per_dt[inv.device_id] = array("f", [0.0] * total_idx)
-                battery_soc_percentage_per_dt[inv.device_id] = array("f", [0.0] * total_idx)
+                battery_wh_per_dt[inv.device_id] = np.zeros(total_idx, dtype=np.float32)
+                battery_soc_percentage_per_dt[inv.device_id] = np.zeros(total_idx, dtype=np.float32)
 
-        solar_generation_wh_per_dt: Dict[str, array[float]] = {}
+        solar_generation_wh_per_dt: dict[str, np.ndarray] = {}
         for inv in inv_list:
             if getattr(inv, "_has_pv", False):
-                solar_generation_wh_per_dt[inv.device_id] = array("f", [0.0] * total_idx)
+                solar_generation_wh_per_dt[inv.device_id] = np.zeros(total_idx, dtype=np.float32)
 
         _bat_tracking = [
             (
@@ -351,9 +372,10 @@ class GridSimulation:
 
             for j in range(n_inv):
                 step = step_buf[j]
-                step.mode = modes_arrs[j][h]
+                mode_raw = modes_arrs[j][h] if h < mode_lens[j] else int(InverterMode.IDLE)
+                step.mode = InverterMode(int(mode_raw))
                 step.generation = pv_arrs[j][h] if h < pv_lens[j] else 0.0
-                step.ac_rate_pct = int(rates_arrs[j][h])
+                step.ac_rate_pct = int(rates_arrs[j][h]) if h < rate_lens[j] else 0
 
             end_load, pv_ac_wh, losses_wh_per_dt[i], pv_per_inv_list = _step(step_buf, load_wh, dt)
 
@@ -387,24 +409,26 @@ class GridSimulation:
                 _pct_arr[i] = _soc * _pct_f
 
         # Build inverter mode/rate output dicts from the input arrays (no per-step copy)
-        inverter_modes_per_dt: Dict[str, array] = {
-            inv.device_id: array(
-                "b", inverter_modes[inv.device_id][start_idx : start_idx + total_idx]
+        inverter_modes_per_dt: dict[str, np.ndarray] = {
+            inv.device_id: np.asarray(
+                inverter_modes[inv.device_id][start_idx : start_idx + total_idx],
+                dtype=np.int8,
             )
             for inv in inv_list
             if inv.device_id in inverter_modes
         }
-        inverter_ac_rate_per_dt: Dict[str, array] = {
-            inv.device_id: array(
-                "i", inverter_ac_rates[inv.device_id][start_idx : start_idx + total_idx]
+        inverter_ac_rate_per_dt: dict[str, np.ndarray] = {
+            inv.device_id: np.asarray(
+                inverter_ac_rates[inv.device_id][start_idx : start_idx + total_idx],
+                dtype=np.int32,
             )
             for inv in inv_list
             if inv.device_id in inverter_ac_rates
         }
 
-        elec_price_series = array(
-            "f",
-            [price_arr[h] for h in range(start_idx, start_idx + total_idx)],
+        elec_price_series = np.asarray(
+            price_arr[start_idx : start_idx + total_idx],
+            dtype=np.float32,
         )
 
         return SimulationResult(
@@ -420,5 +444,5 @@ class GridSimulation:
             inverter_modes_per_dt=inverter_modes_per_dt,
             inverter_ac_rate_per_dt=inverter_ac_rate_per_dt,
             electricity_price_per_dt=elec_price_series,
-            home_appliance_load_per_dt=appliance_load or None,
+            home_appliance_load_per_dt=appl_arr.copy() if appl_arr is not None else None,
         )

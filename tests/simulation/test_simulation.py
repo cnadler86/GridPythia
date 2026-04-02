@@ -1,6 +1,5 @@
 """Tests for the GridSimulation engine."""
 
-from array import array
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -236,14 +235,14 @@ def test_simulation(grid_simulation: GridSimulation) -> None:
     n_hours = sim.simulation_steps
 
     inverter_modes = {
-        inv.device_id: array("i", [InverterMode.IDLE] * n_hours)
+        inv.device_id: np.full(n_hours, int(InverterMode.IDLE), dtype=np.int32)
         for inv in sim._inv_list
     }
     inverter_ac_rates = {
-        inv.device_id: array("i", [0] * n_hours)
+        inv.device_id: np.zeros(n_hours, dtype=np.int32)
         for inv in sim._inv_list
     }
-    appliance_load = array("f", [0.0] * n_hours)
+    appliance_load = np.zeros(n_hours, dtype=np.float32)
 
     result = sim.simulate(
         inverter_modes=inverter_modes,
@@ -275,18 +274,18 @@ def test_simulation_discharge_reduces_grid_draw(
     n_hours = sim.simulation_steps
 
     idle_modes = {
-        inv.device_id: array("i", [InverterMode.IDLE] * n_hours)
+        inv.device_id: np.full(n_hours, int(InverterMode.IDLE), dtype=np.int32)
         for inv in sim._inv_list
     }
     discharge_modes = {
-        inv.device_id: array("i", [InverterMode.DISCHARGE_ZERO_FEED_IN] * n_hours)
+        inv.device_id: np.full(n_hours, int(InverterMode.DISCHARGE_ZERO_FEED_IN), dtype=np.int32)
         for inv in sim._inv_list
     }
     rates = {
-        inv.device_id: array("i", [0] * n_hours)
+        inv.device_id: np.zeros(n_hours, dtype=np.int32)
         for inv in sim._inv_list
     }
-    appliance_load = array("f", [0.0] * n_hours)
+    appliance_load = np.zeros(n_hours, dtype=np.float32)
 
     r_idle = sim.simulate(idle_modes, rates, appliance_load, start_idx=START_IDX)
     r_discharge = sim.simulate(
@@ -303,14 +302,14 @@ def test_simulation_reset(grid_simulation: GridSimulation) -> None:
     n_hours = sim.simulation_steps
 
     modes = {
-        inv.device_id: array("i", [InverterMode.DISCHARGE_ZERO_FEED_IN] * n_hours)
+        inv.device_id: np.full(n_hours, int(InverterMode.DISCHARGE_ZERO_FEED_IN), dtype=np.int32)
         for inv in sim._inv_list
     }
     rates = {
-        inv.device_id: array("i", [0] * n_hours)
+        inv.device_id: np.zeros(n_hours, dtype=np.int32)
         for inv in sim._inv_list
     }
-    appliance_load = array("f", [0.0] * n_hours)
+    appliance_load = np.zeros(n_hours, dtype=np.float32)
 
     r1 = sim.simulate(modes, rates, appliance_load, start_idx=START_IDX)
     r2 = sim.simulate(modes, rates, appliance_load, start_idx=START_IDX)

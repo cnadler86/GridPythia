@@ -9,7 +9,6 @@ this LP model for now.
 from __future__ import annotations
 
 import time
-from array import array
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -681,11 +680,11 @@ class LinearOptimizer:
         revenue = gf * prep.feedin_tariff
 
         losses_arr = np.zeros(T, dtype=float)
-        battery_wh_per_dt: dict[str, array] = {}
-        battery_soc_pct: dict[str, array] = {}
-        solar_gen_per_dt: dict[str, array] = {}
-        inv_modes_per_dt: dict[str, array] = {}
-        inv_rates_per_dt: dict[str, array] = {}
+        battery_wh_per_dt: dict[str, np.ndarray] = {}
+        battery_soc_pct: dict[str, np.ndarray] = {}
+        solar_gen_per_dt: dict[str, np.ndarray] = {}
+        inv_modes_per_dt: dict[str, np.ndarray] = {}
+        inv_rates_per_dt: dict[str, np.ndarray] = {}
         inverter_plans: list[dict] = []
 
         for block in blocks:
@@ -698,14 +697,14 @@ class LinearOptimizer:
             pv_to_bat = self._expr_to_vec(block.pv_to_bat, T)
 
             if inv.parameters.pv_source is not None:
-                solar_gen_per_dt[inv_id] = array("f", pv_ac.tolist())
+                solar_gen_per_dt[inv_id] = np.asarray(pv_ac, dtype=np.float32)
 
             if inv.battery is not None and block.soc is not None:
                 bat = inv.battery
                 soc_vals = np.maximum(np.asarray(block.soc.value, dtype=float), 0.0)
-                battery_wh_per_dt[inv_id] = array("f", soc_vals.tolist())
-                battery_soc_pct[inv_id] = array(
-                    "f", (soc_vals * (100.0 / bat.capacity_wh)).tolist()
+                battery_wh_per_dt[inv_id] = np.asarray(soc_vals, dtype=np.float32)
+                battery_soc_pct[inv_id] = np.asarray(
+                    soc_vals * (100.0 / bat.capacity_wh), dtype=np.float32
                 )
 
                 eta_c_ac = inv.parameters.ac_to_dc_efficiency * bat.charging_efficiency
@@ -717,18 +716,18 @@ class LinearOptimizer:
 
             # Build mode/rate series for simulation replay and UI output.
             modes, rates = self._extract_modes_and_rates(block, p_ch, p_dc, dt)
-            inv_modes_per_dt[inv_id] = array("b", modes)
-            inv_rates_per_dt[inv_id] = array("i", rates)
+            inv_modes_per_dt[inv_id] = np.asarray(modes, dtype=np.int8)
+            inv_rates_per_dt[inv_id] = np.asarray(rates, dtype=np.int32)
             inverter_plans.append({"device_id": inv_id, "modes": modes, "rates": rates})
 
         result = SimulationResult(
-            costs_per_dt=array("f", costs.tolist()),
-            revenue_per_dt=array("f", revenue.tolist()),
-            grid_import_wh_per_dt=array("f", gi.tolist()),
-            self_consumption_wh_per_dt=array("f", self_consumption.tolist()),
-            feedin_wh_per_dt=array("f", gf.tolist()),
-            losses_wh_per_dt=array("f", losses_arr.tolist()),
-            electricity_price_per_dt=array("f", prep.price.tolist()),
+            costs_per_dt=np.asarray(costs, dtype=np.float32),
+            revenue_per_dt=np.asarray(revenue, dtype=np.float32),
+            grid_import_wh_per_dt=np.asarray(gi, dtype=np.float32),
+            self_consumption_wh_per_dt=np.asarray(self_consumption, dtype=np.float32),
+            feedin_wh_per_dt=np.asarray(gf, dtype=np.float32),
+            losses_wh_per_dt=np.asarray(losses_arr, dtype=np.float32),
+            electricity_price_per_dt=np.asarray(prep.price, dtype=np.float32),
             inverter_modes_per_dt=inv_modes_per_dt,
             inverter_ac_rate_per_dt=inv_rates_per_dt,
             solar_generation_wh_per_dt=solar_gen_per_dt,
@@ -829,18 +828,18 @@ class LinearOptimizer:
             prediction=self.prediction, inverters=self.inverters, home_appliances=None
         )
 
-        modes: dict[str, array] = {}
-        rates: dict[str, array] = {}
+        modes: dict[str, np.ndarray] = {}
+        rates: dict[str, np.ndarray] = {}
 
         for inv in self.inverters:
             inv_id = inv.device_id
             plan = next((p for p in solution.inverter_plans if p["device_id"] == inv_id), None)
             if plan is None:
-                modes[inv_id] = array("i", [int(InverterMode.IDLE)] * prep.T)
-                rates[inv_id] = array("i", [0] * prep.T)
+                modes[inv_id] = np.full(prep.T, int(InverterMode.IDLE), dtype=np.int32)
+                rates[inv_id] = np.zeros(prep.T, dtype=np.int32)
             else:
-                modes[inv_id] = array("i", plan["modes"])
-                rates[inv_id] = array("i", [int(x) for x in plan["rates"]])
+                modes[inv_id] = np.asarray(plan["modes"], dtype=np.int32)
+                rates[inv_id] = np.asarray([int(x) for x in plan["rates"]], dtype=np.int32)
 
         sim_result = sim.simulate(
             inverter_modes=modes,

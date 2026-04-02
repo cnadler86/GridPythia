@@ -16,7 +16,6 @@ import threading
 import tkinter as tk
 import traceback
 import uuid
-from array import array
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -1463,8 +1462,8 @@ class OptimizationTab(_Tab):
                 def _sim_done(res_tuple: object) -> None:
                     self._optimization_running = False
                     # res_tuple may be a LinearSolution or legacy tuple
-                    inv_modes_arrs: Optional[list[array]] = None
-                    inv_ac_rates_arrs: Optional[list[array]] = None
+                    inv_modes_arrs: Optional[list[np.ndarray]] = None
+                    inv_ac_rates_arrs: Optional[list[np.ndarray]] = None
                     solve_meta: str | None = None
                     simulation_error: dict[str, Any] | None = None
 
@@ -1486,11 +1485,9 @@ class OptimizationTab(_Tab):
                         if sol.inverter_plans:
                             plan = sol.inverter_plans[0]
                             try:
-                                inv_modes_arrs = [
-                                    array("i", [int(x) for x in plan.get("modes", [])])
-                                ]
+                                inv_modes_arrs = [np.asarray(plan.get("modes", []), dtype=np.int32)]
                                 inv_ac_rates_arrs = [
-                                    array("i", [int(x) for x in plan.get("rates", [])])
+                                    np.asarray(plan.get("rates", []), dtype=np.int32)
                                 ]
                             except Exception:
                                 inv_modes_arrs = None
@@ -1499,7 +1496,7 @@ class OptimizationTab(_Tab):
                         # legacy tuple (res, modes, rates)
                         if isinstance(res_tuple, tuple):
                             t = cast(
-                                Tuple[Any, Optional[list[array]], Optional[list[array]]],
+                                Tuple[Any, Optional[list[np.ndarray]], Optional[list[np.ndarray]]],
                                 res_tuple,
                             )
                             res, inv_modes_arrs, inv_ac_rates_arrs = t
@@ -1791,7 +1788,8 @@ class OptimizationTab(_Tab):
         pred_sig = self._prediction_signature(start, hours, dt)
         if self._prediction_cache is not None and self._prediction_cache_sig == pred_sig:
             logger.info("prediction_fetch_reused", tab="optimization")
-            self.app.root.after(0, lambda: on_pred_done(self._prediction_cache))
+            cached = self._prediction_cache
+            self.app.root.after(0, lambda c=cached: on_pred_done(c))
             return
 
         run_id = uuid.uuid4().hex[:8]
