@@ -29,12 +29,12 @@ from matplotlib.axes import Axes
 matplotlib.use("TkAgg")
 import matplotlib.dates as mdates
 import numpy as np
-import yaml
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from structlog import get_logger
 
-from GridPythia.config.models import BatteryParameters, InverterParameters
+from GridPythia.config import AppConfig
+from GridPythia.config.optimization import BatteryParameters, InverterParameters
 from GridPythia.optimization.solver import LinearOptimizer, LinearSolution, OptimizationObjective
 from GridPythia.prediction.base import make_timestamps
 from GridPythia.prediction.electricprice.energycharts import (
@@ -645,7 +645,7 @@ class FeedInTariffTab(_Tab):
             f,
             row,
             "Tariff EUR/kWh",
-            self.app.cfg_text("prediction", "feedintariff", "fixed", "tariff_kwh", default="0.0"),
+            self.app.cfg_text("prediction", "feedintariff", "tariff_kwh", default="0.0"),
         )
 
     def make_provider(self) -> object:
@@ -811,7 +811,7 @@ class PVForecastTab(_Tab):
             row,
             "Damp. morning",
             self.app.cfg_text(
-                "prediction", "pvforecast", "plane", "damping_morning", default="2.0"
+                "prediction", "pvforecast", "openmeteo", "damping_morning", default="2.0"
             ),
         )
         row += 1
@@ -820,13 +820,13 @@ class PVForecastTab(_Tab):
             row,
             "Damp. evening",
             self.app.cfg_text(
-                "prediction", "pvforecast", "plane", "damping_evening", default="0.2"
+                "prediction", "pvforecast", "openmeteo", "damping_evening", default="0.2"
             ),
         )
         row += 1
         self._partial_shading = tk.BooleanVar(
             value=self.app.cfg_bool(
-                "prediction", "pvforecast", "plane", "partial_shading", default=False
+                "prediction", "pvforecast", "openmeteo", "partial_shading", default=False
             )
         )
         ttk.Checkbutton(f, text="Partial shading", variable=self._partial_shading).grid(
@@ -850,14 +850,14 @@ class PVForecastTab(_Tab):
                 f,
                 row,
                 "Latitude",
-                self.app.cfg_text("prediction", "pvforecast", "latitude", default="47.99545"),
+                self.app.cfg_text("prediction", "latitude", default="47.99545"),
             )
             row += 1
             self._lon = _field(
                 f,
                 row,
                 "Longitude",
-                self.app.cfg_text("prediction", "pvforecast", "longitude", default="7.83355"),
+                self.app.cfg_text("prediction", "longitude", default="7.83355"),
             )
             row += 1
             if prov == "OpenMeteo":
@@ -981,14 +981,14 @@ class WeatherTab(_Tab):
             f,
             row,
             "Latitude",
-            self.app.cfg_text("prediction", "weather", "latitude", default="52.52"),
+            self.app.cfg_text("prediction", "latitude", default="47.99545"),
         )
         row += 1
         self._lon = _field(
             f,
             row,
             "Longitude",
-            self.app.cfg_text("prediction", "weather", "longitude", default="13.405"),
+            self.app.cfg_text("prediction", "longitude", default="7.83355"),
         )
 
     def make_provider(self) -> object:
@@ -1050,7 +1050,7 @@ class OptimizationTab(_Tab):
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
 
-        objective_raw = self.app.cfg_text("optimization", "solver", "objective", default="cost")
+        objective_raw = self.app.app_config.optimization.solver.objective
         objective_default = (
             "Maximize Self-consumption" if "self" in objective_raw.lower() else "Minimize Cost"
         )
@@ -1069,55 +1069,58 @@ class OptimizationTab(_Tab):
             row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 0)
         )
         row += 1
-        # Load first battery from list
-        bat = self.app.cfg_list_item("optimization", "batteries", idx=0, default={})
+        bat = (
+            self.app.app_config.optimization.batteries[0]
+            if self.app.app_config.optimization.batteries
+            else BatteryParameters()
+        )
         self._bat_id = _field(
             f,
             row,
             "Battery ID",
-            self.app.cfg_text_from_dict(bat, "device_id", default="battery1"),
+            bat.device_id,
         )
         row += 1
         self._bat_capacity = _field(
             f,
             row,
             "Battery capacity Wh",
-            self.app.cfg_text_from_dict(bat, "capacity_wh", default="1920"),
+            str(bat.capacity_wh),
         )
         row += 1
         self._bat_ch_eff = _field(
             f,
             row,
             "Charging efficiency",
-            self.app.cfg_text_from_dict(bat, "charging_efficiency", default="0.98"),
+            str(bat.charging_efficiency),
         )
         row += 1
         self._bat_dc_eff = _field(
             f,
             row,
             "Discharging efficiency",
-            self.app.cfg_text_from_dict(bat, "discharging_efficiency", default="0.98"),
+            str(bat.discharging_efficiency),
         )
         row += 1
         self._initial_soc = _field(
             f,
             row,
             "Initial battery SoC (%)",
-            self.app.cfg_text_from_dict(bat, "initial_soc_percentage", default="50.0"),
+            str(bat.initial_soc_percentage),
         )
         row += 1
         self._min_soc = _field(
             f,
             row,
             "Min SoC (%)",
-            self.app.cfg_text_from_dict(bat, "min_soc_percentage", default="20"),
+            str(bat.min_soc_percentage),
         )
         row += 1
         self._max_soc = _field(
             f,
             row,
             "Max SoC (%)",
-            self.app.cfg_text_from_dict(bat, "max_soc_percentage", default="100"),
+            str(bat.max_soc_percentage),
         )
         row += 1
 
@@ -1126,60 +1129,61 @@ class OptimizationTab(_Tab):
             row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 0)
         )
         row += 1
-        # Load first inverter from list
-        inv = self.app.cfg_list_item("optimization", "inverters", idx=0, default={})
+        inv = (
+            self.app.app_config.optimization.inverters[0]
+            if self.app.app_config.optimization.inverters
+            else InverterParameters(battery_id="battery1")
+        )
         self._inv_id = _field(
             f,
             row,
             "Device ID",
-            self.app.cfg_text_from_dict(inv, "device_id", default="inverter1"),
+            inv.device_id,
         )
         row += 1
         self._pv_source = _field(
             f,
             row,
             "PV source key",
-            self.app.cfg_text_from_dict(inv, "pv_source", default="inverter1"),
+            inv.pv_source or "inverter1",
         )
         row += 1
         self._inv_max_out = _field(
             f,
             row,
             "Max AC output W",
-            self.app.cfg_text_from_dict(inv, "max_ac_output_power_w", default="800"),
+            str(inv.max_ac_output_power_w),
         )
         row += 1
         self._inv_max_charge = _field(
             f,
             row,
             "Max AC charge W",
-            self.app.cfg_text_from_dict(inv, "max_ac_charge_power_w", default="1000"),
+            str(inv.max_ac_charge_power_w),
         )
         row += 1
         self._inv_dc2ac = _field(
             f,
             row,
             "DC→AC eff",
-            self.app.cfg_text_from_dict(inv, "dc_to_ac_efficiency", default="0.95"),
+            str(inv.dc_to_ac_efficiency),
         )
         row += 1
         self._inv_ac2dc = _field(
             f,
             row,
             "AC→DC eff",
-            self.app.cfg_text_from_dict(inv, "ac_to_dc_efficiency", default="0.95"),
+            str(inv.ac_to_dc_efficiency),
         )
         row += 1
         self._inv_mode_switch_cost = _field(
             f,
             row,
             "Mode switch cost EUR",
-            self.app.cfg_text_from_dict(inv, "mode_switch_cost", default="0.005"),
+            str(inv.mode_switch_cost),
         )
         row += 1
-        self._zero_feed_in = tk.BooleanVar(
-            value=self.app.cfg_bool_from_dict(inv, "zero_feed_in", default=True)
-        )
+        self._zero_feed_in = tk.BooleanVar(value=inv.zero_feed_in)
         ttk.Checkbutton(
             f,
             text="Zero feed-in (prevent exporting)",
@@ -1403,8 +1407,12 @@ class OptimizationTab(_Tab):
 
                 def _make_devices(params: BatteryParameters) -> Tuple[Battery, InverterBase]:
                     bat = Battery(params, prediction_hours=int(hours))
-                    inv_cfg = self.app.cfg_list_item("optimization", "inverters", idx=0, default={})
-                    raw_rates = inv_cfg.get("ac_rates_pct") if isinstance(inv_cfg, dict) else None
+                    inv_cfg = (
+                        self.app.app_config.optimization.inverters[0]
+                        if self.app.app_config.optimization.inverters
+                        else None
+                    )
+                    raw_rates = inv_cfg.ac_rates_pct if inv_cfg is not None else None
                     ac_rates: tuple[int, ...] | None = None
                     if isinstance(raw_rates, (list, tuple)):
                         norm = sorted({int(r) for r in raw_rates if 0 < int(r) <= 100})
@@ -1836,6 +1844,7 @@ class App:
         self.root = tk.Tk()
         default_config_path = Path(__file__).resolve().parent.parent / "config.yaml"
         self._config_path = tk.StringVar(value=str(default_config_path))
+        self._app_config = AppConfig()
         self._yaml_config: dict[str, Any] = {}
         self._load_yaml_config(show_error=False)
         self.root.title("Forecast Preview  —  dev tool")
@@ -1864,19 +1873,22 @@ class App:
                 )
             return False
         try:
-            with path.open("r", encoding="utf-8") as fh:
-                loaded = yaml.safe_load(fh) or {}
-            if not isinstance(loaded, dict):
-                raise ValueError("Root YAML node must be a mapping")
-            self._yaml_config = loaded
+            self._app_config = AppConfig.from_yaml_file(path)
+            self._yaml_config = self._app_config.model_dump(mode="python")
             return True
         except Exception as exc:
-            self._yaml_config = {}
+            self._app_config = AppConfig()
+            self._yaml_config = self._app_config.model_dump(mode="python")
             if show_error:
                 messagebox.showerror(
                     "Config error", f"Failed to load YAML:\n{exc}", parent=self.root
                 )
             return False
+
+    @property
+    def app_config(self) -> AppConfig:
+        """Return the validated root config model."""
+        return self._app_config
 
     def cfg(self, *path: str, default: Any = None) -> Any:
         node: Any = self._yaml_config

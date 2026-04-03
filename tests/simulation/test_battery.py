@@ -2,7 +2,7 @@
 
 import pytest
 
-from GridPythia.config.models import BatteryParameters
+from GridPythia.config.optimization import BatteryParameters
 from GridPythia.simulation.devices.battery import Battery
 
 

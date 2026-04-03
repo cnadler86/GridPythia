@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 
 from structlog import get_logger
 
-from GridPythia.config.models import DEFAULT_AC_RATES, InverterParameters
+from GridPythia.config.optimization import DEFAULT_AC_RATES, InverterParameters
 from GridPythia.simulation.devices import (
     EnergyFlowResult,
     InverterMode,

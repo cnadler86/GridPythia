@@ -3,7 +3,7 @@
 import pytest
 
 from GridPythia.simulation.devices import InverterMode, SystemTopology
-from GridPythia.config.models import BatteryParameters, DEFAULT_AC_RATES, InverterParameters
+from GridPythia.config.optimization import BatteryParameters, DEFAULT_AC_RATES, InverterParameters
 from GridPythia.simulation.devices.battery import Battery
 from GridPythia.simulation.devices.inverterbase import InverterBase
 

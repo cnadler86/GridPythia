@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pytest
 
-from GridPythia.config.models import BatteryParameters, InverterParameters
+from GridPythia.config.optimization import BatteryParameters, InverterParameters
 from GridPythia.optimization.solver import LinearOptimizer, OptimizationObjective
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices import InverterMode

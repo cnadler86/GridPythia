@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from GridPythia.config.models import BatteryParameters, InverterParameters
+from GridPythia.config.optimization import BatteryParameters, InverterParameters
 from GridPythia.optimization.solver import LinearOptimizer, OptimizationObjective
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices.battery import Battery

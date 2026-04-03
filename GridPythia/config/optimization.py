@@ -1,9 +1,9 @@
-"""Centralized configuration models for inverters and batteries using Pydantic v2."""
+"""Pydantic configuration models for optimization-related settings."""
 
 from __future__ import annotations
 
 from itertools import count
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -35,7 +35,7 @@ class BatteryParameters(BaseModel):
     max_discharge_power_w: float = Field(
         default=5000, ge=0.0, description="Max discharge power in W"
     )
-    initial_soc_percentage: int = Field(default=0, ge=0, le=100, description="Initial SoC in %")
+    initial_soc_percentage: int = Field(default=50, ge=0, le=100, description="Initial SoC in %")
     min_soc_percentage: int = Field(default=0, ge=0, le=100, description="Minimum SoC in %")
     max_soc_percentage: int = Field(default=100, ge=0, le=100, description="Maximum SoC in %")
 
@@ -73,10 +73,10 @@ class InverterParameters(BaseModel):
     max_ac_output_power_w: float = Field(default=5000, ge=0.0, description="Max AC output in W")
     max_ac_charge_power_w: float = Field(default=0.0, ge=0.0, description="Max AC charge in W")
     dc_to_ac_efficiency: float = Field(
-        default=0.95, ge=0.0, le=1.0, description="DC→AC efficiency [0, 1]"
+        default=0.95, ge=0.0, le=1.0, description="DC->AC efficiency [0, 1]"
     )
     ac_to_dc_efficiency: float = Field(
-        default=0.95, ge=0.0, le=1.0, description="AC→DC efficiency [0, 1]"
+        default=0.95, ge=0.0, le=1.0, description="AC->DC efficiency [0, 1]"
     )
     zero_feed_in: bool = Field(default=True, description="Enable zero-feed-in mode")
     ac_rates_pct: tuple[int, ...] = Field(
@@ -84,7 +84,7 @@ class InverterParameters(BaseModel):
         description="Discrete charge/discharge rates in percent (1..100)",
     )
     mode_switch_cost: float = Field(
-        default=0.005, ge=0.0, description="Cost (€) per inverter mode change (wear cost)"
+        default=0.005, ge=0.0, description="Cost (EUR) per inverter mode change (wear cost)"
     )
 
     @field_validator("battery_id", "pv_source", mode="before")
@@ -93,7 +93,7 @@ class InverterParameters(BaseModel):
         """Ensure at least battery_id or pv_source is provided."""
         if info.context and info.context.get("skip_topology_check"):
             return v
-        # Check will happen in second pass after both fields are set
+        # Check will happen in second pass after both fields are set.
         return v
 
     def model_post_init(self, __context) -> None:  # noqa: ARG002
@@ -116,3 +116,17 @@ class InverterParameters(BaseModel):
                     normalized.add(r)
             return tuple(sorted(x for x in normalized if 0 < x <= 100))
         return v
+
+
+class OptimizationSolverConfig(BaseModel):
+    """Optimizer objective and solver-wide settings."""
+
+    objective: Literal["cost", "self_consumption"] = "cost"
+
+
+class OptimizationConfig(BaseModel):
+    """Top-level optimization section from config.yaml."""
+
+    solver: OptimizationSolverConfig = Field(default_factory=OptimizationSolverConfig)
+    batteries: list[BatteryParameters] = Field(default_factory=list)
+    inverters: list[InverterParameters] = Field(default_factory=list)

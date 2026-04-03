@@ -6,7 +6,7 @@ from typing import Any
 
 from structlog import get_logger
 
-from GridPythia.config.models import BatteryParameters
+from GridPythia.config.optimization import BatteryParameters
 
 logger = get_logger(__name__)
 
