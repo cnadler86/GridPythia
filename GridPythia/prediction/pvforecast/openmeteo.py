@@ -202,7 +202,7 @@ class PVForecastOpenMeteo(PVForecastProvider):
                     cache_age_s=round(now_mono - cached[2]),
                 )
                 plane_data = cached[3]
-            plane_data_by_inverter[plane.inverter].append(plane_data)
+            plane_data_by_inverter[plane.inverter_id].append(plane_data)
 
         n_slots = max(1, round((end_utc - start_utc).total_seconds() / 900) + 4)
         result: dict[str, np.ndarray] = {}

@@ -40,7 +40,7 @@ class PVPlaneConfig(BaseModel):
     damping_morning: float = 0.0
     damping_evening: float = 0.0
     partial_shading: bool = False
-    inverter: str = "inverter1"
+    inverter_id: str = Field("inverter1")
 
     model_config = ConfigDict(frozen=True)
 

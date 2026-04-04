@@ -27,7 +27,7 @@ class TestPVPlaneConfig:
         p = PVPlaneConfig(peak_kw=3.0, tilt=30.0, azimuth=180.0)
         assert p.loss_pct == 2.0
         assert p.userhorizon is None
-        assert p.inverter.startswith("inverter")
+        assert p.inverter_id.startswith("inverter")
 
     def test_custom(self):
         p = PVPlaneConfig(peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30))
@@ -37,20 +37,20 @@ class TestPVPlaneConfig:
 
     def test_userhorizon_is_normalized_for_hashing(self):
         p1 = PVPlaneConfig(
-            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inverter1"
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter_id="inverter1"
         )
         p2 = PVPlaneConfig(
-            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inverter1"
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter_id="inverter1"
         )
         assert p1 == p2
         assert hash(p1) == hash(p2)
 
     def test_can_be_used_as_dict_key(self):
         p1 = PVPlaneConfig(
-            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inv-a"
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter_id="inv-a"
         )
         p2 = PVPlaneConfig(
-            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter="inv-a"
+            peak_kw=4.0, tilt=25.0, azimuth=90.0, userhorizon=(10, 20, 30), inverter_id="inv-a"
         )
         cache = {p1: "cached"}
         assert cache[p2] == "cached"
@@ -164,9 +164,9 @@ class TestPVForecastAkkudoktor:
         ]
         provider = PVForecastAkkudoktor(
             planes=[
-                PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0, inverter="inv-a"),
-                PVPlaneConfig(peak_kw=3.0, tilt=20.0, azimuth=90.0, inverter="inv-a"),
-                PVPlaneConfig(peak_kw=2.0, tilt=20.0, azimuth=270.0, inverter="inv-b"),
+                PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0, inverter_id="inv-a"),
+                PVPlaneConfig(peak_kw=3.0, tilt=20.0, azimuth=90.0, inverter_id="inv-a"),
+                PVPlaneConfig(peak_kw=2.0, tilt=20.0, azimuth=270.0, inverter_id="inv-b"),
             ],
             latitude=52.52,
             longitude=13.405,
@@ -271,10 +271,10 @@ class TestPVForecastOpenMeteo:
         mock_fetch.return_value = plane_data
 
         plane1 = PVPlaneConfig(
-            peak_kw=5.0, tilt=30.0, azimuth=180.0, userhorizon=(0.0, 5.0), inverter="inv-a"
+            peak_kw=5.0, tilt=30.0, azimuth=180.0, userhorizon=(0.0, 5.0), inverter_id="inv-a"
         )
         plane2 = PVPlaneConfig(
-            peak_kw=5.0, tilt=30.0, azimuth=180.0, userhorizon=(0.0, 5.0), inverter="inv-a"
+            peak_kw=5.0, tilt=30.0, azimuth=180.0, userhorizon=(0.0, 5.0), inverter_id="inv-a"
         )
         provider = PVForecastOpenMeteo(
             planes=[plane1, plane2], latitude=52.52, longitude=13.405
@@ -312,9 +312,9 @@ class TestPVForecastOpenMeteo:
         mock_fetch.return_value = plane_data
         provider = PVForecastOpenMeteo(
             planes=[
-                PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0, inverter="inv-a"),
-                PVPlaneConfig(peak_kw=3.0, tilt=20.0, azimuth=90.0, inverter="inv-a"),
-                PVPlaneConfig(peak_kw=2.0, tilt=20.0, azimuth=270.0, inverter="inv-b"),
+                PVPlaneConfig(peak_kw=5.0, tilt=30.0, azimuth=180.0, inverter_id="inv-a"),
+                PVPlaneConfig(peak_kw=3.0, tilt=20.0, azimuth=90.0, inverter_id="inv-a"),
+                PVPlaneConfig(peak_kw=2.0, tilt=20.0, azimuth=270.0, inverter_id="inv-b"),
             ],
             latitude=52.52,
             longitude=13.405,

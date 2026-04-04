@@ -164,7 +164,7 @@ class PVForecastAkkudoktor(PVForecastProvider):
 
         raw_values = await self._request_raw()
         for plane, raw_plane in zip(self._planes, raw_values, strict=False):
-            hourly = hourly_by_inverter[plane.inverter]
+            hourly = hourly_by_inverter[plane.inverter_id]
             for fv in self._parse_plane_values(raw_plane):
                 fv_utc = _to_utc(fv.dt)
                 offset_h = (fv_utc - start_utc).total_seconds() / 3600.0
