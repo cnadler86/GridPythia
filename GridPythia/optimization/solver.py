@@ -295,12 +295,12 @@ class LinearOptimizer:
             total_p_dc_terms.append(block.p_dc)
             total_pv_ac_terms.append(block.pv_ac)
 
-            pv_src = inv.parameters.pv_source
-            if pv_src:
-                mapped_pv_sources.add(pv_src)
+            # Map PV by inverter id (PV planes reference inverter_id)
+            if inv.device_id in prep.pv_by_source:
+                mapped_pv_sources.add(inv.device_id)
 
-        for GridPythia, arr in prep.pv_by_source.items():
-            if GridPythia not in mapped_pv_sources:
+        for inv_id, arr in prep.pv_by_source.items():
+            if inv_id not in mapped_pv_sources:
                 total_pv_ac_terms.append(cp.Constant(arr))
 
         total_p_ch = self._sum_terms(total_p_ch_terms, prep.T)
@@ -423,9 +423,8 @@ class LinearOptimizer:
             p_ch = cp.Constant(np.zeros(T, dtype=float))
             p_dc = cp.Constant(np.zeros(T, dtype=float))
 
-        if inv.parameters.pv_source is not None:
-            pv_src = inv.parameters.pv_source
-            pv_pred = prep.pv_by_source.get(pv_src, np.zeros(T, dtype=float))
+        if inv_id in prep.pv_by_source:
+            pv_pred = prep.pv_by_source.get(inv_id, np.zeros(T, dtype=float))
             pv_ac = cp.Variable(T, nonneg=True, name=f"pv_ac_{inv_id}")
             if inv.battery is not None:
                 pv_to_bat = cp.Variable(T, nonneg=True, name=f"pv_to_bat_{inv_id}")
@@ -696,7 +695,7 @@ class LinearOptimizer:
             pv_ac = self._expr_to_vec(block.pv_ac, T)
             pv_to_bat = self._expr_to_vec(block.pv_to_bat, T)
 
-            if inv.parameters.pv_source is not None:
+            if inv_id in prep.pv_by_source:
                 solar_gen_per_dt[inv_id] = np.asarray(pv_ac, dtype=np.float32)
 
             if inv.battery is not None and block.soc is not None:

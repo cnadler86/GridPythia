@@ -69,7 +69,7 @@ def _make_hybrid_inverter(roundtrip_efficiency: float = 0.8) -> InverterBase:
         InverterParameters(
             device_id="hybrid_h1",
             battery_id="battery_h1",
-            pv_source="hybrid_h1",
+                has_pv=True,
             max_ac_output_power_w=1000,
             max_ac_charge_power_w=500,
             dc_to_ac_efficiency=1.0,
@@ -114,7 +114,7 @@ def _make_switching_case_inverter(
         InverterParameters(
             device_id="hybrid_sw",
             battery_id="battery_sw",
-            pv_source="hybrid_sw",
+                has_pv=True,
             max_ac_output_power_w=1000,
             max_ac_charge_power_w=500,
             dc_to_ac_efficiency=1.0,
@@ -131,7 +131,7 @@ def _make_boundary_inverter(
     *,
     device_id: str,
     zero_feed_in: bool,
-    pv_source: str | None,
+    has_pv: bool | None,
     initial_soc_percentage: int,
     min_soc_percentage: int,
     max_soc_percentage: int,
@@ -155,7 +155,7 @@ def _make_boundary_inverter(
         InverterParameters(
             device_id=device_id,
             battery_id=battery.parameters.device_id,
-            pv_source=pv_source,
+                has_pv=bool(has_pv),
             max_ac_output_power_w=500,
             max_ac_charge_power_w=500,
             dc_to_ac_efficiency=1.0,
@@ -298,7 +298,7 @@ class TestLinearSolverHybridEconomics:
             InverterParameters(
                 device_id="hybrid_v2g",
                 battery_id="battery_v2g",
-                pv_source="hybrid_v2g",
+                    has_pv=True,
                 max_ac_output_power_w=1000,
                 max_ac_charge_power_w=500,
                 dc_to_ac_efficiency=1.0,
@@ -410,7 +410,7 @@ class TestLinearSolverHybridEconomics:
         inv = _make_boundary_inverter(
             device_id="hybrid_min_rate",
             zero_feed_in=False,
-            pv_source="hybrid_min_rate",
+            has_pv=True,
             initial_soc_percentage=20,
             min_soc_percentage=20,
             max_soc_percentage=100,
@@ -433,7 +433,7 @@ class TestLinearSolverHybridEconomics:
         inv = _make_boundary_inverter(
             device_id="hybrid_min_zfi",
             zero_feed_in=True,
-            pv_source="hybrid_min_zfi",
+            has_pv=True,
             initial_soc_percentage=20,
             min_soc_percentage=20,
             max_soc_percentage=100,
@@ -456,7 +456,7 @@ class TestLinearSolverHybridEconomics:
         inv = _make_boundary_inverter(
             device_id="hybrid_max_charge",
             zero_feed_in=False,
-            pv_source=None,
+            has_pv=False,
             initial_soc_percentage=80,
             min_soc_percentage=0,
             max_soc_percentage=80,
@@ -504,7 +504,7 @@ class TestLinearSolverHybridEconomics:
             InverterParameters(
                 device_id="hybrid_zfi_cost",
                 battery_id="battery_zfi_cost",
-                pv_source="hybrid_zfi_cost",
+                has_pv=True,
                 max_ac_output_power_w=1000,
                 max_ac_charge_power_w=0,  # NO AC charging
                 dc_to_ac_efficiency=1.0,

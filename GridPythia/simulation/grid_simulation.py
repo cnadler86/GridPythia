@@ -164,6 +164,11 @@ class GridSimulation:
 
         self._inv_list: list[InverterBase] = list(self.inverters.values())
 
+        # If PV predictions exist, mark inverters that have PV attached.
+        if self.pv_prediction_map:
+            for inv in self._inv_list:
+                inv._has_pv = inv.device_id in self.pv_prediction_map
+
         self._pv_per_inv: list[np.ndarray] = [
             self._get_pv_for_inverter(inv) for inv in self._inv_list
         ]
@@ -205,9 +210,9 @@ class GridSimulation:
     def _get_pv_for_inverter(self, inv: InverterBase) -> np.ndarray:
         if not inv._has_pv:
             return np.empty(0, dtype=np.float32)
-        pv_source = inv.parameters.pv_source
-        if self.pv_prediction_map and pv_source and pv_source in self.pv_prediction_map:
-            return self.pv_prediction_map[pv_source]
+        inv_id = inv.device_id
+        if self.pv_prediction_map and inv_id and inv_id in self.pv_prediction_map:
+            return self.pv_prediction_map[inv_id]
         return np.empty(0, dtype=np.float32)
 
     def _simulate_step(

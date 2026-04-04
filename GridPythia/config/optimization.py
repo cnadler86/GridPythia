@@ -69,7 +69,9 @@ class InverterParameters(BaseModel):
     battery_id: Optional[str] = Field(
         default=None, description="Associated battery device_id (if any)"
     )
-    pv_source: Optional[str] = Field(default=None, description="PV source identifier (if any)")
+    has_pv: bool = Field(
+        default=False, description="Whether a PV plane is attached to this inverter"
+    )
     max_ac_output_power_w: float = Field(default=5000, ge=0.0, description="Max AC output in W")
     max_ac_charge_power_w: float = Field(default=0.0, ge=0.0, description="Max AC charge in W")
     dc_to_ac_efficiency: float = Field(
@@ -87,21 +89,7 @@ class InverterParameters(BaseModel):
         default=0.005, ge=0.0, description="Cost (EUR) per inverter mode change (wear cost)"
     )
 
-    @field_validator("battery_id", "pv_source", mode="before")
-    @classmethod
-    def validate_topology(cls, v: Optional[str], info) -> Optional[str]:
-        """Ensure at least battery_id or pv_source is provided."""
-        if info.context and info.context.get("skip_topology_check"):
-            return v
-        # Check will happen in second pass after both fields are set.
-        return v
-
-    def model_post_init(self, __context) -> None:  # noqa: ARG002
-        """Validate that at least battery_id or pv_source is configured."""
-        if self.battery_id is None and self.pv_source is None:
-            raise ValueError(
-                f"Inverter '{self.device_id}' must have either battery_id or pv_source (or both)."
-            )
+    # Topology checks are performed at higher level; `has_pv` indicates attached PV.
 
     @field_validator("ac_rates_pct", mode="before")
     @classmethod

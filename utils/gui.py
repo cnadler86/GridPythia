@@ -1141,12 +1141,13 @@ class OptimizationTab(_Tab):
             inv.device_id,
         )
         row += 1
-        self._pv_source = _field(
+        # PV attachment flag: PV planes are linked to inverters by inverter_id
+        self._has_pv = tk.BooleanVar(value=getattr(inv, "has_pv", False))
+        ttk.Checkbutton(
             f,
-            row,
-            "PV source key",
-            inv.pv_source or "inverter1",
-        )
+            text="Has PV plane (attached)",
+            variable=self._has_pv,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
         row += 1
         self._inv_max_out = _field(
             f,
@@ -1209,7 +1210,7 @@ class OptimizationTab(_Tab):
         return "|".join(
             [
                 inv.device_id,
-                str(getattr(p, "pv_source", "")),
+                str(bool(getattr(p, "has_pv", False))),
                 str(float(getattr(p, "max_ac_output_power_w", 0.0))),
                 str(float(getattr(p, "max_ac_charge_power_w", 0.0))),
                 str(float(getattr(p, "dc_to_ac_efficiency", 0.0))),
@@ -1270,7 +1271,7 @@ class OptimizationTab(_Tab):
             pv_tab._provider_sig() if pv_tab is not None else "none",
             weather_tab._provider_sig() if weather_tab is not None else "none",
             self._inv_id.get(),
-            self._pv_source.get(),
+            str(bool(self._has_pv.get())),
         ]
         return "|".join(str(p) for p in parts)
 
@@ -1428,7 +1429,6 @@ class OptimizationTab(_Tab):
                     inv_kwargs: dict[str, Any] = {
                         "device_id": self._inv_id.get(),
                         "battery_id": bat.parameters.device_id,
-                        "pv_source": self._pv_source.get(),
                         "max_ac_output_power_w": float(self._inv_max_out.get()),
                         "max_ac_charge_power_w": float(self._inv_max_charge.get()),
                         "dc_to_ac_efficiency": float(self._inv_dc2ac.get()),

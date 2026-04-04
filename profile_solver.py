@@ -78,7 +78,7 @@ def create_inverter() -> InverterBase:
         InverterParameters(
             device_id="inverter1",
             battery_id="inverter1",
-            pv_source="inverter1",
+            has_pv=True,
             max_ac_output_power_w=800,
             max_ac_charge_power_w=1000,
             dc_to_ac_efficiency=0.95,

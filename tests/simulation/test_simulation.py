@@ -204,7 +204,7 @@ def grid_simulation() -> GridSimulation:
             device_id="inverter1",
             max_ac_output_power_w=10000,
             battery_id="battery1",
-            pv_source="inverter1",
+            has_pv=True,
             dc_to_ac_efficiency=1.0,
             ac_to_dc_efficiency=0.0,
             max_ac_charge_power_w=0.0,

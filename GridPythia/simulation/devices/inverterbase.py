@@ -77,7 +77,7 @@ class InverterBase:
         self._dc_to_ac_efficiency = self.parameters.dc_to_ac_efficiency
         self._ac_to_dc_efficiency = self.parameters.ac_to_dc_efficiency
         self._zero_feed_in = self.parameters.zero_feed_in
-        self._has_pv = self.parameters.pv_source is not None
+        self._has_pv = getattr(self.parameters, "has_pv", False)
 
         self.topology = self._resolve_topology()
         # store available modes as an immutable, ordered tuple (no duplicates)
@@ -112,7 +112,7 @@ class InverterBase:
         self._log.info(
             "inverter_setup_complete",
             topology=self.topology,
-            pv_source=self.parameters.pv_source,
+            has_pv=self._has_pv,
             available_modes=[m.name for m in self.available_modes],
             is_optimizable=self.is_optimizable,
         )
