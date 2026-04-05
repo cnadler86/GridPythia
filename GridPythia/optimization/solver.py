@@ -351,6 +351,7 @@ class LinearOptimizer:
 
         selector: _RateSelector | None = None
         zero_feed_discharge_continuous = False
+        mode_dc_activity: cp.Variable | None = None
 
         if inv.battery is not None and inv.is_optimizable:
             charge_rates = self._get_charge_rates(inv)
@@ -378,9 +379,10 @@ class LinearOptimizer:
                 p_dc = max_dc_wh * ((np.array(discharge_rates, dtype=float) / 100.0) @ y_dc)
             elif has_zero_feed_discharge and not has_rate_discharge:
                 # Zero-feed discharge is energy-target driven in simulation,
-                # so model discharge continuously (bounded only by physics).
+                # so model discharge continuously with an explicit activity binary.
                 p_dc = cp.Variable(T, nonneg=True, name=f"p_dc_{inv_id}")
-                self._constraints.append(p_dc <= max_dc_wh)
+                mode_dc_activity = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
+                self._constraints.append(p_dc <= max_dc_wh * mode_dc_activity)
                 zero_feed_discharge_continuous = True
             else:
                 p_dc = cp.Constant(np.zeros(T, dtype=float))
@@ -419,6 +421,7 @@ class LinearOptimizer:
                 p_ch,
                 p_dc,
                 T,
+                mode_dc_activity=mode_dc_activity,
             )
 
         else:
@@ -431,6 +434,12 @@ class LinearOptimizer:
             if inv.battery is not None:
                 pv_to_bat = cp.Variable(T, nonneg=True, name=f"pv_to_bat_{inv_id}")
                 self._constraints.append(pv_ac + pv_to_bat <= pv_pred)
+                if mode_dc_activity is not None:
+                    # Avoid simultaneous battery discharge and PV charging loops
+                    # in continuous zero-feed mode.
+                    self._constraints.append(
+                        pv_to_bat <= cp.multiply(pv_pred, 1 - mode_dc_activity)
+                    )
             else:
                 pv_to_bat = cp.Constant(np.zeros(T, dtype=float))
                 self._constraints.append(pv_ac <= pv_pred)
@@ -457,10 +466,11 @@ class LinearOptimizer:
             start_soc = cp.hstack([soc_init, soc[:-1]]) if T > 1 else cp.hstack([soc_init])
 
             # Enforce mode feasibility from the SoC at the start of each step.
-            # This prevents activating discharge at min SoC or AC charge at max SoC,
+            # This prevents activating discharge at min SoC or charging at max SoC,
             # even if opposite-direction flows in the same step would keep end SoC feasible.
             self._constraints.append(p_dc / eta_d <= start_soc - bat.min_soc_wh)
             self._constraints.append(p_ch * eta_c_ac <= bat.max_soc_wh - start_soc)
+            self._constraints.append(pv_to_bat * eta_c_pv <= bat.max_soc_wh - start_soc)
 
             # start_soc is already shaped (T,); one vectorized equality covers t=0..T-1.
             self._constraints.append(soc == start_soc + delta)
@@ -489,6 +499,8 @@ class LinearOptimizer:
         p_ch: cp.Expression,
         p_dc: cp.Expression,
         T: int,
+        mode_ch_activity: cp.Expression | None = None,
+        mode_dc_activity: cp.Expression | None = None,
     ) -> None:
         """Add mode switch cost constraints and track them in objective."""
         if not inv.battery:
@@ -508,29 +520,40 @@ class LinearOptimizer:
 
         init_ch, init_dc = _mode_flags(initial_mode)
 
-        # Derive mode-active indicators without extra binary variables when possible.
-        # y_ch/y_dc already encode mode state (sum in {0,1}); reuse them directly
-        # instead of introducing redundant mode_ch/mode_dc binaries (saves 2*T binaries).
+        # Derive mode-active indicators.
+        # - For discrete-rate modes, y_ch/y_dc already encode binary mode state.
+        # - For continuous-power modes, use activity binaries linked to power
+        #   bounds so switch costs apply to mode transitions, not power ramps.
         is_ch: cp.Expression | np.ndarray
         is_dc: cp.Expression | np.ndarray
 
-        if y_ch is not None:
+        if mode_ch_activity is not None:
+            is_ch = mode_ch_activity
+        elif y_ch is not None:
             is_ch = cp.sum(y_ch, axis=0)
         elif isinstance(p_ch, cp.Variable):
             is_ch_var = cp.Variable(T, boolean=True, name=f"mode_ch_{inv_id}")
-            max_p_ch = inv.battery.max_charge_power_w * self.prediction.dt_hours * 1.1
-            self._constraints.append(p_ch <= max_p_ch * is_ch_var)
-            is_ch = is_ch_var
+            max_p_ch = inv.battery.max_charge_power_w * self.prediction.dt_hours
+            if max_p_ch > 0:
+                self._constraints.append(p_ch <= max_p_ch * is_ch_var)
+                is_ch = is_ch_var
+            else:
+                is_ch = np.zeros(T, dtype=float)
         else:
             is_ch = np.zeros(T, dtype=float)
 
-        if y_dc is not None:
+        if mode_dc_activity is not None:
+            is_dc = mode_dc_activity
+        elif y_dc is not None:
             is_dc = cp.sum(y_dc, axis=0)
         elif isinstance(p_dc, cp.Variable):
             is_dc_var = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
-            max_p_dc = inv.battery.max_discharge_power_w * self.prediction.dt_hours * 1.1
-            self._constraints.append(p_dc <= max_p_dc * is_dc_var)
-            is_dc = is_dc_var
+            max_p_dc = inv.battery.max_discharge_power_w * self.prediction.dt_hours
+            if max_p_dc > 0:
+                self._constraints.append(p_dc <= max_p_dc * is_dc_var)
+                is_dc = is_dc_var
+            else:
+                is_dc = np.zeros(T, dtype=float)
         else:
             is_dc = np.zeros(T, dtype=float)
 
