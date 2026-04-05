@@ -55,6 +55,7 @@ class LinearSolution:
     inverter_plans: list[dict]
     parity_report: SimulationParityReport | None = None
     simulation_result: SimulationResult | None = None
+    prediction: dict | None = None
 
 
 @dataclass
@@ -218,6 +219,7 @@ class LinearOptimizer:
             objective=objective,
             solver_status=status,
             solve_time=solve_time,
+            prediction=self.prediction.to_dict(),
         )
 
         if validate_with_simulation:
@@ -667,6 +669,7 @@ class LinearOptimizer:
         objective: OptimizationObjective,
         solver_status: str,
         solve_time: float,
+        prediction: dict | None = None,
     ) -> LinearSolution:
         T = prep.T
         dt = prep.dt
@@ -692,11 +695,7 @@ class LinearOptimizer:
 
             p_ch = self._expr_to_vec(block.p_ch, T)
             p_dc = self._expr_to_vec(block.p_dc, T)
-            pv_ac = self._expr_to_vec(block.pv_ac, T)
             pv_to_bat = self._expr_to_vec(block.pv_to_bat, T)
-
-            if inv_id in prep.pv_by_source:
-                solar_gen_per_dt[inv_id] = np.asarray(pv_ac, dtype=np.float32)
 
             if inv.battery is not None and block.soc is not None:
                 bat = inv.battery
@@ -719,6 +718,13 @@ class LinearOptimizer:
             inv_rates_per_dt[inv_id] = np.asarray(rates, dtype=np.int32)
             inverter_plans.append({"device_id": inv_id, "modes": modes, "rates": rates})
 
+        # Use prediction PV series directly for reporting.
+        if prep.pv_by_source:
+            solar_gen_per_dt = {
+                inv_id: np.asarray(arr, dtype=np.float32)
+                for inv_id, arr in prep.pv_by_source.items()
+            }
+
         result = SimulationResult(
             costs_per_dt=np.asarray(costs, dtype=np.float32),
             revenue_per_dt=np.asarray(revenue, dtype=np.float32),
@@ -740,6 +746,7 @@ class LinearOptimizer:
             solver_status=solver_status,
             solve_time_s=solve_time,
             inverter_plans=inverter_plans,
+            prediction=prediction,
         )
 
     def _extract_modes_and_rates(

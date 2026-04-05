@@ -70,7 +70,7 @@ class InverterParameters(BaseModel):
         default=None, description="Associated battery device_id (if any)"
     )
     has_pv: bool = Field(
-        default=False, description="Whether a PV plane is attached to this inverter"
+        default=True, description="Whether a PV plane is attached to this inverter"
     )
     max_ac_output_power_w: float = Field(default=5000, ge=0.0, description="Max AC output in W")
     max_ac_charge_power_w: float = Field(default=0.0, ge=0.0, description="Max AC charge in W")

@@ -105,6 +105,18 @@ class PredictionData:
         """PV inverter IDs (from ``pv_{inverter_id}_wh`` keys)."""
         return list(self.pv_by_inverter.keys())
 
+    def to_dict(self) -> dict:
+        """Serialize PredictionData to a JSON-serializable dict.
+
+        Timestamps are ISO-formatted strings; numeric arrays are converted
+        to native Python lists of floats.
+        """
+        return {
+            "timestamps": [ts.isoformat() for ts in self._timestamps],
+            "dt_hours": float(self.dt_hours),
+            **{k: np.asarray(v, dtype=float).tolist() for k, v in self._arrays.items()},
+        }
+
 
 @dataclass
 class PredictionSetup:
