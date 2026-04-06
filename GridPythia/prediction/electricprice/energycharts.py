@@ -43,6 +43,8 @@ _RETRY_AFTER_FAILED_REFRESH = timedelta(minutes=15)
 class EnergyChartsConfig(BaseModel):
     """Pydantic config model for ElecPriceEnergyCharts."""
 
+    model_config = {"frozen": True}
+
     bidding_zone: str = Field("DE-LU", min_length=1)
     charges_kwh: float = Field(0.0, ge=0.0)
     vat_rate: float = Field(0.19, ge=0.0, lt=1.0)

@@ -15,6 +15,8 @@ from GridPythia.config.prediction import PredictionConfig
 class AppConfig(BaseModel):
     """Root config model mirroring the config.yaml structure."""
 
+    model_config = {"frozen": True}
+
     prediction: PredictionConfig = Field(default_factory=PredictionConfig)
     optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
 
@@ -37,4 +39,3 @@ class AppConfig(BaseModel):
         cfg_path = Path(path).expanduser()
         with cfg_path.open("r", encoding="utf-8") as fh:
             return cls.from_yaml(fh.read())
-

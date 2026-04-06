@@ -118,7 +118,7 @@ class PredictionData:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class PredictionSetup:
     """Wire providers before calling :pymeth:`Prediction.fetch`.
 

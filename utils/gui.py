@@ -834,6 +834,22 @@ class PVForecastTab(_Tab):
         )
         row += 1
 
+        # Inverter ID for this PV plane (editable in GUI; defaults from YAML or optimizer)
+        opt_inv = (
+            self.app.app_config.optimization.inverters[0]
+            if self.app.app_config.optimization.inverters
+            else None
+        )
+        default_plane_inv = self.app.cfg_text(
+            "prediction",
+            "pvforecast",
+            "plane",
+            "inverter_id",
+            default=(opt_inv.device_id if opt_inv is not None else "inverter1"),
+        )
+        self._plane_inverter_id = _field(f, row, "Inverter ID", default_plane_inv)
+        row += 1
+
         ttk.Separator(f).grid(row=row, column=0, columnspan=2, sticky="ew", pady=4)
         row += 1
 
@@ -886,6 +902,29 @@ class PVForecastTab(_Tab):
     def _plane(self) -> PVPlaneConfig:
         hz_text = self._horizon.get().strip()
         userhorizon = _csv(hz_text) if hz_text else None
+        # Determine inverter_id with precedence: GUI field -> YAML -> optimization inverter -> 'inverter1'
+        gui_val = None
+        if hasattr(self, "_plane_inverter_id"):
+            gui_val = self._plane_inverter_id.get().strip()
+
+        yaml_val = self.app.cfg_text(
+            "prediction", "pvforecast", "plane", "inverter_id", default=""
+        ).strip()
+
+        opt_inv = (
+            self.app.app_config.optimization.inverters[0]
+            if self.app.app_config.optimization.inverters
+            else None
+        )
+        opt_val = opt_inv.device_id if opt_inv is not None else ""
+
+        inv_id = (
+            gui_val
+            or yaml_val
+            or opt_val
+            or (self._inv_id.get() if hasattr(self, "_inv_id") else "inverter1")
+        )
+
         return PVPlaneConfig(
             peak_kw=float(self._peak.get()),
             tilt=float(self._tilt.get()),
@@ -895,6 +934,7 @@ class PVForecastTab(_Tab):
             damping_morning=float(self._damp_morn.get()),
             damping_evening=float(self._damp_eve.get()),
             partial_shading=self._partial_shading.get(),
+            inverter_id=inv_id,
         )
 
     def make_provider(self) -> object:
