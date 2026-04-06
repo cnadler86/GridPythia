@@ -26,31 +26,39 @@ def load_result_json(json_path: str | Path) -> dict:
 
 def create_prediction_from_result(result: dict) -> PredictionData:
     """Create PredictionData from result JSON."""
-    res = result["result"]
+    # This function now expects a top-level 'prediction' payload produced by
+    # the optimizer/solver. Do not rely on legacy 'solar_generation_wh_per_dt'
+    # or 'electricity_price_per_dt' fields which were removed from SimulationResult.
+    pred = result.get("prediction") or result.get("result", {}).get("prediction")
+    if not isinstance(pred, dict):
+        raise RuntimeError(
+            "Missing 'prediction' payload in result JSON. Provide 'prediction' with "
+            "channels like 'electricprice_eur_wh', 'feedintariff_eur_wh', 'load_wh', 'pv_<id>_wh'."
+        )
 
-    # Get the minimum length from all time-series arrays
-    costs_len = len(res.get("costs_per_dt", []))
-    revenue_len = len(res.get("revenue_per_dt", []))
-    feedin_len = len(res.get("feedin_wh_per_dt", []))
-    grid_import_len = len(res.get("grid_import_wh_per_dt", []))
-    pv_len = len(res.get("solar_generation_wh_per_dt", {}).get("inverter1", []))
+    # Extract arrays from prediction; prefer explicit channel names.
+    price = list(pred.get("electricprice_eur_wh", []))
+    feedin = list(pred.get("feedintariff_eur_wh", []))
+    load = list(pred.get("load_wh", []))
+    pv_keys = [k for k in pred.keys() if k.startswith("pv_") and k.endswith("_wh")]
+    pv_series = list(pred.get(pv_keys[0], [])) if pv_keys else []
 
-    n = min(costs_len, revenue_len, feedin_len, grid_import_len, pv_len)
+    # Determine horizon length n (min of available non-empty channels)
+    lens = [len(x) for x in (price, feedin, load, pv_series) if len(x) > 0]
+    n = min(lens) if lens else len(price)
+    if n == 0:
+        raise RuntimeError("Prediction payload contains no time series data.")
 
-    # Use electricity_price_per_dt if available, otherwise use a default price
-    price_data = res.get("electricity_price_per_dt", [])
-    if len(price_data) < n:
-        price_data = [0.0003] * n  # Default price
-    else:
-        price_data = price_data[:n]
+    price_arr = np.array(price[:n] if price else [0.0003] * n, dtype=np.float32)
+    feedin_arr = np.array(feedin[:n] if feedin else [0.0] * n, dtype=np.float32)
+    load_arr = np.array(load[:n] if load else [0.0] * n, dtype=np.float32)
+    pv_arr = np.array(pv_series[:n] if pv_series else [0.0] * n, dtype=np.float32)
 
     data = {
-        "electricprice_eur_wh": np.array(price_data, dtype=np.float32),
-        "feedintariff_eur_wh": np.array(res["revenue_per_dt"][:n], dtype=np.float32),
-        "load_wh": np.array(res["grid_import_wh_per_dt"][:n], dtype=np.float32),
-        "pv_inverter1_wh": np.array(
-            res["solar_generation_wh_per_dt"]["inverter1"][:n], dtype=np.float32
-        ),
+        "electricprice_eur_wh": price_arr,
+        "feedintariff_eur_wh": feedin_arr,
+        "load_wh": load_arr,
+        "pv_inverter1_wh": pv_arr,
     }
 
     from datetime import datetime, timedelta

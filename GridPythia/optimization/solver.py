@@ -707,7 +707,6 @@ class LinearOptimizer:
         losses_arr = np.zeros(T, dtype=float)
         battery_wh_per_dt: dict[str, np.ndarray] = {}
         battery_soc_pct: dict[str, np.ndarray] = {}
-        solar_gen_per_dt: dict[str, np.ndarray] = {}
         inv_modes_per_dt: dict[str, np.ndarray] = {}
         inv_rates_per_dt: dict[str, np.ndarray] = {}
         inverter_plans: list[dict] = []
@@ -741,13 +740,6 @@ class LinearOptimizer:
             inv_rates_per_dt[inv_id] = np.asarray(rates, dtype=np.int32)
             inverter_plans.append({"device_id": inv_id, "modes": modes, "rates": rates})
 
-        # Use prediction PV series directly for reporting.
-        if prep.pv_by_source:
-            solar_gen_per_dt = {
-                inv_id: np.asarray(arr, dtype=np.float32)
-                for inv_id, arr in prep.pv_by_source.items()
-            }
-
         result = SimulationResult(
             costs_per_dt=np.asarray(costs, dtype=np.float32),
             revenue_per_dt=np.asarray(revenue, dtype=np.float32),
@@ -755,10 +747,8 @@ class LinearOptimizer:
             self_consumption_wh_per_dt=np.asarray(self_consumption, dtype=np.float32),
             feedin_wh_per_dt=np.asarray(gf, dtype=np.float32),
             losses_wh_per_dt=np.asarray(losses_arr, dtype=np.float32),
-            electricity_price_per_dt=np.asarray(prep.price, dtype=np.float32),
             inverter_modes_per_dt=inv_modes_per_dt,
             inverter_ac_rate_per_dt=inv_rates_per_dt,
-            solar_generation_wh_per_dt=solar_gen_per_dt,
             battery_wh_per_dt=battery_wh_per_dt,
             battery_soc_percentage_per_dt=battery_soc_pct,
         )

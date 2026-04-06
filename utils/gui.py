@@ -919,12 +919,15 @@ class PVForecastTab(_Tab):
         )
         opt_val = opt_inv.device_id if opt_inv is not None else ""
 
-        inv_id = (
-            gui_val
-            or yaml_val
-            or opt_val
-            or (self._inv_id.get() if hasattr(self, "_inv_id") else "inverter1")
-        )
+        # Determine a safe fallback for inverter id. Use GUI field, YAML, optimizer
+        # default, or the inverter field if present. Be explicit about the type so
+        # the type checker knows `.get()` exists on the fallback.
+        inv_fallback: str = "inverter1"
+        _inv_attr = getattr(self, "_inv_id", None)
+        if _inv_attr is not None and isinstance(_inv_attr, tk.StringVar):
+            inv_fallback = _inv_attr.get().strip() or inv_fallback
+
+        inv_id = gui_val or yaml_val or opt_val or inv_fallback
 
         return PVPlaneConfig(
             peak_kw=float(self._peak.get()),
@@ -1585,6 +1588,47 @@ class OptimizationTab(_Tab):
                     except Exception:
                         logger.exception("Failed to extract solution.prediction for plotting")
                     out = res.to_dict()
+                    # Remove duplicated prediction channels from the serialized
+                    # simulation result to avoid redundant output (price / PV).
+                    try:
+                        pred = getattr(sol, "prediction", None)
+                        if isinstance(pred, dict):
+
+                            def _close(a, b, rtol=1e-6, atol=1e-9):
+                                try:
+                                    aa = np.asarray(a, dtype=float)
+                                    bb = np.asarray(b, dtype=float)
+                                except Exception:
+                                    return False
+                                if aa.shape != bb.shape:
+                                    return False
+                                return bool(np.allclose(aa, bb, rtol=rtol, atol=atol))
+
+                            # electricity price in prediction uses key 'electricprice_eur_wh'
+                            pp = pred.get("electricprice_eur_wh")
+                            if pp is not None and "electricity_price_per_dt" in out:
+                                if _close(out.get("electricity_price_per_dt", []), pp):
+                                    out.pop("electricity_price_per_dt", None)
+
+                            # PV prediction channels are exposed as 'pv_<inv>_wh' in prediction
+                            pv_keys = [k for k in pred.keys() if k.startswith("pv_")]
+                            if pv_keys and out.get("solar_generation_wh_per_dt"):
+                                # If solar_generation matches the prediction per-inverter arrays,
+                                # drop it from the result to avoid duplication.
+                                sol_gen = out.get("solar_generation_wh_per_dt") or {}
+                                match = True
+                                for inv_id, arr in sol_gen.items():
+                                    pv_key = f"pv_{inv_id}"
+                                    if pv_key not in pred:
+                                        match = False
+                                        break
+                                    if not _close(arr, pred.get(pv_key)):
+                                        match = False
+                                        break
+                                if match:
+                                    out.pop("solar_generation_wh_per_dt", None)
+                    except Exception:
+                        logger.exception("result_dedupe_failed")
                     if simulation_error is not None:
                         out["simulation_error"] = simulation_error
                     # store timestamps for plotting
@@ -1595,29 +1639,35 @@ class OptimizationTab(_Tab):
                         self._fig.clear()
                         n = len(res.costs_per_dt)
 
-                        # Convert timestamps to matplotlib-compatible format if available
-                        # Prefer prediction timestamps from solution if available
+                        # Convert timestamps to matplotlib-compatible numeric x values.
+                        # Keep a copy of original datetimes in `x_dt` for hover tooltips.
+                        x_dt: Optional[List[datetime]] = None
                         if sol_pred_ts and len(sol_pred_ts) >= n:
-                            x = sol_pred_ts[:n]
+                            x_dt = list(sol_pred_ts[:n])
                         else:
                             ts = getattr(self, "_last_ts", None)
                             if ts and len(ts) >= n:
-                                x = ts[:n]
-                            else:
-                                x = list(range(n))
+                                x_dt = list(ts[:n])
+
+                        if x_dt is not None:
+                            x_vals = mdates.date2num(x_dt)
+                        else:
+                            x_vals = list(range(n))
 
                         # Top: energy flows
                         ax = self._fig.add_subplot(311)
-                        ax.plot(x, list(res.grid_import_wh_per_dt), label="Grid import (Wh)")
+                        ax.plot(x_vals, list(res.grid_import_wh_per_dt), label="Grid import (Wh)")
                         ax.plot(
-                            x, list(res.self_consumption_wh_per_dt), label="Self-consumption (Wh)"
+                            x_vals,
+                            list(res.self_consumption_wh_per_dt),
+                            label="Self-consumption (Wh)",
                         )
-                        ax.plot(x, list(res.feedin_wh_per_dt), label="Feed-in (Wh)")
-                        ax.plot(x, list(res.losses_wh_per_dt), label="Losses (Wh)")
+                        ax.plot(x_vals, list(res.feedin_wh_per_dt), label="Feed-in (Wh)")
+                        ax.plot(x_vals, list(res.losses_wh_per_dt), label="Losses (Wh)")
                         ax.legend(loc="upper right", fontsize=8)
                         ax.set_ylabel("Wh")
                         ax.grid(alpha=0.3)
-                        if isinstance(x[0], (int, float)):
+                        if x_dt is None:
                             # numeric x: don't format dates
                             pass
                         else:
@@ -1627,7 +1677,7 @@ class OptimizationTab(_Tab):
                                 _wire_hover(
                                     self._canvas,
                                     ax,
-                                    cast(List[datetime], x),
+                                    x_dt,
                                     grid_import_data,
                                     fmt_y="{:.1f}",
                                     unit=" Wh",
@@ -1647,7 +1697,7 @@ class OptimizationTab(_Tab):
                             )
                         ]
                         (h_load,) = ax2.plot(
-                            x, load_wh, color="#1565C0", linewidth=1.4, label="Load (Wh)"
+                            x_vals, load_wh, color="#1565C0", linewidth=1.4, label="Load (Wh)"
                         )
 
                         # Plot PV sources: prefer prediction PV if available, otherwise simulation result
@@ -1664,7 +1714,7 @@ class OptimizationTab(_Tab):
                                     col = f"C{i + 2}"
                                     vals = list(arr[:n])
                                     (h,) = ax2.plot(
-                                        x,
+                                        x_vals,
                                         vals,
                                         color=col,
                                         linewidth=1.2,
@@ -1672,13 +1722,16 @@ class OptimizationTab(_Tab):
                                     )
                                     pv_handles.append(h)
                         else:
-                            if getattr(res, "solar_generation_wh_per_dt", None):
-                                for i, (k, arr) in enumerate(
-                                    (res.solar_generation_wh_per_dt or {}).items()
-                                ):
+                            sol_gen = getattr(res, "solar_generation_wh_per_dt", None)
+                            if sol_gen:
+                                for i, (k, arr) in enumerate(sol_gen.items()):
                                     col = f"C{i + 2}"
                                     (h,) = ax2.plot(
-                                        x, list(arr), color=col, linewidth=1.2, label=f"PV {k} (Wh)"
+                                        x_vals,
+                                        list(arr),
+                                        color=col,
+                                        linewidth=1.2,
+                                        label=f"PV {k} (Wh)",
                                     )
                                     pv_handles.append(h)
 
@@ -1693,9 +1746,16 @@ class OptimizationTab(_Tab):
                                 np.asarray(sol_pred_dict["electricprice_eur_wh"], dtype=float)[:n]
                             )
                         else:
-                            price_vals = [float(v) for v in res.electricity_price_per_dt]
+                            price_arr = getattr(res, "electricity_price_per_dt", None)
+                            if price_arr is not None:
+                                try:
+                                    price_vals = list(np.asarray(price_arr, dtype=float)[:n])
+                                except Exception:
+                                    price_vals = [float(v) for v in price_arr[:n]]
+                            else:
+                                price_vals = [0.0] * n
                         (h_price,) = ax3.plot(
-                            x,
+                            x_vals,
                             price_vals,
                             color="orange",
                             linewidth=1.2,
@@ -1710,7 +1770,7 @@ class OptimizationTab(_Tab):
                         ax2.legend(lines + lines2, labels + labels2, loc="upper right", fontsize=8)
 
                         # Add hover annotation for ax2 and ax3
-                        if isinstance(x[0], (int, float)):
+                        if x_dt is None:
                             # numeric x: datetime hover not applicable
                             pass
                         else:
@@ -1719,7 +1779,7 @@ class OptimizationTab(_Tab):
                                 _wire_hover(
                                     self._canvas,
                                     ax2,
-                                    cast(List[datetime], x),
+                                    x_dt,
                                     load_wh,
                                     fmt_y="{:.1f}",
                                     unit=" Wh",
@@ -1749,7 +1809,7 @@ class OptimizationTab(_Tab):
                                 else:
                                     soc_plot = [init_pct]
 
-                                (h,) = ax4.plot(x, soc_plot, label=f"SoC {_k} (%)")
+                                (h,) = ax4.plot(x_vals, soc_plot, label=f"SoC {_k} (%)")
                                 handles.append(h)
                                 labels.append(f"SoC {_k} (%)")
                                 plotted = True
@@ -1786,7 +1846,7 @@ class OptimizationTab(_Tab):
                                 else:
                                     mode_vals.append(0.0)
                             h2 = ax4r.step(
-                                x,
+                                x_vals,
                                 mode_vals,
                                 where="post",
                                 color="#555555",
@@ -1809,7 +1869,7 @@ class OptimizationTab(_Tab):
                         ax4.grid(alpha=0.2)
 
                         # Add hover to battery SoC plot if timestamps available
-                        if isinstance(x[0], (int, float)):
+                        if x_dt is None:
                             # numeric x: don't add hover
                             pass
                         else:
@@ -1832,7 +1892,7 @@ class OptimizationTab(_Tab):
                                     _wire_hover(
                                         self._canvas,
                                         ax4,
-                                        cast(List[datetime], x),
+                                        x_dt,
                                         soc_data,
                                         fmt_y="{:.1f}",
                                         unit="%",
@@ -1841,7 +1901,7 @@ class OptimizationTab(_Tab):
                                     logger.exception("Failed to add hover for SoC plot")
 
                         # Date formatting for all subplots with timestamps
-                        if not isinstance(x[0], (int, float)):
+                        if x_dt is not None:
                             self._fig.autofmt_xdate(rotation=25)
 
                         self._canvas.draw()

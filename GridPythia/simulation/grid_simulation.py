@@ -34,10 +34,8 @@ class SimulationResult:
     self_consumption_wh_per_dt: np.ndarray
     feedin_wh_per_dt: np.ndarray
     losses_wh_per_dt: np.ndarray
-    electricity_price_per_dt: np.ndarray
     inverter_modes_per_dt: dict[str, np.ndarray]
     inverter_ac_rate_per_dt: dict[str, np.ndarray] = field(default_factory=dict)
-    solar_generation_wh_per_dt: dict[str, np.ndarray] = field(default_factory=dict)
     battery_wh_per_dt: dict[str, np.ndarray] = field(default_factory=dict)
     battery_soc_percentage_per_dt: dict[str, np.ndarray] = field(default_factory=dict)
 
@@ -100,12 +98,10 @@ class SimulationResult:
             "self_consumption_wh_per_dt": _conv(self.self_consumption_wh_per_dt),
             "grid_import_wh_per_dt": _conv(self.grid_import_wh_per_dt),
             "losses_wh_per_dt": _conv(self.losses_wh_per_dt),
-            "solar_generation_wh_per_dt": _conv(self.solar_generation_wh_per_dt or {}),
             "battery_wh_per_dt": _conv(self.battery_wh_per_dt or {}),
             "battery_soc_percentage_per_dt": _conv(self.battery_soc_percentage_per_dt or {}),
             "inverter_modes_per_dt": _conv(self.inverter_modes_per_dt or {}),
             "inverter_ac_rate_per_dt": _conv(self.inverter_ac_rate_per_dt or {}),
-            "electricity_price_per_dt": _conv(self.electricity_price_per_dt),
             "home_appliance_load_per_dt": _conv(self.home_appliance_load_per_dt),
         }
 
@@ -372,11 +368,6 @@ class GridSimulation:
                 battery_wh_per_dt[inv.device_id] = np.zeros(total_idx, dtype=np.float32)
                 battery_soc_percentage_per_dt[inv.device_id] = np.zeros(total_idx, dtype=np.float32)
 
-        solar_generation_wh_per_dt: dict[str, np.ndarray] = {}
-        for inv in inv_list:
-            if getattr(inv, "_has_pv", False):
-                solar_generation_wh_per_dt[inv.device_id] = np.zeros(total_idx, dtype=np.float32)
-
         _bat_tracking = [
             (
                 battery_wh_per_dt[inv.device_id],
@@ -402,11 +393,7 @@ class GridSimulation:
 
             end_load, pv_ac_wh, losses_wh_per_dt[i], pv_per_inv_list = _step(step_buf, load_wh, dt)
 
-            # record per-inverter PV AC generation
-            for j in range(n_inv):
-                inv_id = inv_list[j].device_id
-                if inv_id in solar_generation_wh_per_dt:
-                    solar_generation_wh_per_dt[inv_id][i] = pv_per_inv_list[j]
+            # record per-inverter PV AC generation is not stored on SimulationResult anymore
 
             if pv_ac_wh > 0.0:
                 SCR = calc_sc_ratio(pv_ac_wh, load_wh)
@@ -449,11 +436,6 @@ class GridSimulation:
             if inv.device_id in inverter_ac_rates
         }
 
-        elec_price_series = np.asarray(
-            price_arr[start_idx : start_idx + total_idx],
-            dtype=np.float32,
-        )
-
         appliance_load_series: np.ndarray | None = None
         if appl_arr is not None:
             appliance_load_series = np.zeros(total_idx, dtype=np.float32)
@@ -468,11 +450,9 @@ class GridSimulation:
             self_consumption_wh_per_dt=self_consumption_wh_per_dt,
             feedin_wh_per_dt=feedin_wh_per_dt,
             losses_wh_per_dt=losses_wh_per_dt,
-            solar_generation_wh_per_dt=solar_generation_wh_per_dt,
             battery_wh_per_dt=battery_wh_per_dt,
             battery_soc_percentage_per_dt=battery_soc_percentage_per_dt,
             inverter_modes_per_dt=inverter_modes_per_dt,
             inverter_ac_rate_per_dt=inverter_ac_rate_per_dt,
-            electricity_price_per_dt=elec_price_series,
             home_appliance_load_per_dt=appliance_load_series,
         )
