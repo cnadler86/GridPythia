@@ -175,15 +175,16 @@ OPTIMIZATION_HOURS = 24
 def _make_prediction(steps: int) -> PredictionData:
     """Build PredictionData from the test constants (first *steps* entries)."""
     n = steps
-    arrays = {
-        "electricprice_eur_wh": np.array(PRICES[:n], dtype=np.float32),
-        "feedintariff_eur_wh": np.full(n, 0.00007, dtype=np.float32),
-        "load_wh": np.array(LOAD[:n], dtype=np.float32),
-        "pv_inverter1_wh": np.array(PV_WH[:n], dtype=np.float32),
-    }
     start = datetime(2025, 1, 1)
     timestamps = [start + timedelta(hours=i) for i in range(n)]
-    return PredictionData(_timestamps=timestamps, _arrays=arrays, dt_hours=1.0)
+    return PredictionData(
+        timestamps=timestamps,
+        dt_hours=1.0,
+        load_wh=np.array(LOAD[:n], dtype=np.float32),
+        electricprice_eur_wh=np.array(PRICES[:n], dtype=np.float32),
+        feedintariff_eur_wh=np.full(n, 0.00007, dtype=np.float32),
+        pv_by_inverter={"inverter1": np.array(PV_WH[:n], dtype=np.float32)},
+    )
 
 
 @pytest.fixture

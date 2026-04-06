@@ -1398,7 +1398,7 @@ class OptimizationTab(_Tab):
                                 logger.exception("Failed to update feed-in tariff tab")
                         if load_tab is not None:
                             try:
-                                load_tab._done(pdata["load_wh"], ts)
+                                load_tab._done(pdata.load_wh, ts)
                             except Exception:
                                 logger.exception("Failed to update load tab")
                         if pv_tab is not None:
@@ -1415,12 +1415,7 @@ class OptimizationTab(_Tab):
                                 logger.exception("Failed to sum PV series and update PV tab")
                         if weather_tab is not None:
                             try:
-                                # collect weather channels (strip 'weather_' prefix)
-                                weather_data = {
-                                    k[len("weather_") :]: v
-                                    for k, v in pdata._arrays.items()
-                                    if k.startswith("weather_")
-                                }
+                                weather_data = pdata.weather_by_channel
                                 if weather_data:
                                     weather_tab._done(weather_data, ts)
                             except Exception:

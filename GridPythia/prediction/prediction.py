@@ -1,9 +1,10 @@
-"""Unified prediction orchestration."""
+"""Unified prediction orchestration and consumer-facing prediction contract."""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 import numpy as np
 from structlog import get_logger
@@ -18,55 +19,128 @@ from GridPythia.prediction.weather.provider import WeatherProvider
 logger = get_logger(__name__)
 
 
-@dataclass
-class PredictionData:
-    """All prediction channels aligned on a shared time axis.
+@dataclass(frozen=True, slots=True)
+class PredictionSolverView:
+    """Dense numeric prediction view for solver-style consumers."""
 
-    Channels:
-    * ``electricprice_eur_wh`` — ``np.float32`` (EUR/Wh)
-    * ``feedintariff_eur_wh`` — ``np.float32`` (EUR/Wh)
-    * ``load_wh`` — ``np.float32`` (Wh, energy per timestep)
-    * ``pv_{inverter_id}_wh`` — ``np.float32`` (Wh, energy per timestep) per inverter
-    * ``weather_{channel}`` — ``np.float32`` for each weather channel
-
-    Quick access via properties: ``data.load_wh``, ``data.electricprice``,
-    ``data.feedintariff``.
-    For PV: ``data.get_pv_series(inverter_id)`` or ``data.pv_by_inverter``.
-    """
-
-    _timestamps: list[datetime]
-    _arrays: dict[str, np.ndarray]
-    dt_hours: float = 0.0
-
-    def __post_init__(self) -> None:
-        if self.dt_hours <= 0:
-            raise ValueError(f"dt_hours must be > 0, got {self.dt_hours}")
-
-        n = len(self._timestamps)
-        for key, arr in list(self._arrays.items()):
-            arr_np = np.asarray(arr, dtype=np.float32)
-            if arr_np.ndim != 1:
-                raise ValueError(f"Prediction array '{key}' must be 1D, got shape {arr_np.shape}")
-            if len(arr_np) != n:
-                raise ValueError(
-                    f"Prediction array '{key}' length mismatch: expected {n}, got {len(arr_np)}"
-                )
-            if not np.all(np.isfinite(arr_np)):
-                raise ValueError(f"Prediction array '{key}' contains non-finite values")
-            self._arrays[key] = arr_np
-
-    def __getitem__(self, key: str) -> np.ndarray:
-        """Direct column access; prefer typed properties for public API."""
-        return self._arrays[key]
+    dt_hours: float
+    load_wh: np.ndarray
+    electricprice_eur_wh: np.ndarray
+    feedintariff_eur_wh: np.ndarray
+    pv_by_inverter: dict[str, np.ndarray]
 
     @property
-    def columns(self) -> list[str]:
-        """Names of all numeric data channels."""
-        return list(self._arrays.keys())
+    def steps(self) -> int:
+        return int(self.load_wh.shape[0])
+
+
+class PredictionData:
+    """Aligned prediction channels with an explicit typed consumer API."""
+
+    __slots__ = (
+        "_timestamps",
+        "dt_hours",
+        "_load_wh",
+        "_electricprice_eur_wh",
+        "_feedintariff_eur_wh",
+        "_pv_by_inverter",
+        "_weather_by_channel",
+        "_solver_view_cache",
+    )
+
+    def __init__(
+        self,
+        *,
+        timestamps: Sequence[datetime] | None = None,
+        dt_hours: float,
+        load_wh: Sequence[float] | np.ndarray | None = None,
+        electricprice_eur_wh: Sequence[float] | np.ndarray | None = None,
+        feedintariff_eur_wh: Sequence[float] | np.ndarray | None = None,
+        pv_by_inverter: Mapping[str, Sequence[float] | np.ndarray] | None = None,
+        weather_by_channel: Mapping[str, Sequence[float] | np.ndarray] | None = None,
+    ) -> None:
+        if dt_hours <= 0:
+            raise ValueError(f"dt_hours must be > 0, got {dt_hours}")
+        if timestamps is None or load_wh is None:
+            raise TypeError("PredictionData requires timestamps and load_wh")
+        timestamps_tuple = tuple(timestamps)
+
+        steps = len(timestamps_tuple)
+        if steps == 0:
+            raise ValueError("PredictionData requires at least one timestamp")
+
+        self._timestamps = timestamps_tuple
+        self.dt_hours = float(dt_hours)
+        self._load_wh = self._coerce_series("load_wh", load_wh, steps)
+        self._electricprice_eur_wh = self._coerce_optional_series(
+            "electricprice_eur_wh", electricprice_eur_wh, steps
+        )
+        self._feedintariff_eur_wh = self._coerce_optional_series(
+            "feedintariff_eur_wh", feedintariff_eur_wh, steps
+        )
+        self._pv_by_inverter = self._coerce_named_series_map(
+            prefix="pv",
+            data=pv_by_inverter,
+            steps=steps,
+        )
+        self._weather_by_channel = self._coerce_named_series_map(
+            prefix="weather",
+            data=weather_by_channel,
+            steps=steps,
+        )
+        self._solver_view_cache: dict[str, PredictionSolverView] = {}
+
+    @staticmethod
+    def _coerce_series(
+        name: str,
+        values: Sequence[float] | np.ndarray | None,
+        expected_len: int,
+    ) -> np.ndarray:
+        if values is None:
+            raise ValueError(f"Prediction array '{name}' is required")
+        arr = np.asarray(values, dtype=np.float32)
+        if arr.ndim != 1:
+            raise ValueError(f"Prediction array '{name}' must be 1D, got shape {arr.shape}")
+        if len(arr) != expected_len:
+            raise ValueError(
+                f"Prediction array '{name}' length mismatch: expected {expected_len}, got {len(arr)}"
+            )
+        if not np.all(np.isfinite(arr)):
+            raise ValueError(f"Prediction array '{name}' contains non-finite values")
+        return np.ascontiguousarray(arr)
+
+    @classmethod
+    def _coerce_optional_series(
+        cls,
+        name: str,
+        values: Sequence[float] | np.ndarray | None,
+        expected_len: int,
+    ) -> np.ndarray | None:
+        if values is None:
+            return None
+        return cls._coerce_series(name, values, expected_len)
+
+    @classmethod
+    def _coerce_named_series_map(
+        cls,
+        *,
+        prefix: str,
+        data: Mapping[str, Sequence[float] | np.ndarray] | None,
+        steps: int,
+    ) -> dict[str, np.ndarray]:
+        if not data:
+            return {}
+
+        out: dict[str, np.ndarray] = {}
+        for name, values in data.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"Prediction {prefix} series names must be non-empty strings")
+            out[name] = cls._coerce_series(f"{prefix}_{name}", values, steps)
+        return out
 
     @property
     def timestamps(self) -> list[datetime]:
-        return self._timestamps
+        return list(self._timestamps)
 
     @property
     def steps(self) -> int:
@@ -74,55 +148,82 @@ class PredictionData:
 
     @property
     def load_wh(self) -> np.ndarray:
-        """Load energy in Wh (integrated over dt_hours)."""
-        return self._arrays["load_wh"]
+        return self._load_wh
 
     @property
     def electricprice(self) -> np.ndarray | None:
-        """Electricity price in EUR/Wh, or None when not configured."""
-        return self._arrays.get("electricprice_eur_wh")
+        return self._electricprice_eur_wh
 
     @property
     def feedintariff(self) -> np.ndarray | None:
-        """Feed-in tariff in EUR/Wh, or None when not configured."""
-        return self._arrays.get("feedintariff_eur_wh")
+        return self._feedintariff_eur_wh
 
     @property
     def pv_by_inverter(self) -> dict[str, np.ndarray]:
-        """Dict mapping inverter_id → PV energy array (Wh per step)."""
-        return {
-            k[len("pv_") : -len("_wh")]: v
-            for k, v in self._arrays.items()
-            if k.startswith("pv_") and k.endswith("_wh")
-        }
-
-    def get_pv_series(self, inverter_id: str) -> np.ndarray | None:
-        """Return PV energy array (Wh) for *inverter_id*, or None if not found."""
-        return self._arrays.get(f"pv_{inverter_id}_wh")
+        return self._pv_by_inverter
 
     @property
-    def pv_names(self) -> list[str]:
-        """PV inverter IDs (from ``pv_{inverter_id}_wh`` keys)."""
-        return list(self.pv_by_inverter.keys())
+    def weather_by_channel(self) -> dict[str, np.ndarray]:
+        return self._weather_by_channel
 
-    def to_dict(self) -> dict:
-        """Serialize PredictionData to a JSON-serializable dict.
+    def to_solver_view(self, dtype: Any = np.float64) -> PredictionSolverView:
+        """Return a cached dense numeric view optimized for repeated solver access."""
+        dtype_obj = np.dtype(dtype)
+        cache_key = dtype_obj.str
+        cached = self._solver_view_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
-        Timestamps are ISO-formatted strings; numeric arrays are converted
-        to native Python lists of floats.
-        """
-        return {
+        zeros = np.zeros(self.steps, dtype=dtype_obj)
+        solver_view = PredictionSolverView(
+            dt_hours=self.dt_hours,
+            load_wh=np.asarray(self._load_wh, dtype=dtype_obj),
+            electricprice_eur_wh=(
+                np.asarray(self._electricprice_eur_wh, dtype=dtype_obj)
+                if self._electricprice_eur_wh is not None
+                else zeros.copy()
+            ),
+            feedintariff_eur_wh=(
+                np.asarray(self._feedintariff_eur_wh, dtype=dtype_obj)
+                if self._feedintariff_eur_wh is not None
+                else zeros.copy()
+            ),
+            pv_by_inverter={
+                inverter_id: np.asarray(arr, dtype=dtype_obj)
+                for inverter_id, arr in self._pv_by_inverter.items()
+            },
+        )
+        self._solver_view_cache[cache_key] = solver_view
+        return solver_view
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "timestamps": [ts.isoformat() for ts in self._timestamps],
             "dt_hours": float(self.dt_hours),
-            **{k: np.asarray(v, dtype=float).tolist() for k, v in self._arrays.items()},
         }
+        data["load_wh"] = np.asarray(self._load_wh, dtype=float).tolist()
+        data["electricprice_eur_wh"] = (
+            np.asarray(self._electricprice_eur_wh, dtype=float).tolist()
+            if self._electricprice_eur_wh is not None
+            else None
+        )
+        data["feedintariff_eur_wh"] = (
+            np.asarray(self._feedintariff_eur_wh, dtype=float).tolist()
+            if self._feedintariff_eur_wh is not None
+            else None
+        )
+        for inverter_id, arr in self._pv_by_inverter.items():
+            data[f"pv_{inverter_id}_wh"] = np.asarray(arr, dtype=float).tolist()
+        for channel, arr in self._weather_by_channel.items():
+            data[f"weather_{channel}"] = np.asarray(arr, dtype=float).tolist()
+        return data
 
 
 @dataclass(frozen=True)
 class PredictionSetup:
     """Wire providers before calling :pymeth:`Prediction.fetch`.
 
-    All fields are optional — omitted domains produce zero-filled columns.
+    All fields are optional — omitted numeric core domains become zero arrays.
     *pv* maps plant-name prefixes to their forecast provider.
     """
 
@@ -262,11 +363,7 @@ class Prediction:
             pv_series = rest
             weather_dict = None
 
-        arrays: dict[str, np.ndarray] = {
-            "electricprice_eur_wh": eprice,
-            "feedintariff_eur_wh": ftariff,
-            "load_wh": load_wh,
-        }
+        pv_arrays: dict[str, np.ndarray] = {}
 
         for provider_name, series_by_inverter in zip(pv_names, pv_series, strict=False):
             if not isinstance(series_by_inverter, Mapping):
@@ -278,21 +375,34 @@ class Prediction:
                     raise ValueError(
                         f"PV provider '{provider_name}' returned invalid inverter id: {inverter!r}"
                     )
-                key = f"pv_{inverter}_wh"
-                if key in arrays:
+                if inverter in pv_arrays:
                     raise ValueError(
                         f"Duplicate PV inverter id '{inverter}' returned by multiple providers"
                     )
-                arrays[key] = self._validate_series(key, arr, n)
-
-        if weather_dict is not None:
-            for ch_name, arr in weather_dict.items():
-                arrays[f"weather_{ch_name}"] = arr
+                pv_arrays[inverter] = self._validate_series(f"pv_{inverter}_wh", arr, n)
 
         logger.info(
             "prediction_fetch_complete",
             steps=n,
-            columns=list(arrays.keys()),
+            columns=[
+                "electricprice_eur_wh",
+                "feedintariff_eur_wh",
+                "load_wh",
+                *[f"pv_{inverter}_wh" for inverter in pv_arrays],
+                *(
+                    []
+                    if weather_dict is None
+                    else [f"weather_{channel}" for channel in weather_dict]
+                ),
+            ],
         )
 
-        return PredictionData(_timestamps=timestamps, _arrays=arrays, dt_hours=dt_hours)
+        return PredictionData(
+            timestamps=timestamps,
+            dt_hours=dt_hours,
+            load_wh=load_wh,
+            electricprice_eur_wh=eprice,
+            feedintariff_eur_wh=ftariff,
+            pv_by_inverter=pv_arrays,
+            weather_by_channel=weather_dict,
+        )

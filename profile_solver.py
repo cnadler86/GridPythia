@@ -54,18 +54,18 @@ def create_prediction_from_result(result: dict) -> PredictionData:
     load_arr = np.array(load[:n] if load else [0.0] * n, dtype=np.float32)
     pv_arr = np.array(pv_series[:n] if pv_series else [0.0] * n, dtype=np.float32)
 
-    data = {
-        "electricprice_eur_wh": price_arr,
-        "feedintariff_eur_wh": feedin_arr,
-        "load_wh": load_arr,
-        "pv_inverter1_wh": pv_arr,
-    }
-
     from datetime import datetime, timedelta
 
     start = datetime(2020, 1, 1)
     timestamps = [start + i * timedelta(minutes=15) for i in range(n)]
-    return PredictionData(_timestamps=timestamps, _arrays=data, dt_hours=0.25)
+    return PredictionData(
+        timestamps=timestamps,
+        dt_hours=0.25,
+        load_wh=load_arr,
+        electricprice_eur_wh=price_arr,
+        feedintariff_eur_wh=feedin_arr,
+        pv_by_inverter={"inverter1": pv_arr},
+    )
 
 
 def create_inverter() -> InverterBase:

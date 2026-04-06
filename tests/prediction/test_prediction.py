@@ -61,18 +61,18 @@ class TestPrediction:
         assert data.feedintariff is not None
         assert len(data.electricprice) == 24
         assert len(data.feedintariff) == 24
-        assert len(data["load_wh"]) == 24
-        # PV column name now only uses inverter_id: pv_{inverter_id}_wh (energy in Wh)
-        assert "pv_inverter1_wh" in data.columns
-        assert len(data["pv_inverter1_wh"]) == 24
-        assert "weather_temperature_c" in data.columns
+        assert len(data.load_wh) == 24
+        assert "inverter1" in data.pv_by_inverter
+        assert len(data.pv_by_inverter["inverter1"]) == 24
+        assert "temperature_c" in data.weather_by_channel
 
     async def test_fetch_quarter_hour(self):
         pred = self._make_prediction()
         data = await pred.fetch(start=START, hours=24, dt_hours=0.25)
         assert data.steps == 96
-        assert len(data["electricprice_eur_wh"]) == 96
-        assert len(data["load_wh"]) == 96
+        assert data.electricprice is not None
+        assert len(data.electricprice) == 96
+        assert len(data.load_wh) == 96
 
     async def test_values_correct(self):
         pred = self._make_prediction()
@@ -82,8 +82,8 @@ class TestPrediction:
         assert data.electricprice[0] == pytest.approx(0.0003)
         assert data.feedintariff[0] == pytest.approx(0.000082)
         # With dt_hours=1.0, energy is 0 Wh and 1000 Wh respectively
-        assert data["pv_inverter1_wh"][0] == pytest.approx(0.0)
-        assert data["pv_inverter1_wh"][10] == pytest.approx(1000.0)
+        assert data.pv_by_inverter["inverter1"][0] == pytest.approx(0.0)
+        assert data.pv_by_inverter["inverter1"][10] == pytest.approx(1000.0)
 
     async def test_multiple_pv_plants(self):
         # Test multiple inverters from the same provider
@@ -107,28 +107,28 @@ class TestPrediction:
         )
         pred = Prediction(setup)
         data = await pred.fetch(start=START, hours=24)
-        # Column names now only use inverter ID, with Wh suffix
-        assert "pv_east_wh" in data.columns
-        assert "pv_west_wh" in data.columns
+        assert set(data.pv_by_inverter) == {"east", "west"}
         # With dt_hours=1.0 (default), energy is 500 Wh and 300 Wh
-        assert data["pv_east_wh"][0] == pytest.approx(500.0)
-        assert data["pv_west_wh"][0] == pytest.approx(300.0)
+        assert data.pv_by_inverter["east"][0] == pytest.approx(500.0)
+        assert data.pv_by_inverter["west"][0] == pytest.approx(300.0)
 
     async def test_no_providers_gives_zeros(self):
         pred = Prediction(PredictionSetup())
         data = await pred.fetch(start=START, hours=24)
         assert data.steps == 24
-        assert all(v == 0.0 for v in data["electricprice_eur_wh"])
-        assert all(v == 0.0 for v in data["load_wh"])
-        assert "weather_temperature_c" not in data.columns
+        assert data.electricprice is not None
+        assert np.all(data.electricprice == 0.0)
+        assert np.all(data.load_wh == 0.0)
+        assert not data.weather_by_channel
 
     async def test_48_hours(self):
         pred = self._make_prediction()
         data = await pred.fetch(start=START, hours=48, dt_hours=1.0)
         assert data.steps == 48
-        assert len(data["electricprice_eur_wh"]) == 48
+        assert data.electricprice is not None
+        assert len(data.electricprice) == 48
 
-    async def test_pv_names_property(self):
+    async def test_pv_by_inverter_keys(self):
         # Test multiple inverters from different providers
         class MultiInvProvider(PVForecastProvider):
             @property
@@ -152,8 +152,7 @@ class TestPrediction:
             pv={"roof": MultiInvProvider(["north", "south"])}
         )
         data = await Prediction(setup).fetch(start=START, hours=24)
-        # With new structure, pv_names only contains inverter IDs
-        assert set(data.pv_names) == {"north", "south"}
+        assert set(data.pv_by_inverter) == {"north", "south"}
 
     async def test_multiple_inverters_per_provider(self):
         class MultiInverterPV(PVForecastProvider):
@@ -176,14 +175,10 @@ class TestPrediction:
             hours=24,
         )
 
-        # Column names now only use inverter_id with Wh suffix: pv_{inverter_id}_wh
-        assert "pv_inv1_wh" in data.columns
-        assert "pv_inv2_wh" in data.columns
         # With dt_hours=1.0 (default), energy is 100 Wh and 200 Wh
-        assert data["pv_inv1_wh"][0] == pytest.approx(100.0)
-        assert data["pv_inv2_wh"][0] == pytest.approx(200.0)
-        # pv_names now only returns the inverter IDs
-        assert set(data.pv_names) == {"inv1", "inv2"}
+        assert data.pv_by_inverter["inv1"][0] == pytest.approx(100.0)
+        assert data.pv_by_inverter["inv2"][0] == pytest.approx(200.0)
+        assert set(data.pv_by_inverter) == {"inv1", "inv2"}
 
     async def test_timestamps_property(self):
         pred = self._make_prediction()
@@ -192,26 +187,51 @@ class TestPrediction:
         assert len(ts) == 24
         assert ts[0] == START
 
-    async def test_getitem_returns_series(self):
+    async def test_load_property_returns_ndarray(self):
         pred = self._make_prediction()
         data = await pred.fetch(start=START, hours=24)
-        assert isinstance(data["load_wh"], np.ndarray)
+        assert isinstance(data.load_wh, np.ndarray)
 
-    async def test_weather_columns_prefixed(self):
+    async def test_weather_channels_are_exposed(self):
         pred = self._make_prediction()
         data = await pred.fetch(start=START, hours=24)
-        # All weather columns should appear with 'weather_' prefix
-        weather_cols = [c for c in data.columns if c.startswith("weather_")]
-        assert "weather_temperature_c" in weather_cols
-        assert "weather_cloud_cover_pct" in weather_cols
+        assert set(data.weather_by_channel) == {"temperature_c", "cloud_cover_pct"}
 
-    async def test_df_is_polars_dataframe(self):
+    async def test_typed_prediction_api_exposes_weather_and_solver_view(self):
         pred = self._make_prediction()
         data = await pred.fetch(start=START, hours=24)
-        assert isinstance(data.columns, list)
 
-    async def test_missing_pv_returns_empty_dict(self):
-        """Verify get_pv_series returns None for missing inverter."""
+        assert set(data.weather_by_channel) == {"temperature_c", "cloud_cover_pct"}
+
+        solver_view = data.to_solver_view()
+        assert solver_view.steps == 24
+        assert solver_view.load_wh.dtype == np.float64
+        assert "inverter1" in solver_view.pv_by_inverter
+        assert data.to_solver_view() is solver_view
+
+    def test_predictiondata_supports_typed_constructor(self):
+        timestamps = [START, START.replace(hour=1)]
+        data = PredictionData(
+            timestamps=timestamps,
+            dt_hours=1.0,
+            load_wh=np.array([100.0, 200.0], dtype=np.float32),
+            electricprice_eur_wh=np.array([0.1, 0.2], dtype=np.float32),
+            feedintariff_eur_wh=np.array([0.05, 0.05], dtype=np.float32),
+            pv_by_inverter={"inv1": np.array([10.0, 20.0], dtype=np.float32)},
+            weather_by_channel={"temperature_c": np.array([21.0, 22.0], dtype=np.float32)},
+        )
+
+        assert data.pv_by_inverter["inv1"][1] == pytest.approx(20.0)
+        assert data.weather_by_channel["temperature_c"][0] == pytest.approx(21.0)
+        assert data.electricprice is not None
+        assert data.electricprice[1] == pytest.approx(0.2)
+
+    async def test_weather_api_returns_dict(self):
+        pred = self._make_prediction()
+        data = await pred.fetch(start=START, hours=24)
+        assert isinstance(data.weather_by_channel, dict)
+
+    async def test_missing_pv_returns_empty_mapping(self):
         class SingleInverterPV(PVForecastProvider):
             @property
             def provider_id(self) -> str:
@@ -227,10 +247,8 @@ class TestPrediction:
         pred = Prediction(setup)
         data = await pred.fetch(start=START, hours=24)
 
-        # Existing inverter should return Series
-        assert data.get_pv_series("inverter1") is not None
-        # Non-existing inverter should return None
-        assert data.get_pv_series("nonexistent") is None
+        assert "inverter1" in data.pv_by_inverter
+        assert data.pv_by_inverter.get("nonexistent") is None
 
     async def test_timezone_is_converted_to_utc_for_providers(self):
         class CapturePrice(ElecPriceProvider):

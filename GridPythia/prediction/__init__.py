@@ -14,6 +14,11 @@ weather
     Weather data providers.
 """
 
-from GridPythia.prediction.prediction import Prediction, PredictionData, PredictionSetup
+from GridPythia.prediction.prediction import (
+    Prediction,
+    PredictionData,
+    PredictionSetup,
+    PredictionSolverView,
+)
 
-__all__ = ["Prediction", "PredictionData", "PredictionSetup"]
+__all__ = ["Prediction", "PredictionData", "PredictionSetup", "PredictionSolverView"]

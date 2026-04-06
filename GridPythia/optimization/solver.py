@@ -77,7 +77,7 @@ class _PreparedInputs:
     load_wh: np.ndarray
     price: np.ndarray
     feedin_tariff: np.ndarray
-    pv_by_source: dict[str, np.ndarray]
+    pv_by_source: Mapping[str, np.ndarray]
 
 
 @dataclass
@@ -240,32 +240,15 @@ class LinearOptimizer:
         return solution
 
     def _prepare_inputs(self) -> _PreparedInputs:
-        pred = self.prediction
-        T = pred.steps
-        dt = pred.dt_hours
-
-        price_series = pred.electricprice
-        if price_series is None:
-            price = np.zeros(T, dtype=float)
-        else:
-            price = np.asarray(price_series, dtype=float)
-
-        tariff_series = pred.feedintariff
-        if tariff_series is None:
-            feedin_tariff = np.zeros(T, dtype=float)
-        else:
-            feedin_tariff = np.asarray(tariff_series, dtype=float)
-
-        load_wh = np.asarray(pred.load_wh, dtype=float)
-        pv_by_source = {k: np.asarray(v, dtype=float) for k, v in pred.pv_by_inverter.items()}
+        solver_view = self.prediction.to_solver_view(dtype=np.float64)
 
         return _PreparedInputs(
-            T=T,
-            dt=dt,
-            load_wh=load_wh,
-            price=price,
-            feedin_tariff=feedin_tariff,
-            pv_by_source=pv_by_source,
+            T=solver_view.steps,
+            dt=solver_view.dt_hours,
+            load_wh=solver_view.load_wh,
+            price=solver_view.electricprice_eur_wh,
+            feedin_tariff=solver_view.feedintariff_eur_wh,
+            pv_by_source=solver_view.pv_by_inverter,
         )
 
     def _build_problem(

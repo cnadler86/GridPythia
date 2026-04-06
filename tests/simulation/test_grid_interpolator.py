@@ -76,14 +76,15 @@ def test_sc_ratio_increases_with_higher_baseload_for_same_inputs() -> None:
 
 def test_grid_simulation_uses_prediction_dt_and_min_load_for_fraunhofer_init() -> None:
     """GridSimulation should initialize Fraunhofer model from prediction metadata."""
-    arrays = {
-        "electricprice_eur_wh": np.array([0.0003, 0.0003, 0.0003], dtype=np.float32),
-        "feedintariff_eur_wh": np.array([0.0001, 0.0001, 0.0001], dtype=np.float32),
-        "load_wh": np.array([850.0, 400.0, 620.0], dtype=np.float32),
-    }
     start = datetime(2025, 1, 1)
     timestamps = [start + timedelta(minutes=15 * i) for i in range(3)]
-    prediction = PredictionData(_timestamps=timestamps, _arrays=arrays, dt_hours=0.25)
+    prediction = PredictionData(
+        timestamps=timestamps,
+        dt_hours=0.25,
+        load_wh=np.array([850.0, 400.0, 620.0], dtype=np.float32),
+        electricprice_eur_wh=np.array([0.0003, 0.0003, 0.0003], dtype=np.float32),
+        feedintariff_eur_wh=np.array([0.0001, 0.0001, 0.0001], dtype=np.float32),
+    )
 
     sim = GridSimulation(
         prediction=prediction,

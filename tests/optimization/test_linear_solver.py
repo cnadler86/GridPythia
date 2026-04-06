@@ -31,16 +31,19 @@ def _make_prediction(
 
     start = datetime(2025, 1, 1)
     timestamps = [start + timedelta(hours=i) for i in range(n)]
-    arrays: dict[str, np.ndarray] = {
-        "electricprice_eur_wh": np.array(price_eur_wh, dtype=np.float32),
-        "feedintariff_eur_wh": np.zeros(n, dtype=np.float32),
-        "load_wh": np.array(load_w, dtype=np.float32),
-    }
+    pv_by_inverter: dict[str, np.ndarray] = {}
     for inverter_id, series in (pv_wh or {}).items():
         assert len(series) == n
-        arrays[f"pv_{inverter_id}_wh"] = np.array(series, dtype=np.float32)
+        pv_by_inverter[inverter_id] = np.array(series, dtype=np.float32)
 
-    return PredictionData(_timestamps=timestamps, _arrays=arrays, dt_hours=1.0)
+    return PredictionData(
+        timestamps=timestamps,
+        dt_hours=1.0,
+        load_wh=np.array(load_w, dtype=np.float32),
+        electricprice_eur_wh=np.array(price_eur_wh, dtype=np.float32),
+        feedintariff_eur_wh=np.zeros(n, dtype=np.float32),
+        pv_by_inverter=pv_by_inverter,
+    )
 
 
 def _make_hybrid_inverter(roundtrip_efficiency: float = 0.8) -> InverterBase:
