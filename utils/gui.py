@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 import matplotlib
 import structlog
+import yaml
 from matplotlib.axes import Axes
 
 matplotlib.use("TkAgg")
@@ -1937,20 +1938,52 @@ class App:
         self._config_path = tk.StringVar(value=str(default_config_path))
         self._app_config = AppConfig()
         self._yaml_config: dict[str, Any] = {}
-        self._load_yaml_config(show_error=False)
+        # Raw YAML mapping exactly as loaded from file (no defaults applied)
+        self._yaml_raw: dict[str, Any] = {}
+        # If config file is present and parsed successfully, only create tabs
+        # present in the YAML. If no config file exists, create all tabs.
+        self._config_present = self._load_yaml_config(show_error=False)
         self.root.title("Forecast Preview  —  dev tool")
         self.root.minsize(960, 580)
         self._build_topbar()
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=4, pady=(0, 4))
-        self.tabs: list[_Tab] = [
-            ElecPriceTab(nb, self),
-            FeedInTariffTab(nb, self),
-            LoadTab(nb, self),
-            PVForecastTab(nb, self),
-            WeatherTab(nb, self),
-            OptimizationTab(nb, self),
+
+        # Create tabs only when the corresponding config section exists.
+        # Mapping: (TabClass, config path tuple) — use None to always include.
+        tab_candidates: list[tuple[type[_Tab], tuple[str, ...] | None]] = [
+            (ElecPriceTab, ("prediction", "electricprice")),
+            (FeedInTariffTab, ("prediction", "feedintariff")),
+            (LoadTab, ("prediction", "load")),
+            (PVForecastTab, ("prediction", "pvforecast")),
+            (WeatherTab, ("prediction", "weather")),
+            (OptimizationTab, ("optimization",)),
         ]
+
+        self.tabs = []
+        for cls, path in tab_candidates:
+            # If no config file provided, include all tabs with defaults.
+            if not self._config_present:
+                has_cfg = True
+            else:
+                # Decide presence based on raw YAML (only create tab if user included section)
+                if path is None:
+                    has_cfg = True
+                else:
+                    node: Any = self._yaml_raw
+                    has_cfg = True
+                    for key in path:
+                        if not isinstance(node, Mapping) or key not in node:
+                            has_cfg = False
+                            break
+                        node = node[key]
+            if not has_cfg:
+                logger.debug("skipping_tab_no_config", tab=cls.__name__, path=path)
+                continue
+            try:
+                self.tabs.append(cls(nb, self))
+            except Exception as exc:
+                logger.error("tab_init_failed", tab=cls.__name__, exc=exc)
 
     def _load_yaml_config(self, show_error: bool = True) -> bool:
         path = Path(self._config_path.get()).expanduser()
@@ -1964,12 +1997,22 @@ class App:
                 )
             return False
         try:
-            self._app_config = AppConfig.from_yaml_file(path)
+            # Read raw YAML first so we know which sections the user explicitly provided.
+            text = Path(path).read_text(encoding="utf-8")
+            raw = yaml.safe_load(text) or {}
+            if not isinstance(raw, dict):
+                raise ValueError("Root YAML node must be a mapping")
+            self._yaml_raw = raw
+
+            # Validate/build the full config model (fills defaults where missing)
+            self._app_config = AppConfig.from_dict(raw)
             self._yaml_config = self._app_config.model_dump(mode="python")
             return True
         except Exception as exc:
             self._app_config = AppConfig()
             self._yaml_config = self._app_config.model_dump(mode="python")
+            # If we failed to parse, keep raw as empty mapping so tabs won't be created.
+            self._yaml_raw = {}
             if show_error:
                 messagebox.showerror(
                     "Config error", f"Failed to load YAML:\n{exc}", parent=self.root
