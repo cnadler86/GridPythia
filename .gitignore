@@ -5,7 +5,6 @@ uv.lock
 *.csv
 *.log
 *.pdf
-*.json
 *.xlsx
 *.yaml
 
