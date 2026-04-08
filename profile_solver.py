@@ -1,5 +1,6 @@
 """Profiling script to identify performance bottlenecks in LinearOptimizer."""
 
+import argparse
 import cProfile
 import io
 import json
@@ -19,33 +20,46 @@ from GridPythia.simulation.devices.inverterbase import InverterBase
 
 
 def load_result_json(json_path: str | Path) -> dict:
-    """Load result JSON from file."""
-    with open(json_path, "r") as f:
+    """Load JSON from file (either a result wrapper or a raw prediction payload)."""
+    with open(json_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def create_prediction_from_result(result: dict) -> PredictionData:
-    """Create PredictionData from result JSON."""
-    # This function now expects a top-level 'prediction' payload produced by
-    # the optimizer/solver. Do not rely on legacy 'solar_generation_wh_per_dt'
-    # or 'electricity_price_per_dt' fields which were removed from SimulationResult.
-    pred = result.get("prediction") or result.get("result", {}).get("prediction")
-    if not isinstance(pred, dict):
-        raise RuntimeError(
-            "Missing 'prediction' payload in result JSON. Provide 'prediction' with "
-            "channels like 'electricprice_eur_wh', 'feedintariff_eur_wh', 'load_wh', 'pv_<id>_wh'."
-        )
+    """Create PredictionData from either a result JSON (with `prediction`) or
+    directly from a prediction payload (contains `load_wh`, `electricprice_eur_wh`, etc.).
+    """
+    # Accept either {"prediction": {...}} or the prediction dict itself.
+    if isinstance(result.get("prediction"), dict):
+        pred = result["prediction"]
+    elif isinstance(result.get("result", {}).get("prediction"), dict):
+        pred = result["result"]["prediction"]
+    else:
+        # treat the whole file as a prediction payload
+        pred = result
 
-    # Extract arrays from prediction; prefer explicit channel names.
+    if not isinstance(pred, dict):
+        raise RuntimeError("Missing prediction payload in JSON input.")
+
+    # Extract channels
     price = list(pred.get("electricprice_eur_wh", []))
     feedin = list(pred.get("feedintariff_eur_wh", []))
     load = list(pred.get("load_wh", []))
-    pv_keys = [k for k in pred.keys() if k.startswith("pv_") and k.endswith("_wh")]
-    pv_series = list(pred.get(pv_keys[0], [])) if pv_keys else []
+
+    # pv series may be provided as 'pv_by_inverter' dict or as pv_<id>_wh keys
+    pv_series = []
+    if "pv_by_inverter" in pred and isinstance(pred["pv_by_inverter"], dict):
+        # use first inverter series
+        first = next(iter(pred["pv_by_inverter"].values()), [])
+        pv_series = list(first)
+    else:
+        pv_keys = [k for k in pred.keys() if k.startswith("pv_") and k.endswith("_wh")]
+        if pv_keys:
+            pv_series = list(pred.get(pv_keys[0], []))
 
     # Determine horizon length n (min of available non-empty channels)
     lens = [len(x) for x in (price, feedin, load, pv_series) if len(x) > 0]
-    n = min(lens) if lens else len(price)
+    n = min(lens) if lens else max(len(price), len(load), len(pv_series), 0)
     if n == 0:
         raise RuntimeError("Prediction payload contains no time series data.")
 
@@ -54,13 +68,27 @@ def create_prediction_from_result(result: dict) -> PredictionData:
     load_arr = np.array(load[:n] if load else [0.0] * n, dtype=np.float32)
     pv_arr = np.array(pv_series[:n] if pv_series else [0.0] * n, dtype=np.float32)
 
+    # Use provided timestamps if available
     from datetime import datetime, timedelta
 
-    start = datetime(2020, 1, 1)
-    timestamps = [start + i * timedelta(minutes=15) for i in range(n)]
+    if (
+        "timestamps" in pred
+        and isinstance(pred["timestamps"], list)
+        and len(pred["timestamps"]) >= n
+    ):
+        # parse provided ISO timestamps
+        try:
+            timestamps = [datetime.fromisoformat(ts) for ts in pred["timestamps"][:n]]
+        except Exception:
+            start = datetime(2020, 1, 1)
+            timestamps = [start + i * timedelta(minutes=15) for i in range(n)]
+    else:
+        start = datetime(2020, 1, 1)
+        timestamps = [start + i * timedelta(minutes=15) for i in range(n)]
+
     return PredictionData(
         timestamps=timestamps,
-        dt_hours=0.25,
+        dt_hours=float(pred.get("dt_hours", 0.25)),
         load_wh=load_arr,
         electricprice_eur_wh=price_arr,
         feedintariff_eur_wh=feedin_arr,
@@ -110,12 +138,34 @@ def profile_solver():
     - mutate parameters on same inverter/battery instances
     - second solve time
     """
-    # Load result JSON
-    result_path = Path(__file__).parent / "result.json"
+    # Determine input path: default to result.json in script dir
+    parser = argparse.ArgumentParser(
+        description="Profile LinearOptimizer using a prediction/result JSON"
+    )
+    parser.add_argument("input", nargs="?", help="Path to result or prediction JSON (fixture)")
+    args = parser.parse_args()
+
+    if args.input:
+        result_path = Path(args.input)
+    else:
+        result_path = Path(__file__).parent / "result.json"
+
+    # If the chosen path doesn't exist, try to fall back to the first fixture
     if not result_path.exists():
-        print(f"Result JSON not found at {result_path}")
-        print("Please save the result JSON first.")
-        return
+        fixtures_dir = Path(__file__).parent / "tests" / "optimization" / "fixtures"
+        if fixtures_dir.exists() and fixtures_dir.is_dir():
+            json_files = sorted(fixtures_dir.glob("*.json"))
+            if json_files:
+                result_path = json_files[0]
+                print(f"No input provided — using fixture {result_path}")
+            else:
+                print(f"No JSON fixtures found in {fixtures_dir}")
+                print("Provide a path to a prediction/result JSON as the first argument.")
+                return
+        else:
+            print(f"Input JSON not found at {result_path}")
+            print("Provide a path to a prediction/result JSON as the first argument.")
+            return
 
     result = load_result_json(result_path)
     pred = create_prediction_from_result(result)
