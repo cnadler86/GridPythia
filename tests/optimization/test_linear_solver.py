@@ -87,9 +87,9 @@ def _make_hybrid_inverter(roundtrip_efficiency: float = 0.8) -> InverterBase:
 
 def _make_switching_case_inverter(
     *,
-    prediction_hours: int,
     roundtrip_efficiency: float = 0.8,
     switch_cost: float,
+    active_inverter_consumption_w: float = 0.0,
 ) -> InverterBase:
     """Hybrid inverter for switching-cost edge cases.
 
@@ -122,6 +122,7 @@ def _make_switching_case_inverter(
             ac_to_dc_efficiency=1.0,
             zero_feed_in=True,
             mode_switch_cost=switch_cost,
+            active_inverter_consumption_w = active_inverter_consumption_w,
         ),
         battery=battery,
     )
@@ -328,7 +329,7 @@ class TestLinearSolverHybridEconomics:
             load_w=[0.0, 0.0, 0.0, 0.0, 600.0],
             price_eur_wh=[0.00030, 0.00030, 0.00045, 0.00024, 0.00070],
         )
-        inv = _make_switching_case_inverter(prediction_hours=5, switch_cost=0.005)
+        inv = _make_switching_case_inverter(switch_cost=0.005)
 
         sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
         plan = sol.inverter_plans[0]
@@ -353,13 +354,13 @@ class TestLinearSolverHybridEconomics:
             price_eur_wh=[0.00030, 0.00045, 0.00070],
         )
 
-        inv_idle_start = _make_switching_case_inverter(prediction_hours=3, switch_cost=0.020)
+        inv_idle_start = _make_switching_case_inverter(switch_cost=0.020)
         sol_idle_start = LinearOptimizer([inv_idle_start], pred).solve(
             OptimizationObjective.MINIMIZE_COST
         )
         plan_idle_start = sol_idle_start.inverter_plans[0]
 
-        inv_charge_start = _make_switching_case_inverter(prediction_hours=3, switch_cost=0.020)
+        inv_charge_start = _make_switching_case_inverter(switch_cost=0.020)
         sol_charge_start = LinearOptimizer([inv_charge_start], pred).solve(
             OptimizationObjective.MINIMIZE_COST,
             initial_modes={"hybrid_sw": InverterMode.AC_CHARGE},
@@ -538,6 +539,7 @@ class TestLinearSolverHybridEconomics:
                     ac_to_dc_efficiency=1.0,
                     zero_feed_in=True,
                     mode_switch_cost=switch_cost,
+                    active_inverter_consumption_w=0.0,
                 ),
                 battery=battery,
             )
@@ -576,3 +578,104 @@ class TestLinearSolverHybridEconomics:
         for objective, problem in opt._problems.items():
             assert problem is not None, f"Problem for {objective} is None"
             assert problem.is_dpp(), f"Compiled problem for {objective} is not DPP-compliant"
+
+
+class TestActiveInverterConsumption:
+    """Tests for the active_inverter_consumption_w parameter."""
+
+    def _make_inverter(self, *, active_consumption_w: float = 0.0) -> InverterBase:
+        """Hybrid inverter with configurable active self-consumption."""
+        battery = Battery(
+            BatteryParameters(
+                device_id="battery_act",
+                capacity_wh=1000,
+                charging_efficiency=1.0,
+                discharging_efficiency=1.0,
+                max_charge_power_w=500,
+                max_discharge_power_w=500,
+                initial_soc_percentage=50,
+                min_soc_percentage=0,
+                max_soc_percentage=100,
+            )
+        )
+        return InverterBase(
+            InverterParameters(
+                device_id="hybrid_act",
+                battery_id="battery_act",
+                has_pv=False,
+                max_ac_output_power_w=500,
+                max_ac_charge_power_w=500,
+                dc_to_ac_efficiency=1.0,
+                ac_to_dc_efficiency=1.0,
+                zero_feed_in=False,
+                mode_switch_cost=0.0,
+                active_inverter_consumption_w=active_consumption_w,
+            ),
+            battery=battery,
+        )
+
+    def test_solver_active_consumption_increases_grid_import(self) -> None:
+        """Active consumption is accounted for in the energy balance.
+
+        When the inverter is active, the solver must supply load + active_consumption.
+        We verify this via simulation parity: both the LP model and the simulation
+        include the same active consumption via the energy balance, so the parity
+        report should confirm the two are consistent.
+        """
+        pred = _make_prediction(
+            load_w=[0.0, 0.0, 200.0],
+            price_eur_wh=[0.00020, 0.00022, 0.00080],
+        )
+        inv = self._make_inverter(active_consumption_w=30.0)
+        sol = LinearOptimizer([inv], pred).solve(
+            OptimizationObjective.MINIMIZE_COST,
+            validate_with_simulation=True,
+        )
+
+        assert sol.parity_report is not None
+        assert sol.parity_report.ok
+        assert sol.parity_report.max_abs_grid_import_error_wh <= 5.0
+
+    def test_solver_high_active_consumption_prevents_unprofitable_charging(self) -> None:
+        """With a large active consumption, activating the inverter for marginal arbitrage
+        becomes unprofitable, so the optimizer should keep the inverter IDLE.
+
+        Arbitrage opportunity: low=0.00025 EUR/Wh, high=0.00030 EUR/Wh.
+        Savings per charge/discharge cycle: 500 Wh * (0.00030 - 0.00025) = 0.25 EUR.
+        Active consumption cost: 200 W * 1 h = 200 Wh per active step,
+        at the high price: 200 * 0.00030 * 2 steps active = 0.12 EUR → still profitable.
+        But at 500 W active consumption: 500 * 2 * 0.00030 = 0.30 EUR > 0.25 EUR → not profitable.
+        """
+        pred = _make_prediction(
+            load_w=[0.0, 0.0],
+            price_eur_wh=[0.00025, 0.00030],
+        )
+
+        # Very high active consumption makes staying IDLE cheaper
+        inv = self._make_inverter(active_consumption_w=500.0)
+        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        plan = sol.inverter_plans[0]
+
+        # Both slots should be IDLE (arbitrage not worth the inverter consumption cost)
+        assert plan["modes"][0] == int(InverterMode.IDLE)
+        assert plan["modes"][1] == int(InverterMode.IDLE)
+
+    def test_solver_losses_include_active_consumption(self) -> None:
+        """Losses in the solver result should include the inverter's active consumption."""
+        pred = _make_prediction(
+            load_w=[200.0],
+            price_eur_wh=[0.00080],
+        )
+        inv_no_loss = self._make_inverter(active_consumption_w=0.0)
+        inv_with_loss = self._make_inverter(active_consumption_w=30.0)
+
+        sol_no = LinearOptimizer([inv_no_loss], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol_with = LinearOptimizer([inv_with_loss], pred).solve(OptimizationObjective.MINIMIZE_COST)
+
+        losses_no = float(np.sum(sol_no.result.losses_wh_per_dt))
+        losses_with = float(np.sum(sol_with.result.losses_wh_per_dt))
+
+        # If inverter is active in either solution, losses_with must exceed losses_no.
+        plan_with = sol_with.inverter_plans[0]
+        if any(m != int(InverterMode.IDLE) for m in plan_with["modes"]):
+            assert losses_with > losses_no + 25.0

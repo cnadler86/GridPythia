@@ -69,20 +69,25 @@ class InverterParameters(BaseModel):
     has_pv: bool = Field(
         default=True, description="Whether a PV plane is attached to this inverter"
     )
-    max_ac_output_power_w: float = Field(default=5000, ge=0.0, description="Max AC output in W")
-    max_ac_charge_power_w: float = Field(default=0.0, ge=0.0, description="Max AC charge in W")
+    max_ac_output_power_w: float = Field(
+        default=5000, ge=0.0, description="Max AC output (to grid) in W"
+    )
+    max_ac_charge_power_w: float = Field(
+        default=0.0, ge=0.0, description="Max AC charge (from grid) in W"
+    )
     dc_to_ac_efficiency: float = Field(
-        default=0.95, ge=0.0, le=1.0, description="DC->AC efficiency [0, 1]"
+        default=0.96, ge=0.0, le=1.0, description="DC->AC efficiency [0, 1]"
     )
     ac_to_dc_efficiency: float = Field(
-        default=0.95, ge=0.0, le=1.0, description="AC->DC efficiency [0, 1]"
+        default=0.96, ge=0.0, le=1.0, description="AC->DC efficiency [0, 1]"
     )
     zero_feed_in: bool = Field(default=True, description="Enable zero-feed-in mode")
     mode_switch_cost: float = Field(
         default=0.005, ge=0.0, description="Cost (EUR) per inverter mode change (wear cost)"
     )
-
-    # Topology checks are performed at higher level; `has_pv` indicates attached PV.
+    active_inverter_consumption_w: float = Field(
+        default=10.0, ge=0.0, description="Inverter consumption when active (W)"
+    )
 
 
 class OptimizationSolverConfig(BaseModel):

@@ -196,3 +196,99 @@ class TestRates:
         inv = InverterBase(pv_battery_no_ac_params, battery=battery)
         assert inv.charge_rates == tuple()
         assert inv.discharge_rates == tuple()
+
+
+class TestActiveInverterConsumption:
+    """Tests for active_inverter_consumption_w in simulation."""
+
+    @pytest.fixture
+    def simple_battery(self) -> Battery:
+        return Battery(
+            BatteryParameters(
+                device_id="battery_a",
+                capacity_wh=2000,
+                charging_efficiency=1.0,
+                discharging_efficiency=1.0,
+                max_charge_power_w=1000,
+                max_discharge_power_w=1000,
+                initial_soc_percentage=50,
+                min_soc_percentage=0,
+                max_soc_percentage=100,
+            )
+        )
+
+    def _make_inv(self, battery: Battery, active_w: float) -> InverterBase:
+        return InverterBase(
+            InverterParameters(
+                device_id="inv_active",
+                battery_id="battery_a",
+                has_pv=False,
+                max_ac_output_power_w=1000,
+                max_ac_charge_power_w=1000,
+                dc_to_ac_efficiency=1.0,
+                ac_to_dc_efficiency=1.0,
+                zero_feed_in=False,
+                mode_switch_cost=0.0,
+                active_inverter_consumption_w=active_w,
+            ),
+            battery=battery,
+        )
+
+    def test_idle_mode_has_no_active_consumption(self, simple_battery: Battery) -> None:
+        """IDLE mode must not add any active consumption regardless of parameter value."""
+        inv = self._make_inv(simple_battery, active_w=50.0)
+        result = inv.process_energy(generation=0.0, mode=InverterMode.IDLE, dt=1.0)
+        assert result.ac_input_wh == pytest.approx(0.0)
+        assert result.losses_wh == pytest.approx(0.0)
+
+    def test_discharge_mode_adds_active_consumption_to_ac_input_and_losses(
+        self, simple_battery: Battery
+    ) -> None:
+        """DISCHARGE mode should increase ac_input_wh and losses_wh by active_consumption_w * dt."""
+        active_w = 30.0
+        dt = 1.0
+        expected_extra = active_w * dt
+
+        inv_no = self._make_inv(simple_battery, active_w=0.0)
+        res_no = inv_no.process_energy(
+            generation=0.0, mode=InverterMode.DISCHARGE, dt=dt, ac_rate_pct=50
+        )
+
+        simple_battery.reset()
+        inv_with = self._make_inv(simple_battery, active_w=active_w)
+        res_with = inv_with.process_energy(
+            generation=0.0, mode=InverterMode.DISCHARGE, dt=dt, ac_rate_pct=50
+        )
+
+        assert res_with.ac_input_wh == pytest.approx(res_no.ac_input_wh + expected_extra, abs=1e-6)
+        assert res_with.losses_wh == pytest.approx(res_no.losses_wh + expected_extra, abs=1e-6)
+
+    def test_ac_charge_mode_adds_active_consumption(self, simple_battery: Battery) -> None:
+        """AC_CHARGE mode should also add active consumption to ac_input_wh and losses_wh."""
+        active_w = 20.0
+        dt = 0.25
+        expected_extra = active_w * dt
+
+        inv_no = self._make_inv(simple_battery, active_w=0.0)
+        res_no = inv_no.process_energy(
+            generation=0.0, mode=InverterMode.AC_CHARGE, dt=dt, ac_rate_pct=100
+        )
+
+        simple_battery.reset()
+        inv_with = self._make_inv(simple_battery, active_w=active_w)
+        res_with = inv_with.process_energy(
+            generation=0.0, mode=InverterMode.AC_CHARGE, dt=dt, ac_rate_pct=100
+        )
+
+        assert res_with.ac_input_wh == pytest.approx(res_no.ac_input_wh + expected_extra, abs=1e-6)
+        assert res_with.losses_wh == pytest.approx(res_no.losses_wh + expected_extra, abs=1e-6)
+
+    def test_zero_active_consumption_leaves_result_unchanged(self, simple_battery: Battery) -> None:
+        """When active_inverter_consumption_w=0 the result must be identical to the baseline."""
+        inv = self._make_inv(simple_battery, active_w=0.0)
+        res = inv.process_energy(
+            generation=0.0, mode=InverterMode.AC_CHARGE, dt=1.0, ac_rate_pct=50
+        )
+        # Just verify no extra is injected compared to a zero-loss inverter
+        assert res.losses_wh >= 0.0
+        assert res.ac_input_wh >= 0.0

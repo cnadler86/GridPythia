@@ -266,6 +266,7 @@ class LinearOptimizer:
         total_p_dc_terms: list[cp.Expression] = []
         total_pv_ac_terms: list[cp.Expression] = [self._pv_external_param]
         total_pv_ac_decision_terms: list[cp.Expression] = []
+        total_inv_consumption_terms: list[cp.Expression] = []
 
         blocks: list[_InverterModelBlock] = []
         for inv in self.inverters:
@@ -276,10 +277,25 @@ class LinearOptimizer:
             total_pv_ac_terms.append(block.pv_ac)
             total_pv_ac_decision_terms.append(block.pv_ac)
 
+            active_w = inv.parameters.active_inverter_consumption_w
+            if active_w > 0.0:
+                active_wh = active_w * self._dt
+                if block.mode_ch_activity is not None and block.mode_dc_activity is not None:
+                    is_active = block.mode_ch_activity + block.mode_dc_activity
+                elif block.mode_ch_activity is not None:
+                    is_active = block.mode_ch_activity
+                elif block.mode_dc_activity is not None:
+                    is_active = block.mode_dc_activity
+                else:
+                    is_active = None
+                if is_active is not None:
+                    total_inv_consumption_terms.append(active_wh * is_active)
+
         total_p_ch = self._sum_terms(total_p_ch_terms, self._T)
         total_p_dc = self._sum_terms(total_p_dc_terms, self._T)
         total_pv_ac = self._sum_terms(total_pv_ac_terms, self._T)
         total_pv_ac_decision = self._sum_terms(total_pv_ac_decision_terms, self._T)
+        total_inv_consumption = self._sum_terms(total_inv_consumption_terms, self._T)
 
         self._constraints.extend(
             [
@@ -292,7 +308,12 @@ class LinearOptimizer:
 
         self._constraints.append(
             self._g_import - self._g_feedin
-            == self._load_param + total_p_ch - total_p_dc + total_pv_ac - self._pv_self
+            == self._load_param
+            + total_p_ch
+            + total_inv_consumption
+            - total_p_dc
+            + total_pv_ac
+            - self._pv_self
         )
 
         terminal_terms = [block.soc[-1] for block in blocks if block.soc is not None]
@@ -510,27 +531,34 @@ class LinearOptimizer:
         is_ch = mode_ch_activity if mode_ch_activity is not None else np.zeros(self._T, dtype=float)
         is_dc = mode_dc_activity if mode_dc_activity is not None else np.zeros(self._T, dtype=float)
 
-        delta_mode = cp.Variable(self._T, nonneg=True, name=f"delta_mode_{inv_id}")
+        # Use separate delta variables per binary so that a simultaneous
+        # AC_CHARGE→DISCHARGE transition incurs 2×switch_cost (one for each
+        # binary change), identical to going through IDLE in two steps.
+        # The old single delta_mode variable used max(Δch, Δdc) semantics,
+        # which created a spurious incentive to "park" at 1 % charge just
+        # before discharge to save one switch.
+        delta_ch = cp.Variable(self._T, nonneg=True, name=f"delta_ch_{inv_id}")
+        delta_dc = cp.Variable(self._T, nonneg=True, name=f"delta_dc_{inv_id}")
         self._constraints.extend(
             [
-                delta_mode[0] >= is_ch[0] - init_ch_param,
-                delta_mode[0] >= init_ch_param - is_ch[0],
-                delta_mode[0] >= is_dc[0] - init_dc_param,
-                delta_mode[0] >= init_dc_param - is_dc[0],
+                delta_ch[0] >= is_ch[0] - init_ch_param,
+                delta_ch[0] >= init_ch_param - is_ch[0],
+                delta_dc[0] >= is_dc[0] - init_dc_param,
+                delta_dc[0] >= init_dc_param - is_dc[0],
             ]
         )
 
         if self._T > 1:
             self._constraints.extend(
                 [
-                    delta_mode[1:] >= is_ch[1:] - is_ch[:-1],
-                    delta_mode[1:] >= is_ch[:-1] - is_ch[1:],
-                    delta_mode[1:] >= is_dc[1:] - is_dc[:-1],
-                    delta_mode[1:] >= is_dc[:-1] - is_dc[1:],
+                    delta_ch[1:] >= is_ch[1:] - is_ch[:-1],
+                    delta_ch[1:] >= is_ch[:-1] - is_ch[1:],
+                    delta_dc[1:] >= is_dc[1:] - is_dc[:-1],
+                    delta_dc[1:] >= is_dc[:-1] - is_dc[1:],
                 ]
             )
 
-        self._mode_switch_costs.append(cp.sum(delta_mode) * mode_switch_cost)
+        self._mode_switch_costs.append((cp.sum(delta_ch) + cp.sum(delta_dc)) * mode_switch_cost)
 
     @staticmethod
     def _mode_flags(mode: InverterMode) -> tuple[int, int]:
@@ -645,6 +673,12 @@ class LinearOptimizer:
             inv_modes_per_dt[inv_id] = np.asarray(modes, dtype=np.int8)
             inv_rates_per_dt[inv_id] = np.asarray(rates, dtype=np.int32)
             inverter_plans.append({"device_id": inv_id, "modes": modes, "rates": rates})
+
+            active_w = inv.parameters.active_inverter_consumption_w
+            if active_w > 0.0:
+                active_wh = active_w * dt
+                is_active = np.array([m != int(InverterMode.IDLE) for m in modes], dtype=float)
+                losses_arr += active_wh * is_active
 
         result = SimulationResult(
             costs_per_dt=np.asarray(costs, dtype=np.float32),

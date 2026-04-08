@@ -1228,6 +1228,13 @@ class OptimizationTab(_Tab):
             str(inv.mode_switch_cost),
         )
         row += 1
+        self._inv_active_consumption = _field(
+            f,
+            row,
+            "Active consumption W",
+            str(inv.active_inverter_consumption_w),
+        )
+        row += 1
         self._zero_feed_in = tk.BooleanVar(value=inv.zero_feed_in)
         ttk.Checkbutton(
             f,
@@ -1261,6 +1268,7 @@ class OptimizationTab(_Tab):
                 str(float(getattr(p, "ac_to_dc_efficiency", 0.0))),
                 str(bool(getattr(p, "zero_feed_in", False))),
                 str(float(getattr(p, "mode_switch_cost", 0.0))),
+                str(float(getattr(p, "active_inverter_consumption_w", 0.0))),
                 str(float(hours)),
                 "none"
                 if bat is None
@@ -1456,6 +1464,7 @@ class OptimizationTab(_Tab):
                         "ac_to_dc_efficiency": float(self._inv_ac2dc.get()),
                         "zero_feed_in": bool(self._zero_feed_in.get()),
                         "mode_switch_cost": float(self._inv_mode_switch_cost.get()),
+                        "active_inverter_consumption_w": float(self._inv_active_consumption.get()),
                     }
 
                     inv_params = InverterParameters(**inv_kwargs)

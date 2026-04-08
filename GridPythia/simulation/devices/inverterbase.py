@@ -187,8 +187,8 @@ class InverterBase:
         handler = self._mode_dispatch[mode]
 
         if mode in self._ZERO_FEED_IN_MODES:
-            return handler(generation, dt, energy_wh=energy_wh)
-        if mode in self._RATE_REQUIRED_MODES:
+            result = handler(generation, dt, energy_wh=energy_wh)
+        elif mode in self._RATE_REQUIRED_MODES:
             if not isinstance(ac_rate_pct, int):
                 raise ValueError(
                     f"Inverter '{self.parameters.device_id}': ac_rate_pct must be an integer percent in [1, 100]"
@@ -197,8 +197,17 @@ class InverterBase:
                 raise ValueError(
                     f"Inverter '{self.parameters.device_id}': ac_rate_pct must be within [1, 100], got {ac_rate_pct}"
                 )
-            return handler(generation, dt, ac_rate_pct=ac_rate_pct)
-        return handler(generation, dt)
+            result = handler(generation, dt, ac_rate_pct=ac_rate_pct)
+        else:
+            result = handler(generation, dt)
+
+        active_w = self.parameters.active_inverter_consumption_w
+        if active_w > 0.0 and mode != InverterMode.IDLE:
+            active_wh = active_w * dt
+            result.ac_input_wh += active_wh
+            result.losses_wh += active_wh
+
+        return result
 
     def _process_idle(self, generation_wh: float, dt: float) -> EnergyFlowResult:
         """IDLE: PV → AC; excess charges battery if available."""
