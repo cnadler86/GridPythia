@@ -59,16 +59,6 @@ class LinearSolution:
 
 
 @dataclass
-class _RateSelector:
-    """Per-inverter binary selectors for discrete charge/discharge rate states."""
-
-    charge_rates: tuple[int, ...]
-    discharge_rates: tuple[int, ...]
-    y_ch: cp.Variable | None
-    y_dc: cp.Variable | None
-
-
-@dataclass
 class _PreparedInputs:
     """Numerical input series for one optimization horizon."""
 
@@ -90,18 +80,19 @@ class _InverterModelBlock:
     pv_ac: cp.Expression
     pv_to_bat: cp.Expression
     soc: cp.Variable | None
-    selector: _RateSelector | None
-    zero_feed_discharge_continuous: bool = False
+    mode_ch_activity: cp.Expression | None
+    mode_dc_activity: cp.Expression | None
 
 
 class LinearOptimizer:
-    """MILP optimizer that builds a modular math model from system topology.
+    """MILP optimizer with a compiled reusable CVXPY model.
 
-    Args:
-        inverters: All inverters in the system. Topology determines which
-            variables and constraints are instantiated per inverter.
-        prediction: Aligned prediction channels for the horizon.
+    The problem structure (variables + constraints) is compiled once per optimizer
+    instance and subsequent solves only update runtime Parameters (prediction arrays,
+    battery start SoC, and initial inverter mode).
     """
+
+    _MIN_ACTIVE_AC_RATE_PCT = 1.0
 
     def __init__(
         self,
@@ -122,6 +113,9 @@ class LinearOptimizer:
             dt=prediction.dt_hours,
         )
 
+        self._compiled = False
+        self._compile_problem(self._prepare_inputs())
+
     def solve(
         self,
         objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
@@ -129,8 +123,10 @@ class LinearOptimizer:
         validate_with_simulation: bool = False,
         initial_modes: Mapping[str, InverterMode | int] | None = None,
     ) -> LinearSolution:
-        """Build MILP, solve with HiGHS, and return a :class:`LinearSolution`."""
+        """Solve the compiled MILP with updated runtime data."""
         prep = self._prepare_inputs()
+        self._ensure_compiled_layout(prep)
+
         normalized_initial_modes: dict[str, InverterMode] = {}
         for inv in self.inverters:
             raw_mode = (
@@ -142,24 +138,9 @@ class LinearOptimizer:
                 raw_mode if isinstance(raw_mode, InverterMode) else InverterMode(int(raw_mode))
             )
 
-        blocks, g_import, g_feedin, pv_self = self._build_problem(prep, normalized_initial_modes)
+        self._update_runtime_parameters(prep, normalized_initial_modes)
 
-        terminal_value = self._estimate_terminal_value(prep, blocks)
-        terminal_reward = self._terminal_reward(blocks, terminal_value)
-        mode_switch_costs_term = cp.sum(self._mode_switch_costs) if self._mode_switch_costs else 0.0
-
-        if objective == OptimizationObjective.MINIMIZE_COST:
-            obj_expr = (
-                cp.sum(
-                    cp.multiply(g_import, prep.price) - cp.multiply(g_feedin, prep.feedin_tariff)
-                )
-                + mode_switch_costs_term
-                - terminal_reward
-            )
-        else:
-            obj_expr = cp.sum(g_feedin) - terminal_reward
-
-        problem = cp.Problem(cp.Minimize(obj_expr), self._constraints)
+        problem = self._problems[objective]
         size = problem.size_metrics
         self._log.info(
             "optimizer_solve_start",
@@ -184,7 +165,11 @@ class LinearOptimizer:
 
         status = problem.status
         accepted_statuses = {cp.OPTIMAL, cp.OPTIMAL_INACCURATE}
-        if status == "user_limit" and g_import.value is not None and g_feedin.value is not None:
+        if (
+            status == "user_limit"
+            and self._g_import.value is not None
+            and self._g_feedin.value is not None
+        ):
             accepted_statuses.add("user_limit")
 
         if status not in accepted_statuses:
@@ -198,7 +183,7 @@ class LinearOptimizer:
                 "Check feasibility (battery bounds, rates, and capacities)."
             )
 
-        if g_import.value is None or g_feedin.value is None:
+        if self._g_import.value is None or self._g_feedin.value is None:
             self._log.error("optimizer_no_values", solver_status=status)
             raise RuntimeError("Solver returned no values for grid variables")
 
@@ -212,10 +197,9 @@ class LinearOptimizer:
 
         solution = self._build_solution(
             prep=prep,
-            blocks=blocks,
-            g_import_val=np.asarray(g_import.value, dtype=float),
-            g_feedin_val=np.asarray(g_feedin.value, dtype=float),
-            pv_self_val=np.asarray(pv_self.value, dtype=float),
+            blocks=self._blocks,
+            g_import_val=np.asarray(self._g_import.value, dtype=float),
+            g_feedin_val=np.asarray(self._g_feedin.value, dtype=float),
             objective=objective,
             solver_status=status,
             solve_time=solve_time,
@@ -241,7 +225,6 @@ class LinearOptimizer:
 
     def _prepare_inputs(self) -> _PreparedInputs:
         solver_view = self.prediction.to_solver_view(dtype=np.float64)
-
         return _PreparedInputs(
             T=solver_view.steps,
             dt=solver_view.dt_hours,
@@ -251,175 +234,209 @@ class LinearOptimizer:
             pv_by_source=solver_view.pv_by_inverter,
         )
 
-    def _build_problem(
-        self,
-        prep: _PreparedInputs,
-        initial_modes: Mapping[str, InverterMode],
-    ) -> tuple[list[_InverterModelBlock], cp.Variable, cp.Variable, cp.Variable]:
-        T = prep.T
+    def _compile_problem(self, prep: _PreparedInputs) -> None:
+        self._T = prep.T
+        self._dt = prep.dt
 
         self._constraints: list[cp.Constraint] = []
-        self._mode_switch_costs: list[cp.Expression] = []  # Track mode switch costs
-        blocks: list[_InverterModelBlock] = []
+        self._mode_switch_costs: list[cp.Expression] = []
 
-        g_import = cp.Variable(T, nonneg=True, name="g_import")
-        g_feedin = cp.Variable(T, nonneg=True, name="g_feedin")
-        pv_self = cp.Variable(T, nonneg=True, name="pv_self")
+        self._load_param = cp.Parameter(self._T, name="load_wh")
+        self._price_param = cp.Parameter(self._T, name="price")
+        self._feedin_param = cp.Parameter(self._T, name="feedin_tariff")
+        self._c_pv_param = cp.Parameter(self._T, name="c_pv")
+        self._rhs_sc_param = cp.Parameter(self._T, name="rhs_sc")
+        self._terminal_value_param = cp.Parameter(nonneg=True, name="terminal_value")
+
+        self._pv_params: dict[str, cp.Parameter] = {
+            inv.device_id: cp.Parameter(self._T, nonneg=True, name=f"pv_pred_{inv.device_id}")
+            for inv in self.inverters
+        }
+        self._pv_external_param = cp.Parameter(self._T, nonneg=True, name="pv_pred_external")
+
+        self._soc_init_params: dict[str, cp.Parameter] = {}
+        self._init_mode_ch_params: dict[str, cp.Parameter] = {}
+        self._init_mode_dc_params: dict[str, cp.Parameter] = {}
+
+        self._g_import = cp.Variable(self._T, nonneg=True, name="g_import")
+        self._g_feedin = cp.Variable(self._T, nonneg=True, name="g_feedin")
+        self._pv_self = cp.Variable(self._T, nonneg=True, name="pv_self")
 
         total_p_ch_terms: list[cp.Expression] = []
         total_p_dc_terms: list[cp.Expression] = []
-        total_pv_ac_terms: list[cp.Expression] = []
+        total_pv_ac_terms: list[cp.Expression] = [self._pv_external_param]
+        total_pv_ac_decision_terms: list[cp.Expression] = []
 
-        mapped_pv_sources: set[str] = set()
-
+        blocks: list[_InverterModelBlock] = []
         for inv in self.inverters:
-            block = self._build_inverter_block(inv, prep, initial_modes)
+            block = self._build_inverter_block(inv)
             blocks.append(block)
-
             total_p_ch_terms.append(block.p_ch)
             total_p_dc_terms.append(block.p_dc)
             total_pv_ac_terms.append(block.pv_ac)
+            total_pv_ac_decision_terms.append(block.pv_ac)
 
-            # Map PV by inverter id (PV planes reference inverter_id)
-            if inv.device_id in prep.pv_by_source:
-                mapped_pv_sources.add(inv.device_id)
+        total_p_ch = self._sum_terms(total_p_ch_terms, self._T)
+        total_p_dc = self._sum_terms(total_p_dc_terms, self._T)
+        total_pv_ac = self._sum_terms(total_pv_ac_terms, self._T)
+        total_pv_ac_decision = self._sum_terms(total_pv_ac_decision_terms, self._T)
 
-        for inv_id, arr in prep.pv_by_source.items():
-            if inv_id not in mapped_pv_sources:
-                total_pv_ac_terms.append(cp.Constant(arr))
+        self._constraints.extend(
+            [
+                self._pv_self - cp.multiply(self._c_pv_param, total_pv_ac_decision)
+                <= self._rhs_sc_param,
+                self._pv_self <= total_pv_ac,
+                self._pv_self <= self._load_param,
+            ]
+        )
 
-        total_p_ch = self._sum_terms(total_p_ch_terms, prep.T)
-        total_p_dc = self._sum_terms(total_p_dc_terms, prep.T)
-        total_pv_ac = self._sum_terms(total_pv_ac_terms, prep.T)
+        self._constraints.append(
+            self._g_import - self._g_feedin
+            == self._load_param + total_p_ch - total_p_dc + total_pv_ac - self._pv_self
+        )
 
-        # Precompute per-step linearisation coefficients.
-        # total_pv_ac.value is None before solve, so pv_0 always uses the load operating point.
-        c_pv_arr = np.empty(T, dtype=float)
-        rhs_arr = np.empty(T, dtype=float)
-        for t in range(T):
+        terminal_terms = [block.soc[-1] for block in blocks if block.soc is not None]
+        self._terminal_soc_sum: cp.Expression | float
+        if terminal_terms:
+            self._terminal_soc_sum = cp.sum(cp.hstack(terminal_terms))
+        else:
+            self._terminal_soc_sum = 0.0
+
+        mode_switch_costs_term = cp.sum(self._mode_switch_costs) if self._mode_switch_costs else 0.0
+        terminal_reward = self._terminal_reward_expr()
+
+        objective_cost = (
+            cp.sum(
+                cp.multiply(self._g_import, self._price_param)
+                - cp.multiply(self._g_feedin, self._feedin_param)
+            )
+            + mode_switch_costs_term
+            - terminal_reward
+        )
+
+        objective_self = cp.sum(self._g_feedin) - terminal_reward
+
+        self._blocks = blocks
+        self._problems = {
+            OptimizationObjective.MINIMIZE_COST: cp.Problem(
+                cp.Minimize(objective_cost),
+                self._constraints,
+            ),
+            OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION: cp.Problem(
+                cp.Minimize(objective_self),
+                self._constraints,
+            ),
+        }
+
+        idle_modes = {inv.device_id: InverterMode.IDLE for inv in self.inverters}
+        self._update_runtime_parameters(prep, idle_modes)
+        self._compiled = True
+
+    def _ensure_compiled_layout(self, prep: _PreparedInputs) -> None:
+        if not self._compiled or prep.T != self._T or prep.dt != self._dt:
+            self._sc_model = FraunhoferSCModel(
+                baseload_wh=max(float(np.min(prep.load_wh)) if prep.T > 0 else 1.0, 1e-6),
+                dt=prep.dt,
+            )
+            self._compile_problem(prep)
+
+    def _update_runtime_parameters(
+        self,
+        prep: _PreparedInputs,
+        initial_modes: Mapping[str, InverterMode],
+    ) -> None:
+        self._load_param.value = prep.load_wh
+        self._price_param.value = prep.price
+        self._feedin_param.value = prep.feedin_tariff
+
+        c_pv_arr = np.empty(prep.T, dtype=float)
+        rhs_arr = np.empty(prep.T, dtype=float)
+        for t in range(prep.T):
             load0 = max(float(prep.load_wh[t]), 1e-6)
             lc = self._sc_model.linearize(pv_0=load0, load_0=load0)
             c_pv_arr[t] = lc.c_pv
             rhs_arr[t] = lc.rhs_fixed_load(load=load0)
+        self._c_pv_param.value = c_pv_arr
 
-        # 3 vectorized array constraints instead of 3*T individual scalar constraints.
-        self._constraints.extend(
-            [
-                pv_self - cp.multiply(c_pv_arr, total_pv_ac) <= rhs_arr,
-                pv_self <= total_pv_ac,
-                pv_self <= prep.load_wh,
-            ]
-        )
+        for inv in self.inverters:
+            inv_id = inv.device_id
+            pv_arr = prep.pv_by_source.get(inv_id, np.zeros(prep.T, dtype=float))
+            self._pv_params[inv_id].value = pv_arr
 
-        # Mirrors current simulation correction logic:
-        # corrected_end_load = load + p_ch - p_dc + pv_ac - pv_self
-        self._constraints.append(
-            g_import - g_feedin == prep.load_wh + total_p_ch - total_p_dc + total_pv_ac - pv_self
-        )
+            if inv_id in self._soc_init_params:
+                if inv.battery is None:
+                    self._soc_init_params[inv_id].value = 0.0
+                else:
+                    self._soc_init_params[inv_id].value = float(inv.battery.soc_wh)
 
-        return blocks, g_import, g_feedin, pv_self
+            init_mode = initial_modes.get(inv_id, InverterMode.IDLE)
+            init_ch, init_dc = self._mode_flags(init_mode)
+            if inv_id in self._init_mode_ch_params:
+                self._init_mode_ch_params[inv_id].value = float(init_ch)
+            if inv_id in self._init_mode_dc_params:
+                self._init_mode_dc_params[inv_id].value = float(init_dc)
 
-    def _build_inverter_block(
-        self,
-        inv: InverterBase,
-        prep: _PreparedInputs,
-        initial_modes: Mapping[str, InverterMode],
-    ) -> _InverterModelBlock:
-        T = prep.T
-        dt = prep.dt
+        mapped = set(self._pv_params)
+        external = np.zeros(prep.T, dtype=float)
+        for src_id, arr in prep.pv_by_source.items():
+            if src_id not in mapped:
+                external += np.asarray(arr, dtype=float)
+        self._pv_external_param.value = external
+        self._rhs_sc_param.value = rhs_arr + c_pv_arr * external
+
+        terminal_value = self._estimate_terminal_value(prep, self._blocks)
+        self._terminal_value_param.value = terminal_value
+
+    def _build_inverter_block(self, inv: InverterBase) -> _InverterModelBlock:
+        T = self._T
+        dt = self._dt
         inv_id = inv.device_id
 
-        has_zero_feed_discharge = InverterMode.DISCHARGE_ZERO_FEED_IN in inv.available_modes
-        has_rate_discharge = InverterMode.DISCHARGE in inv.available_modes
+        has_charge_mode = InverterMode.AC_CHARGE in inv.available_modes
+        has_discharge_mode = any(
+            mode in inv.available_modes
+            for mode in (InverterMode.DISCHARGE, InverterMode.DISCHARGE_ZERO_FEED_IN)
+        )
 
-        selector: _RateSelector | None = None
-        zero_feed_discharge_continuous = False
-        mode_dc_activity: cp.Variable | None = None
+        mode_ch_activity: cp.Expression | None = None
+        mode_dc_activity: cp.Expression | None = None
 
-        if inv.battery is not None and inv.is_optimizable:
-            charge_rates = self._get_charge_rates(inv)
-            discharge_rates = self._get_discharge_rates(inv)
-
-            y_ch = (
-                cp.Variable((len(charge_rates), T), boolean=True, name=f"y_ch_{inv_id}")
-                if charge_rates
-                else None
-            )
-            y_dc = (
-                cp.Variable((len(discharge_rates), T), boolean=True, name=f"y_dc_{inv_id}")
-                if discharge_rates
-                else None
-            )
-            max_ch_wh = inv.battery.max_charge_power_w * dt
-            max_dc_wh = inv.battery.max_discharge_power_w * dt
-
-            if y_ch is not None:
-                p_ch = max_ch_wh * ((np.array(charge_rates, dtype=float) / 100.0) @ y_ch)
+        if inv.battery is not None and inv.is_optimizable and has_charge_mode:
+            max_ch_wh = float(inv.battery.max_charge_power_w * dt)
+            if max_ch_wh > 0:
+                mode_ch_activity = cp.Variable(T, boolean=True, name=f"mode_ch_{inv_id}")
+                p_ch = cp.Variable(T, nonneg=True, name=f"p_ch_{inv_id}")
+                min_ch_wh = max_ch_wh * (self._MIN_ACTIVE_AC_RATE_PCT / 100.0)
+                self._constraints.append(p_ch >= min_ch_wh * mode_ch_activity)
+                self._constraints.append(p_ch <= max_ch_wh * mode_ch_activity)
             else:
                 p_ch = cp.Constant(np.zeros(T, dtype=float))
-
-            if y_dc is not None:
-                p_dc = max_dc_wh * ((np.array(discharge_rates, dtype=float) / 100.0) @ y_dc)
-            elif has_zero_feed_discharge and not has_rate_discharge:
-                # Zero-feed discharge is energy-target driven in simulation,
-                # so model discharge continuously with an explicit activity binary.
-                p_dc = cp.Variable(T, nonneg=True, name=f"p_dc_{inv_id}")
-                mode_dc_activity = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
-                self._constraints.append(p_dc <= max_dc_wh * mode_dc_activity)
-                zero_feed_discharge_continuous = True
-            else:
-                p_dc = cp.Constant(np.zeros(T, dtype=float))
-
-            selector = _RateSelector(
-                charge_rates=charge_rates,
-                discharge_rates=discharge_rates,
-                y_ch=y_ch,
-                y_dc=y_dc,
-            )
-
-            if y_ch is not None and y_dc is not None:
-                self._constraints.extend(
-                    [
-                        cp.sum(y_ch, axis=0) <= 1,
-                        cp.sum(y_dc, axis=0) <= 1,
-                        cp.sum(y_ch, axis=0) + cp.sum(y_dc, axis=0) <= 1,
-                    ]
-                )
-            elif y_ch is not None:
-                self._constraints.append(cp.sum(y_ch, axis=0) <= 1)
-                if zero_feed_discharge_continuous:
-                    # Prevent simultaneous AC-charge and discharge.
-                    self._constraints.append(p_dc <= max_dc_wh * (1 - cp.sum(y_ch, axis=0)))
-            elif y_dc is not None:
-                self._constraints.append(cp.sum(y_dc, axis=0) <= 1)
-
-            # Add mode switch cost constraints
-            # Pass p_ch and p_dc so we can track continuous discharge too
-            self._add_mode_switch_costs(
-                inv,
-                inv_id,
-                initial_modes.get(inv_id, InverterMode.IDLE),
-                y_ch,
-                y_dc,
-                p_ch,
-                p_dc,
-                T,
-                mode_dc_activity=mode_dc_activity,
-            )
-
         else:
             p_ch = cp.Constant(np.zeros(T, dtype=float))
+
+        if inv.battery is not None and inv.is_optimizable and has_discharge_mode:
+            max_dc_wh = float(inv.battery.max_discharge_power_w * dt)
+            if max_dc_wh > 0:
+                mode_dc_activity = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
+                p_dc = cp.Variable(T, nonneg=True, name=f"p_dc_{inv_id}")
+                min_dc_wh = max_dc_wh * (self._MIN_ACTIVE_AC_RATE_PCT / 100.0)
+                self._constraints.append(p_dc >= min_dc_wh * mode_dc_activity)
+                self._constraints.append(p_dc <= max_dc_wh * mode_dc_activity)
+            else:
+                p_dc = cp.Constant(np.zeros(T, dtype=float))
+        else:
             p_dc = cp.Constant(np.zeros(T, dtype=float))
 
-        if inv_id in prep.pv_by_source:
-            pv_pred = prep.pv_by_source.get(inv_id, np.zeros(T, dtype=float))
+        if mode_ch_activity is not None and mode_dc_activity is not None:
+            self._constraints.append(mode_ch_activity + mode_dc_activity <= 1)
+
+        if inv_id in self._pv_params:
+            pv_pred = self._pv_params[inv_id]
             pv_ac = cp.Variable(T, nonneg=True, name=f"pv_ac_{inv_id}")
             if inv.battery is not None:
                 pv_to_bat = cp.Variable(T, nonneg=True, name=f"pv_to_bat_{inv_id}")
                 self._constraints.append(pv_ac + pv_to_bat <= pv_pred)
                 if mode_dc_activity is not None:
-                    # Avoid simultaneous battery discharge and PV charging loops
-                    # in continuous zero-feed mode.
                     self._constraints.append(
                         pv_to_bat <= cp.multiply(pv_pred, 1 - mode_dc_activity)
                     )
@@ -433,33 +450,32 @@ class LinearOptimizer:
         max_ac_out = inv.parameters.max_ac_output_power_w * dt
         self._constraints.append(pv_ac + p_dc <= max_ac_out)
 
+        soc_init_param: cp.Parameter | None = None
         if inv.battery is not None:
             bat = inv.battery
-            if bat is None:
-                raise RuntimeError(f"Battery block build failed for inverter '{inv_id}'")
-
             soc = cp.Variable(T, nonneg=True, name=f"soc_{inv_id}")
+            soc_init_param = cp.Parameter(nonneg=True, name=f"soc_init_{inv_id}")
+            self._soc_init_params[inv_id] = soc_init_param
+
             eta_c_ac = inv.parameters.ac_to_dc_efficiency * bat.charging_efficiency
             eta_c_pv = bat.charging_efficiency
             eta_d = bat.discharging_efficiency * inv.parameters.dc_to_ac_efficiency
 
             delta = p_ch * eta_c_ac + pv_to_bat * eta_c_pv - p_dc / eta_d
-            soc_init = float(bat.soc_wh)
+            start_soc = (
+                cp.hstack([soc_init_param, soc[:-1]]) if T > 1 else cp.hstack([soc_init_param])
+            )
 
-            start_soc = cp.hstack([soc_init, soc[:-1]]) if T > 1 else cp.hstack([soc_init])
-
-            # Enforce mode feasibility from the SoC at the start of each step.
-            # This prevents activating discharge at min SoC or charging at max SoC,
-            # even if opposite-direction flows in the same step would keep end SoC feasible.
             self._constraints.append(p_dc / eta_d <= start_soc - bat.min_soc_wh)
             self._constraints.append(p_ch * eta_c_ac <= bat.max_soc_wh - start_soc)
             self._constraints.append(pv_to_bat * eta_c_pv <= bat.max_soc_wh - start_soc)
 
-            # start_soc is already shaped (T,); one vectorized equality covers t=0..T-1.
             self._constraints.append(soc == start_soc + delta)
             self._constraints.extend([soc >= bat.min_soc_wh, soc <= bat.max_soc_wh])
         else:
             soc = None
+
+        self._add_mode_switch_costs(inv, inv_id, mode_ch_activity, mode_dc_activity)
 
         return _InverterModelBlock(
             inverter=inv,
@@ -468,95 +484,43 @@ class LinearOptimizer:
             pv_ac=pv_ac,
             pv_to_bat=pv_to_bat,
             soc=soc,
-            selector=selector,
-            zero_feed_discharge_continuous=zero_feed_discharge_continuous,
+            mode_ch_activity=mode_ch_activity,
+            mode_dc_activity=mode_dc_activity,
         )
 
     def _add_mode_switch_costs(
         self,
         inv: InverterBase,
         inv_id: str,
-        initial_mode: InverterMode,
-        y_ch: cp.Variable | None,
-        y_dc: cp.Variable | None,
-        p_ch: cp.Expression,
-        p_dc: cp.Expression,
-        T: int,
-        mode_ch_activity: cp.Expression | None = None,
-        mode_dc_activity: cp.Expression | None = None,
+        mode_ch_activity: cp.Expression | None,
+        mode_dc_activity: cp.Expression | None,
     ) -> None:
-        """Add mode switch cost constraints and track them in objective."""
         if not inv.battery:
             return
 
         mode_switch_cost = inv.parameters.mode_switch_cost
-
         if mode_switch_cost <= 0.0:
             return
 
-        def _mode_flags(mode: InverterMode) -> tuple[int, int]:
-            if mode in (InverterMode.AC_CHARGE, InverterMode.AC_CHARGE_ZERO_FEED_IN):
-                return 1, 0
-            if mode in (InverterMode.DISCHARGE, InverterMode.DISCHARGE_ZERO_FEED_IN):
-                return 0, 1
-            return 0, 0
+        init_ch_param = cp.Parameter(nonneg=True, name=f"init_ch_{inv_id}")
+        init_dc_param = cp.Parameter(nonneg=True, name=f"init_dc_{inv_id}")
+        self._init_mode_ch_params[inv_id] = init_ch_param
+        self._init_mode_dc_params[inv_id] = init_dc_param
 
-        init_ch, init_dc = _mode_flags(initial_mode)
+        is_ch = mode_ch_activity if mode_ch_activity is not None else np.zeros(self._T, dtype=float)
+        is_dc = mode_dc_activity if mode_dc_activity is not None else np.zeros(self._T, dtype=float)
 
-        # Derive mode-active indicators.
-        # - For discrete-rate modes, y_ch/y_dc already encode binary mode state.
-        # - For continuous-power modes, use activity binaries linked to power
-        #   bounds so switch costs apply to mode transitions, not power ramps.
-        is_ch: cp.Expression | np.ndarray
-        is_dc: cp.Expression | np.ndarray
-
-        if mode_ch_activity is not None:
-            is_ch = mode_ch_activity
-        elif y_ch is not None:
-            is_ch = cp.sum(y_ch, axis=0)
-        elif isinstance(p_ch, cp.Variable):
-            is_ch_var = cp.Variable(T, boolean=True, name=f"mode_ch_{inv_id}")
-            max_p_ch = inv.battery.max_charge_power_w * self.prediction.dt_hours
-            if max_p_ch > 0:
-                self._constraints.append(p_ch <= max_p_ch * is_ch_var)
-                is_ch = is_ch_var
-            else:
-                is_ch = np.zeros(T, dtype=float)
-        else:
-            is_ch = np.zeros(T, dtype=float)
-
-        if mode_dc_activity is not None:
-            is_dc = mode_dc_activity
-        elif y_dc is not None:
-            is_dc = cp.sum(y_dc, axis=0)
-        elif isinstance(p_dc, cp.Variable):
-            is_dc_var = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
-            max_p_dc = inv.battery.max_discharge_power_w * self.prediction.dt_hours
-            if max_p_dc > 0:
-                self._constraints.append(p_dc <= max_p_dc * is_dc_var)
-                is_dc = is_dc_var
-            else:
-                is_dc = np.zeros(T, dtype=float)
-        else:
-            is_dc = np.zeros(T, dtype=float)
-
-        # PASS 2 OPT: delta_mode continuous instead of binary.
-        # The constraints delta_mode >= |mode_change| naturally limit delta_mode in [0,1]
-        # since each mode_change is at most 1. This eliminates binary branching overhead.
-        delta_mode = cp.Variable(T, nonneg=True, name=f"delta_mode_{inv_id}")
-
-        # t=0: compare against prior mode (4 scalar constraints).
+        delta_mode = cp.Variable(self._T, nonneg=True, name=f"delta_mode_{inv_id}")
         self._constraints.extend(
             [
-                delta_mode[0] >= is_ch[0] - init_ch,
-                delta_mode[0] >= init_ch - is_ch[0],
-                delta_mode[0] >= is_dc[0] - init_dc,
-                delta_mode[0] >= init_dc - is_dc[0],
+                delta_mode[0] >= is_ch[0] - init_ch_param,
+                delta_mode[0] >= init_ch_param - is_ch[0],
+                delta_mode[0] >= is_dc[0] - init_dc_param,
+                delta_mode[0] >= init_dc_param - is_dc[0],
             ]
         )
 
-        # t>0: 4 vectorized array constraints instead of 4*(T-1) individual scalar constraints.
-        if T > 1:
+        if self._T > 1:
             self._constraints.extend(
                 [
                     delta_mode[1:] >= is_ch[1:] - is_ch[:-1],
@@ -566,21 +530,21 @@ class LinearOptimizer:
                 ]
             )
 
-        # Add mode switch costs to objective (cost is EUR per mode change, not per Wh)
-        mode_switch_cost_expr = cp.sum(delta_mode) * mode_switch_cost
-        self._mode_switch_costs.append(mode_switch_cost_expr)
+        self._mode_switch_costs.append(cp.sum(delta_mode) * mode_switch_cost)
+
+    @staticmethod
+    def _mode_flags(mode: InverterMode) -> tuple[int, int]:
+        if mode in (InverterMode.AC_CHARGE, InverterMode.AC_CHARGE_ZERO_FEED_IN):
+            return 1, 0
+        if mode in (InverterMode.DISCHARGE, InverterMode.DISCHARGE_ZERO_FEED_IN):
+            return 0, 1
+        return 0, 0
 
     def _estimate_terminal_value(
         self,
         prep: _PreparedInputs,
         blocks: list[_InverterModelBlock],
     ) -> float:
-        """Estimate EUR/Wh terminal value for battery SoC.
-
-        Uses the mean price over the last min(T, 6) steps, weighted by the
-        mean discharge efficiency, to approximate what 1 Wh of stored energy
-        would save in the near future.
-        """
         if prep.T == 0:
             return 0.0
 
@@ -598,21 +562,10 @@ class LinearOptimizer:
         mean_price = float(np.mean(prep.price[-N:]))
         return mean_price * mean_eta_d
 
-    def _terminal_reward(
-        self,
-        blocks: list[_InverterModelBlock],
-        terminal_value: float,
-    ) -> cp.Expression | float:
-        if terminal_value == 0.0:
+    def _terminal_reward_expr(self) -> cp.Expression | float:
+        if isinstance(self._terminal_soc_sum, (int, float)):
             return 0.0
-
-        terminal_terms: list[cp.Expression] = [
-            block.soc[-1] for block in blocks if block.soc is not None
-        ]
-        if not terminal_terms:
-            return 0.0
-
-        return terminal_value * cp.sum(cp.hstack(terminal_terms))
+        return self._terminal_value_param * self._terminal_soc_sum
 
     @staticmethod
     def _sum_terms(terms: list[cp.Expression], T: int) -> cp.Expression:
@@ -621,27 +574,6 @@ class LinearOptimizer:
         if len(terms) == 1:
             return terms[0]
         return cp.sum(cp.vstack(terms), axis=0)
-
-    def _get_charge_rates(self, inv: InverterBase) -> tuple[int, ...]:
-        if InverterMode.AC_CHARGE not in inv.available_modes:
-            return tuple()
-        raw = tuple(getattr(inv, "charge_rates", tuple())) or tuple(
-            getattr(inv.parameters, "ac_rates_pct", tuple())
-        )
-        rates = tuple(sorted({int(r) for r in raw if 0 < int(r) <= 100}))
-        return rates or (100,)
-
-    def _get_discharge_rates(self, inv: InverterBase) -> tuple[int, ...]:
-        # DISCHARGE_ZERO_FEED_IN is handled as continuous discharge variable,
-        # not as discrete-rate states.
-        if InverterMode.DISCHARGE not in inv.available_modes:
-            return tuple()
-
-        raw = tuple(getattr(inv, "discharge_rates", tuple())) or tuple(
-            getattr(inv.parameters, "ac_rates_pct", tuple())
-        )
-        rates = tuple(sorted({int(r) for r in raw if 0 < int(r) <= 100}))
-        return rates or (100,)
 
     @staticmethod
     def _expr_to_vec(expr: cp.Expression, T: int) -> np.ndarray:
@@ -654,15 +586,8 @@ class LinearOptimizer:
         return np.maximum(arr, 0.0)
 
     @staticmethod
-    def _sanitize_rate_percent(
-        rate_pct: float,
-        *,
-        allowed_levels: tuple[int, ...] = tuple(),
-    ) -> int:
-        r = float(rate_pct)
-        if allowed_levels:
-            return int(min(allowed_levels, key=lambda lvl: abs(float(lvl) - r)))
-        return int(max(0, min(100, round(r))))
+    def _sanitize_rate_percent(rate_pct: float) -> int:
+        return int(max(0, min(100, round(float(rate_pct)))))
 
     def _build_solution(
         self,
@@ -671,7 +596,6 @@ class LinearOptimizer:
         blocks: list[_InverterModelBlock],
         g_import_val: np.ndarray,
         g_feedin_val: np.ndarray,
-        pv_self_val: np.ndarray,
         objective: OptimizationObjective,
         solver_status: str,
         solve_time: float,
@@ -717,7 +641,6 @@ class LinearOptimizer:
                 losses_arr += pv_to_bat * (1.0 - eta_c_pv)
                 losses_arr += p_dc * (1.0 / eta_d - 1.0)
 
-            # Build mode/rate series for simulation replay and UI output.
             modes, rates = self._extract_modes_and_rates(block, p_ch, p_dc, dt)
             inv_modes_per_dt[inv_id] = np.asarray(modes, dtype=np.int8)
             inv_rates_per_dt[inv_id] = np.asarray(rates, dtype=np.int32)
@@ -761,18 +684,13 @@ class LinearOptimizer:
         bat = inv.battery
         max_ch_wh = bat.max_charge_power_w * dt if bat is not None else 0.0
         max_dc_wh = bat.max_discharge_power_w * dt if bat is not None else 0.0
-
-        y_ch_vals = None
-        y_dc_vals = None
-        ch_rate_levels: tuple[int, ...] = tuple()
-        dc_rate_levels: tuple[int, ...] = tuple()
-        if block.selector is not None:
-            ch_rate_levels = block.selector.charge_rates
-            dc_rate_levels = block.selector.discharge_rates
-            if block.selector.y_ch is not None:
-                y_ch_vals = np.asarray(block.selector.y_ch.value, dtype=float)
-            if block.selector.y_dc is not None:
-                y_dc_vals = np.asarray(block.selector.y_dc.value, dtype=float)
+        mode_switch_cost_active = inv.parameters.mode_switch_cost > 0.0
+        mode_ch_active: np.ndarray | None = None
+        mode_dc_active: np.ndarray | None = None
+        if mode_switch_cost_active and block.mode_ch_activity is not None:
+            mode_ch_active = self._expr_to_vec(block.mode_ch_activity, T)
+        if mode_switch_cost_active and block.mode_dc_activity is not None:
+            mode_dc_active = self._expr_to_vec(block.mode_dc_activity, T)
 
         for t in range(T):
             ch = float(p_ch[t])
@@ -784,14 +702,8 @@ class LinearOptimizer:
                     if InverterMode.AC_CHARGE in inv.available_modes
                     else int(InverterMode.AC_CHARGE_ZERO_FEED_IN)
                 )
-                if y_ch_vals is not None and y_ch_vals.shape[1] > t and ch_rate_levels:
-                    k = int(np.argmax(y_ch_vals[:, t]))
-                    rate = int(ch_rate_levels[k])
-                else:
-                    rate = int(
-                        round((min(ch / max_ch_wh, 1.0) if max_ch_wh > eps else 1.0) * 100.0)
-                    )
-                rate = self._sanitize_rate_percent(rate, allowed_levels=ch_rate_levels)
+                rate = int(round((min(ch / max_ch_wh, 1.0) if max_ch_wh > eps else 1.0) * 100.0))
+                rate = self._sanitize_rate_percent(rate)
             elif dc > eps:
                 if InverterMode.DISCHARGE in inv.available_modes:
                     mode = int(InverterMode.DISCHARGE)
@@ -802,16 +714,26 @@ class LinearOptimizer:
                         else int(InverterMode.DISCHARGE)
                     )
                 if mode == int(InverterMode.DISCHARGE_ZERO_FEED_IN):
-                    # Zero-feed discharge uses energy_wh in simulation; no ac_rate_pct.
                     rate = 0
-                elif y_dc_vals is not None and y_dc_vals.shape[1] > t and dc_rate_levels:
-                    k = int(np.argmax(y_dc_vals[:, t]))
-                    rate = int(dc_rate_levels[k])
                 else:
                     rate = int(
                         round((min(dc / max_dc_wh, 1.0) if max_dc_wh > eps else 1.0) * 100.0)
                     )
-                rate = self._sanitize_rate_percent(rate, allowed_levels=dc_rate_levels)
+                    rate = self._sanitize_rate_percent(rate)
+            elif mode_switch_cost_active and mode_ch_active is not None and mode_ch_active[t] > 0.5:
+                mode = (
+                    int(InverterMode.AC_CHARGE)
+                    if InverterMode.AC_CHARGE in inv.available_modes
+                    else int(InverterMode.AC_CHARGE_ZERO_FEED_IN)
+                )
+                rate = 0
+            elif mode_switch_cost_active and mode_dc_active is not None and mode_dc_active[t] > 0.5:
+                mode = (
+                    int(InverterMode.DISCHARGE_ZERO_FEED_IN)
+                    if inv.parameters.zero_feed_in
+                    else int(InverterMode.DISCHARGE)
+                )
+                rate = 0
             else:
                 mode = int(InverterMode.IDLE)
                 rate = 0

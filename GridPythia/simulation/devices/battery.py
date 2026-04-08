@@ -33,9 +33,8 @@ class Battery:
         "_log",
     )
 
-    def __init__(self, parameters: BatteryParameters, prediction_hours: int) -> None:
+    def __init__(self, parameters: BatteryParameters) -> None:
         self.parameters = parameters
-        self.prediction_hours = prediction_hours
         self._log = logger.bind(device_id=parameters.device_id, component="battery")
         self._setup()
 
@@ -106,7 +105,6 @@ class Battery:
             "capacity_wh": self.capacity_wh,
             "initial_soc_percentage": self.initial_soc_percentage,
             "soc_wh": self.soc_wh,
-            "hours": self.prediction_hours,
             "charging_efficiency": self.charging_efficiency,
             "discharging_efficiency": self.discharging_efficiency,
             "max_charge_power_w": self.max_charge_power_w,

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 
 from structlog import get_logger
 
-from GridPythia.config.optimization import DEFAULT_AC_RATES, InverterParameters
+from GridPythia.config.optimization import InverterParameters
 from GridPythia.simulation.devices import (
     EnergyFlowResult,
     InverterMode,
@@ -85,18 +85,6 @@ class InverterBase:
 
         self.charge_rates = tuple()
         self.discharge_rates = tuple()
-
-        # if any of the rate-required modes are available, populate rates
-        if InverterMode.AC_CHARGE in self.available_modes:
-            self.charge_rates = DEFAULT_AC_RATES
-            if self.parameters.ac_rates_pct:
-                self.charge_rates = tuple(sorted({int(r) for r in self.parameters.ac_rates_pct}))
-        if InverterMode.DISCHARGE in self.available_modes:
-            self.discharge_rates = DEFAULT_AC_RATES
-            if self.parameters.ac_rates_pct:
-                self.discharge_rates = tuple(
-                    sorted({int(r) for r in self.parameters.ac_rates_pct if 0 < int(r) <= 100})
-                )
 
         self.is_optimizable: bool = (
             self.topology != SystemTopology.PV_ONLY and len(self.available_modes) > 1

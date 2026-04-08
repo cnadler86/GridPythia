@@ -18,7 +18,7 @@ def setup_pv_battery():
         max_soc_percentage=80,
         max_charge_power_w=8000,
     )
-    battery = Battery(params, prediction_hours=48)
+    battery = Battery(params)
     battery.reset()
 
     assert battery.parameters.device_id == "battery1"

@@ -1261,7 +1261,6 @@ class OptimizationTab(_Tab):
                 str(float(getattr(p, "ac_to_dc_efficiency", 0.0))),
                 str(bool(getattr(p, "zero_feed_in", False))),
                 str(float(getattr(p, "mode_switch_cost", 0.0))),
-                str(tuple(getattr(p, "ac_rates_pct", tuple()))),
                 str(float(hours)),
                 "none"
                 if bat is None
@@ -1446,25 +1445,7 @@ class OptimizationTab(_Tab):
                 )
 
                 def _make_devices(params: BatteryParameters) -> Tuple[Battery, InverterBase]:
-                    bat = Battery(params, prediction_hours=int(hours))
-                    inv_cfg = (
-                        self.app.app_config.optimization.inverters[0]
-                        if self.app.app_config.optimization.inverters
-                        else None
-                    )
-                    raw_rates = inv_cfg.ac_rates_pct if inv_cfg is not None else None
-                    ac_rates: tuple[int, ...] | None = None
-                    if isinstance(raw_rates, (list, tuple)):
-                        norm = sorted({int(r) for r in raw_rates if 0 < int(r) <= 100})
-                        ac_rates = tuple(norm) if norm else None
-
-                    logger.info(
-                        "optimizer_ac_rates_selected",
-                        tab="optimization",
-                        source="config" if ac_rates else "model_default",
-                        rates=ac_rates if ac_rates else "DEFAULT_AC_RATES",
-                    )
-
+                    bat = Battery(params)
                     inv_kwargs: dict[str, Any] = {
                         "device_id": self._inv_id.get(),
                         "has_pv": bool(self._has_pv.get()),
@@ -1476,8 +1457,6 @@ class OptimizationTab(_Tab):
                         "zero_feed_in": bool(self._zero_feed_in.get()),
                         "mode_switch_cost": float(self._inv_mode_switch_cost.get()),
                     }
-                    if ac_rates is not None:
-                        inv_kwargs["ac_rates_pct"] = ac_rates
 
                     inv_params = InverterParameters(**inv_kwargs)
                     inv = InverterBase(inv_params, battery=bat)

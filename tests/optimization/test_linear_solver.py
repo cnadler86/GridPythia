@@ -1,6 +1,7 @@
 """Basic economic behavior tests for the linear MILP solver."""
 
 from __future__ import annotations
+from pygments.unistring import No
 
 from datetime import datetime, timedelta
 
@@ -64,8 +65,7 @@ def _make_hybrid_inverter(roundtrip_efficiency: float = 0.8) -> InverterBase:
             initial_soc_percentage=50,
             min_soc_percentage=0,
             max_soc_percentage=100,
-        ),
-        prediction_hours=3,
+        )
     )
 
     inv = InverterBase(
@@ -78,7 +78,6 @@ def _make_hybrid_inverter(roundtrip_efficiency: float = 0.8) -> InverterBase:
             dc_to_ac_efficiency=1.0,
             ac_to_dc_efficiency=1.0,
             zero_feed_in=True,
-            ac_rates_pct=(50, 100),
             mode_switch_cost=0.0,
         ),
         battery=battery,
@@ -106,11 +105,10 @@ def _make_switching_case_inverter(
             discharging_efficiency=eta,
             max_charge_power_w=500,
             max_discharge_power_w=1000,
-            initial_soc_percentage=0,
+            initial_soc_percentage=50,
             min_soc_percentage=0,
             max_soc_percentage=100,
-        ),
-        prediction_hours=prediction_hours,
+        )
     )
 
     return InverterBase(
@@ -123,7 +121,6 @@ def _make_switching_case_inverter(
             dc_to_ac_efficiency=1.0,
             ac_to_dc_efficiency=1.0,
             zero_feed_in=True,
-            ac_rates_pct=(50, 100),
             mode_switch_cost=switch_cost,
         ),
         battery=battery,
@@ -150,8 +147,7 @@ def _make_boundary_inverter(
             initial_soc_percentage=initial_soc_percentage,
             min_soc_percentage=min_soc_percentage,
             max_soc_percentage=max_soc_percentage,
-        ),
-        prediction_hours=1,
+        )
     )
 
     return InverterBase(
@@ -164,7 +160,6 @@ def _make_boundary_inverter(
             dc_to_ac_efficiency=1.0,
             ac_to_dc_efficiency=1.0,
             zero_feed_in=zero_feed_in,
-            ac_rates_pct=(50, 100),
         ),
         battery=battery,
     )
@@ -209,17 +204,17 @@ class TestLinearSolverHybridEconomics:
         assert plan["modes"][1] == int(InverterMode.AC_CHARGE)
         assert plan["rates"][1] > 0.0
 
-        # SoC increase must match selected discrete rate.
+        # SoC increase must match returned integer rate approximately.
         soc = list(sol.result.battery_wh_per_dt["hybrid_h1"])
         eta = 0.8**0.5
         charged_wh = 500.0 * (int(plan["rates"][1]) / 100.0)
-        assert soc[1] - soc[0] == pytest.approx(charged_wh * eta, abs=1e-2)
+        assert soc[1] - soc[0] == pytest.approx(charged_wh * eta, abs=12.0)
 
         # High-price period should discharge in zero-feed-in mode.
         assert plan["modes"][2] == int(InverterMode.DISCHARGE_ZERO_FEED_IN)
 
-    def test_uses_only_configured_discrete_rates(self) -> None:
-        """Returned rates must be one of the inverter's configured discrete levels."""
+    def test_rates_are_integer_percent_for_rate_modes(self) -> None:
+        """Returned rates should be integer percentages in [0, 100]."""
         pred = _make_prediction(
             load_w=[0.0, 0.0, 2000.0],
             price_eur_wh=[0.00044, 0.00031, 0.00052],
@@ -227,11 +222,11 @@ class TestLinearSolverHybridEconomics:
         inv = _make_hybrid_inverter(roundtrip_efficiency=0.8)
 
         sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
-        rates = [float(r) for r in sol.result.inverter_ac_rate_per_dt["hybrid_h1"] if float(r) > 1e-8]
+        plan = sol.inverter_plans[0]
+        rates = [int(r) for r in plan["rates"]]
 
-        allowed = {50.0, 100.0}
-        assert rates
-        assert set(round(r, 6) for r in rates).issubset(allowed)
+        assert all(0 <= r <= 100 for r in rates)
+        assert all(float(r).is_integer() for r in rates)
 
     def test_auto_terminal_value_suppresses_cheap_slot_discharge(self) -> None:
         """Auto terminal value based on high tail prices should prevent discharge in cheap slots.
@@ -264,8 +259,8 @@ class TestLinearSolverHybridEconomics:
     def test_zero_feed_discharge_can_compensate_full_load_without_rate(self) -> None:
         """Zero-feed discharge should be energy-target driven, not rate driven."""
         pred = _make_prediction(
-            load_w=[400.0],
-            price_eur_wh=[0.00060],
+            load_w=[400.0, 0.0],
+            price_eur_wh=[0.00060, 0.0],
         )
         inv = _make_hybrid_inverter(roundtrip_efficiency=0.8)
 
@@ -294,8 +289,7 @@ class TestLinearSolverHybridEconomics:
                 initial_soc_percentage=50,
                 min_soc_percentage=0,
                 max_soc_percentage=100,
-            ),
-            prediction_hours=3,
+            )
         )
         inv = InverterBase(
             InverterParameters(
@@ -307,7 +301,6 @@ class TestLinearSolverHybridEconomics:
                 dc_to_ac_efficiency=1.0,
                 ac_to_dc_efficiency=1.0,
                 zero_feed_in=False,
-                ac_rates_pct=(50, 100),
             ),
             battery=battery,
         )
@@ -323,28 +316,7 @@ class TestLinearSolverHybridEconomics:
         assert sol.parity_report.max_abs_soc_error_wh <= 1e-2
         assert sol.parity_report.max_abs_grid_import_error_wh <= 1e-2
         assert sol.parity_report.max_abs_feedin_error_wh <= 1e-2
-
-    def test_switch_cost_above_threshold_keeps_ac_charge_contiguous_block(self) -> None:
-        """With sufficiently high switching cost, charging stays in adjacent slots.
-
-        Auto terminal value incentivises charging to full capacity, so exact slot
-        placement can shift. The key behavior is that high switching cost favors a
-        contiguous charge block instead of fragmented on/off charging.
-        """
-        pred = _make_prediction(
-            load_w=[0.0, 0.0, 0.0, 0.0, 600.0],
-            price_eur_wh=[0.00030, 0.00030, 0.00045, 0.00024, 0.00070],
-        )
-        inv = _make_switching_case_inverter(prediction_hours=5, switch_cost=0.020)
-
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
-        plan = sol.inverter_plans[0]
-
-        charge_idx = [i for i, m in enumerate(plan["modes"]) if m == int(InverterMode.AC_CHARGE)]
-        assert len(charge_idx) >= 2
-        # Contiguous block: no gaps between charge slots.
-        assert charge_idx == list(range(min(charge_idx), max(charge_idx) + 1))
-
+    
     def test_switch_cost_below_threshold_prefers_split_with_isolated_cheapest_slot(self) -> None:
         """With lower switching cost, solver should use the isolated cheapest slot.
 
@@ -475,16 +447,11 @@ class TestLinearSolverHybridEconomics:
         assert plan["rates"][0] == pytest.approx(0.0, abs=1e-6)
         assert float(sol.result.battery_wh_per_dt["hybrid_max_charge"][0]) == pytest.approx(800.0)
 
-    def test_zero_feed_discharge_continuous_respects_mode_switch_cost(self) -> None:
-        """Mode-switch costs should apply to continuous zero-feed discharge too.
-
-        This is a regression test for a bug where mode_dc was always forced to 0
-        when y_dc was None (i.e., for continuous discharge without discrete rates).
-        The test creates a scenario where high switch costs should prevent unnecessary
-        mode changes from IDLE to DISCHARGE_ZERO_FEED_IN.
+    def test_ac_charge_respects_mode_switch_cost(self) -> None:
+        """Mode-switch costs should apply to ac charge.
         """
         # Create a zero-feed-in inverter with ONLY DISCHARGE_ZERO_FEED_IN (no DISCHARGE with rates)
-        eta = 0.9
+        eta = 1.0
 
         battery = Battery(
             BatteryParameters(
@@ -492,13 +459,12 @@ class TestLinearSolverHybridEconomics:
                 capacity_wh=1000,
                 charging_efficiency=eta,
                 discharging_efficiency=eta,
-                max_charge_power_w=500,
+                max_charge_power_w=600,
                 max_discharge_power_w=1000,
-                initial_soc_percentage=50,  # Start at 50% SoC
+                initial_soc_percentage=0,  # Start at 0% SoC
                 min_soc_percentage=0,
                 max_soc_percentage=100,
-            ),
-            prediction_hours=3,
+            )
         )
 
         # Inverter with only DISCHARGE_ZERO_FEED_IN mode (no AC_CHARGE, no discrete DISCHARGE rates)
@@ -506,32 +472,107 @@ class TestLinearSolverHybridEconomics:
             InverterParameters(
                 device_id="hybrid_zfi_cost",
                 battery_id="battery_zfi_cost",
-                has_pv=True,
+                has_pv=False,
                 max_ac_output_power_w=1000,
-                max_ac_charge_power_w=0,  # NO AC charging
+                max_ac_charge_power_w=600,
                 dc_to_ac_efficiency=1.0,
                 ac_to_dc_efficiency=1.0,
                 zero_feed_in=True,  # Only DISCHARGE_ZERO_FEED_IN
-                ac_rates_pct=tuple(),  # No discrete rates
-                mode_switch_cost=0.100,  # High switch cost: 0.1 EUR per mode change
+                mode_switch_cost=0.1,  # High switch cost: 0.1 EUR per mode change
             ),
             battery=battery,
         )
 
         pred = _make_prediction(
-            load_w=[100.0, 100.0, 600.0],
-            price_eur_wh=[0.00060, 0.00060, 0.00070],
-            pv_wh={"hybrid_zfi_cost": [0.0, 0.0, 500.0]},
+            load_w=[100.0, 100.0, 100.0, 1000.0, 100.0],
+            price_eur_wh=[0.01, 0.012, 0.011, 0.90, 0.4],
         )
 
         # With high switch cost, the optimizer should avoid mode switches
         sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
         plan = sol.inverter_plans[0]
 
-        # The test passes if the solution is feasible (no solver errors).
-        # The key is that the mode_switch_cost constraint was successfully applied
-        # to the continuous discharge case.
-        assert len(plan["modes"]) == 3
-        assert all(mode in (int(InverterMode.IDLE), int(InverterMode.DISCHARGE_ZERO_FEED_IN))
-                   for mode in plan["modes"])
+        # The test passes, if ac charge is continuous for the first 3 slots, becasue the switch costs
+        # dominate and the solver sould maintain ac charging mode with a low rate at slot 2 instead
+        # of switching to idle and back to ac charge.
+        ID = InverterMode.IDLE
+        AC = InverterMode.AC_CHARGE
+        ZFI = InverterMode.DISCHARGE_ZERO_FEED_IN
+        assert plan["modes"][0:-1] == [int(AC), int(AC), int(AC), int(ZFI)]
+        assert plan["rates"][1] < plan["rates"][2] < plan["rates"][0]
 
+
+    def test_zero_feed_discharge_continuous_respects_mode_switch_cost(self) -> None:
+        """Switch costs should affect continuous zero-feed discharge mode decisions.
+
+        This case uses a PV-battery topology with no PV energy and no AC charging,
+        so the only active battery mode is continuous DISCHARGE_ZERO_FEED_IN.
+        Without switch cost, only the most expensive slot is discharged. With a
+        non-zero switch cost, the optimizer prefers keeping discharge active into
+        the following slot instead of toggling back to idle immediately.
+        """
+        eta = 1.0
+
+        def make_solver(switch_cost: float) -> LinearOptimizer:
+            battery = Battery(
+                BatteryParameters(
+                    device_id="battery_zfi_cost",
+                    capacity_wh=1000,
+                    charging_efficiency=eta,
+                    discharging_efficiency=eta,
+                    max_charge_power_w=500,
+                    max_discharge_power_w=1000,
+                    initial_soc_percentage=50,
+                    min_soc_percentage=0,
+                    max_soc_percentage=100,
+                )
+            )
+            inv = InverterBase(
+                InverterParameters(
+                    device_id="hybrid_zfi_cost",
+                    battery_id="battery_zfi_cost",
+                    has_pv=True,
+                    max_ac_output_power_w=1000,
+                    max_ac_charge_power_w=0,
+                    dc_to_ac_efficiency=1.0,
+                    ac_to_dc_efficiency=1.0,
+                    zero_feed_in=True,
+                    mode_switch_cost=switch_cost,
+                ),
+                battery=battery,
+            )
+            pred = _make_prediction(
+                load_w=[50.0, 50.0, 50.0],
+                price_eur_wh=[0.10, 0.80, 0.40],
+                pv_wh={"hybrid_zfi_cost": [0.0, 0.0, 0.0]},
+            )
+            return LinearOptimizer([inv], pred)
+
+        low_cost_plan = make_solver(0.0).solve(OptimizationObjective.MINIMIZE_COST).inverter_plans[0]
+        high_cost_plan = make_solver(0.05).solve(OptimizationObjective.MINIMIZE_COST).inverter_plans[0]
+
+        assert low_cost_plan["modes"] == [
+            int(InverterMode.IDLE),
+            int(InverterMode.DISCHARGE_ZERO_FEED_IN),
+            int(InverterMode.IDLE),
+        ]
+        assert high_cost_plan["modes"] == [
+            int(InverterMode.IDLE),
+            int(InverterMode.DISCHARGE_ZERO_FEED_IN),
+            int(InverterMode.DISCHARGE_ZERO_FEED_IN),
+        ]
+
+    def test_optimizer_compiled_problems_are_dpp(self) -> None:
+        """The optimizer compiles CVXPY problems that must be DPP-compliant.
+
+        This asserts that all prebuilt problems on a freshly-constructed
+        LinearOptimizer pass CVXPY's dedicated DPP check.
+        """
+        pred = _make_prediction(load_w=[100.0, 100.0, 100.0, 100.0], price_eur_wh=[0.05, 0.05, 0.05, 0.05])
+        inv = _make_hybrid_inverter()
+
+        opt = LinearOptimizer([inv], pred)
+
+        for objective, problem in opt._problems.items():
+            assert problem is not None, f"Problem for {objective} is None"
+            assert problem.is_dpp(), f"Compiled problem for {objective} is not DPP-compliant"

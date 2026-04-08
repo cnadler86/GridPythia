@@ -11,9 +11,6 @@ from pydantic import BaseModel, Field, field_validator
 _INVERTER_COUNTER = count(1)
 _BATTERY_COUNTER = count(1)
 
-# Default charge/discharge rates as percent values (10% steps).
-DEFAULT_AC_RATES: tuple[int, ...] = tuple(range(10, 101, 10))
-
 
 class BatteryParameters(BaseModel):
     """Battery configuration parameters (Pydantic v2, frozen)."""
@@ -81,29 +78,11 @@ class InverterParameters(BaseModel):
         default=0.95, ge=0.0, le=1.0, description="AC->DC efficiency [0, 1]"
     )
     zero_feed_in: bool = Field(default=True, description="Enable zero-feed-in mode")
-    ac_rates_pct: tuple[int, ...] = Field(
-        default=DEFAULT_AC_RATES,
-        description="Discrete charge/discharge rates in percent (1..100)",
-    )
     mode_switch_cost: float = Field(
         default=0.005, ge=0.0, description="Cost (EUR) per inverter mode change (wear cost)"
     )
 
     # Topology checks are performed at higher level; `has_pv` indicates attached PV.
-
-    @field_validator("ac_rates_pct", mode="before")
-    @classmethod
-    def normalize_rates(cls, v) -> tuple[int, ...]:
-        """Normalize ac_rates_pct to sorted tuple of unique integer percentages."""
-        if isinstance(v, (list, tuple)):
-            normalized: set[int] = set()
-            for r in v:
-                if not isinstance(r, int):
-                    raise ValueError("ac_rates_pct entries must be integers in [1, 100]")
-                if 1 <= r <= 100:
-                    normalized.add(r)
-            return tuple(sorted(x for x in normalized if 0 < x <= 100))
-        return v
 
 
 class OptimizationSolverConfig(BaseModel):

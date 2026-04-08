@@ -3,7 +3,7 @@
 import pytest
 
 from GridPythia.simulation.devices import InverterMode, SystemTopology
-from GridPythia.config.optimization import BatteryParameters, DEFAULT_AC_RATES, InverterParameters
+from GridPythia.config.optimization import BatteryParameters, InverterParameters
 from GridPythia.simulation.devices.battery import Battery
 from GridPythia.simulation.devices.inverterbase import InverterBase
 
@@ -20,8 +20,7 @@ def battery() -> Battery:
             charging_efficiency=0.95,
             discharging_efficiency=0.95,
             max_charge_power_w=5000,
-        ),
-        prediction_hours=48,
+        )
     )
 
 
@@ -36,7 +35,6 @@ def pv_hybrid_params() -> InverterParameters:
         ac_to_dc_efficiency=0.90,
         max_ac_charge_power_w=2000,
         zero_feed_in=True,
-        ac_rates_pct=(25, 50, 75, 100),
     )
 
 
@@ -73,6 +71,7 @@ def ac_battery_params() -> InverterParameters:
         device_id="inverter_ac_bat",
         max_ac_output_power_w=3000,
         battery_id="battery1",
+        has_pv=False,
         dc_to_ac_efficiency=0.95,
         ac_to_dc_efficiency=0.95,
         max_ac_charge_power_w=3000,
@@ -181,16 +180,15 @@ class TestEnergyFlow:
 
 class TestRates:
     def test_hybrid_has_only_charge_rates(self, pv_hybrid_params, battery):
-        """Hybrid inverter: should expose charge_rates from config, no discharge_rates."""
+        """Hybrid inverter: rate lists are no longer config-driven."""
         inv = InverterBase(pv_hybrid_params, battery=battery)
-        expected_charge = tuple(sorted({int(r) for r in pv_hybrid_params.ac_rates_pct}))
-        assert inv.charge_rates == expected_charge
+        assert inv.charge_rates == tuple()
         assert inv.discharge_rates == tuple()
 
     def test_ac_battery_default_charge_rates(self, ac_battery_params, battery):
-        """AC-only battery inverter: should have default charge_rates and no discharge_rates when zero-feed-in is used."""
+        """AC-only battery inverter: rate lists are no longer config-driven."""
         inv = InverterBase(ac_battery_params, battery=battery)
-        assert inv.charge_rates == DEFAULT_AC_RATES
+        assert inv.charge_rates == tuple()
         assert inv.discharge_rates == tuple()
 
     def test_pv_battery_no_ac_rates_empty(self, pv_battery_no_ac_params, battery):

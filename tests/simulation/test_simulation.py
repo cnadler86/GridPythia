@@ -196,8 +196,7 @@ def grid_simulation() -> GridSimulation:
             capacity_wh=5000,
             initial_soc_percentage=80,
             min_soc_percentage=10,
-        ),
-        prediction_hours=PREDICTION_HOURS,
+        )
     )
 
     inverter = InverterBase(

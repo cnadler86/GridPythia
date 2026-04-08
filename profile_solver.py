@@ -81,8 +81,7 @@ def create_inverter() -> InverterBase:
             initial_soc_percentage=50,
             min_soc_percentage=20,
             max_soc_percentage=100,
-        ),
-        prediction_hours=int(256 * 0.25),  # 64 hours
+        )
     )
 
     inv = InverterBase(
@@ -95,7 +94,6 @@ def create_inverter() -> InverterBase:
             dc_to_ac_efficiency=0.95,
             ac_to_dc_efficiency=0.95,
             zero_feed_in=True,
-            ac_rates_pct=(50, 100),
             mode_switch_cost=0.005,
         ),
         battery=battery,
@@ -142,8 +140,7 @@ def profile_solver():
         # create Battery objects first
         bats: dict[str, Battery] = {}
         for bat_p in optimization_cfg.batteries:
-            hours = int(pred.steps * pred.dt_hours) if pred.steps and pred.dt_hours else 0
-            b = Battery(bat_p, prediction_hours=hours)
+            b = Battery(bat_p)
             bats[bat_p.device_id] = b
 
         inverters: list[InverterBase] = []
@@ -205,16 +202,6 @@ def profile_solver():
         inv0._has_pv = getattr(new_inv_params, "has_pv", False)
         inv0.topology = inv0._resolve_topology()
         inv0.available_modes = inv0._resolve_available_modes()
-        inv0.charge_rates = (
-            tuple(sorted({int(r) for r in new_inv_params.ac_rates_pct}))
-            if new_inv_params.ac_rates_pct
-            else tuple()
-        )
-        inv0.discharge_rates = (
-            tuple(sorted({int(r) for r in new_inv_params.ac_rates_pct if 0 < int(r) <= 100}))
-            if new_inv_params.ac_rates_pct
-            else tuple()
-        )
         inv0.is_optimizable = (
             inv0.topology != SystemTopology.PV_ONLY and len(inv0.available_modes) > 1
         )
