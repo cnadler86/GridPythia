@@ -178,9 +178,9 @@ class InverterBase:
             raise ValueError(
                 f"Inverter '{self.parameters.device_id}': energy_wh must be provided for zero feed-in modes"
             )
-        if mode in self._RATE_REQUIRED_MODES and ac_rate_pct is None:
+        if mode in self._RATE_REQUIRED_MODES and ac_rate_pct is None and energy_wh is None:
             raise ValueError(
-                f"Inverter '{self.parameters.device_id}': ac_rate_pct must be provided for DISCHARGE and AC_CHARGE modes"
+                f"Inverter '{self.parameters.device_id}': ac_rate_pct or energy_wh must be provided for DISCHARGE and AC_CHARGE modes"
             )
 
         self.current_state = mode
@@ -189,15 +189,18 @@ class InverterBase:
         if mode in self._ZERO_FEED_IN_MODES:
             result = handler(generation, dt, energy_wh=energy_wh)
         elif mode in self._RATE_REQUIRED_MODES:
-            if not isinstance(ac_rate_pct, int):
-                raise ValueError(
-                    f"Inverter '{self.parameters.device_id}': ac_rate_pct must be an integer percent in [1, 100]"
-                )
-            if ac_rate_pct < 1 or ac_rate_pct > 100:
-                raise ValueError(
-                    f"Inverter '{self.parameters.device_id}': ac_rate_pct must be within [1, 100], got {ac_rate_pct}"
-                )
-            result = handler(generation, dt, ac_rate_pct=ac_rate_pct)
+            if energy_wh is not None:
+                result = handler(generation, dt, energy_wh=energy_wh)
+            else:
+                if not isinstance(ac_rate_pct, int):
+                    raise ValueError(
+                        f"Inverter '{self.parameters.device_id}': ac_rate_pct must be an integer percent in [1, 100]"
+                    )
+                if ac_rate_pct < 1 or ac_rate_pct > 100:
+                    raise ValueError(
+                        f"Inverter '{self.parameters.device_id}': ac_rate_pct must be within [1, 100], got {ac_rate_pct}"
+                    )
+                result = handler(generation, dt, ac_rate_pct=ac_rate_pct)
         else:
             result = handler(generation, dt)
 

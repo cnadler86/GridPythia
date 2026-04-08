@@ -1521,10 +1521,8 @@ class OptimizationTab(_Tab):
                         if sol.inverter_plans:
                             plan = sol.inverter_plans[0]
                             try:
-                                inv_modes_arrs = [np.asarray(plan.get("modes", []), dtype=np.int32)]
-                                inv_ac_rates_arrs = [
-                                    np.asarray(plan.get("rates", []), dtype=np.int32)
-                                ]
+                                inv_modes_arrs = [np.asarray(plan.modes, dtype=np.int32)]
+                                inv_ac_rates_arrs = [np.asarray(plan.rates, dtype=np.int32)]
                             except Exception:
                                 inv_modes_arrs = None
                                 inv_ac_rates_arrs = None

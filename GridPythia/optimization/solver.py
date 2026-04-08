@@ -12,6 +12,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
+from typing import cast
 
 import cvxpy as cp
 import numpy as np
@@ -44,6 +45,26 @@ class SimulationParityReport:
     max_abs_cost_error_eur: float
 
 
+@dataclass(frozen=True, slots=True)
+class InverterPlan:
+    """Typed inverter schedule exported by :class:`LinearOptimizer`."""
+
+    device_id: str
+    modes: np.ndarray
+    rates: np.ndarray
+    charge_ac_wh: np.ndarray
+    discharge_ac_wh: np.ndarray
+    pv_to_ac_wh: np.ndarray
+    pv_to_battery_wh: np.ndarray
+    battery_soc_wh: np.ndarray | None = None
+
+    def __getitem__(self, key: str) -> object:
+        return getattr(self, key)
+
+    def get(self, key: str, default: object | None = None) -> object | None:
+        return getattr(self, key, default)
+
+
 @dataclass
 class LinearSolution:
     """Solution produced by :class:`LinearOptimizer`."""
@@ -52,7 +73,7 @@ class LinearSolution:
     objective: OptimizationObjective
     solver_status: str
     solve_time_s: float
-    inverter_plans: list[dict]
+    inverter_plans: list[InverterPlan]
     parity_report: SimulationParityReport | None = None
     simulation_result: SimulationResult | None = None
     prediction: dict | None = None
@@ -262,20 +283,18 @@ class LinearOptimizer:
         self._g_feedin = cp.Variable(self._T, nonneg=True, name="g_feedin")
         self._pv_self = cp.Variable(self._T, nonneg=True, name="pv_self")
 
-        total_p_ch_terms: list[cp.Expression] = []
-        total_p_dc_terms: list[cp.Expression] = []
-        total_pv_ac_terms: list[cp.Expression] = [self._pv_external_param]
-        total_pv_ac_decision_terms: list[cp.Expression] = []
-        total_inv_consumption_terms: list[cp.Expression] = []
+        total_p_ch_terms: list[object] = []
+        total_p_dc_terms: list[object] = []
+        total_pv_ac_terms: list[object] = [self._pv_external_param]
+        total_pv_ac_decision_terms: list[object] = []
+        total_inv_consumption_terms: list[object] = []
 
-        blocks: list[_InverterModelBlock] = []
-        for inv in self.inverters:
-            block = self._build_inverter_block(inv)
-            blocks.append(block)
-            total_p_ch_terms.append(block.p_ch)
-            total_p_dc_terms.append(block.p_dc)
-            total_pv_ac_terms.append(block.pv_ac)
-            total_pv_ac_decision_terms.append(block.pv_ac)
+        blocks = [self._build_inverter_block(inv) for inv in self.inverters]
+        for inv, block in zip(self.inverters, blocks, strict=False):
+            total_p_ch_terms.append(cast(cp.Expression, block.p_ch))
+            total_p_dc_terms.append(cast(cp.Expression, block.p_dc))
+            total_pv_ac_terms.append(cast(cp.Expression, block.pv_ac))
+            total_pv_ac_decision_terms.append(cast(cp.Expression, block.pv_ac))
 
             active_w = inv.parameters.active_inverter_consumption_w
             if active_w > 0.0:
@@ -289,7 +308,7 @@ class LinearOptimizer:
                 else:
                     is_active = None
                 if is_active is not None:
-                    total_inv_consumption_terms.append(active_wh * is_active)
+                    total_inv_consumption_terms.append(cp.multiply(active_wh, is_active))
 
         total_p_ch = self._sum_terms(total_p_ch_terms, self._T)
         total_p_dc = self._sum_terms(total_p_dc_terms, self._T)
@@ -596,12 +615,12 @@ class LinearOptimizer:
         return self._terminal_value_param * self._terminal_soc_sum
 
     @staticmethod
-    def _sum_terms(terms: list[cp.Expression], T: int) -> cp.Expression:
+    def _sum_terms(terms: list[object], T: int) -> cp.Expression:
         if not terms:
             return cp.Constant(np.zeros(T, dtype=float))
         if len(terms) == 1:
-            return terms[0]
-        return cp.sum(cp.vstack(terms), axis=0)
+            return cast(cp.Expression, terms[0])
+        return cp.sum(cp.vstack([cast(cp.Expression, term) for term in terms]), axis=0)
 
     @staticmethod
     def _expr_to_vec(expr: cp.Expression, T: int) -> np.ndarray:
@@ -644,7 +663,7 @@ class LinearOptimizer:
         battery_soc_pct: dict[str, np.ndarray] = {}
         inv_modes_per_dt: dict[str, np.ndarray] = {}
         inv_rates_per_dt: dict[str, np.ndarray] = {}
-        inverter_plans: list[dict] = []
+        inverter_plans: list[InverterPlan] = []
 
         for block in blocks:
             inv = block.inverter
@@ -653,10 +672,12 @@ class LinearOptimizer:
             p_ch = self._expr_to_vec(block.p_ch, T)
             p_dc = self._expr_to_vec(block.p_dc, T)
             pv_to_bat = self._expr_to_vec(block.pv_to_bat, T)
+            battery_soc_wh: np.ndarray | None = None
 
             if inv.battery is not None and block.soc is not None:
                 bat = inv.battery
                 soc_vals = np.maximum(np.asarray(block.soc.value, dtype=float), 0.0)
+                battery_soc_wh = np.asarray(soc_vals, dtype=np.float32)
                 battery_wh_per_dt[inv_id] = np.asarray(soc_vals, dtype=np.float32)
                 battery_soc_pct[inv_id] = np.asarray(
                     soc_vals * (100.0 / bat.capacity_wh), dtype=np.float32
@@ -672,7 +693,18 @@ class LinearOptimizer:
             modes, rates = self._extract_modes_and_rates(block, p_ch, p_dc, dt)
             inv_modes_per_dt[inv_id] = np.asarray(modes, dtype=np.int8)
             inv_rates_per_dt[inv_id] = np.asarray(rates, dtype=np.int32)
-            inverter_plans.append({"device_id": inv_id, "modes": modes, "rates": rates})
+            inverter_plans.append(
+                InverterPlan(
+                    device_id=inv_id,
+                    modes=np.asarray(modes, dtype=np.int8),
+                    rates=np.asarray(rates, dtype=np.int32),
+                    charge_ac_wh=np.asarray(p_ch, dtype=np.float32),
+                    discharge_ac_wh=np.asarray(p_dc, dtype=np.float32),
+                    pv_to_ac_wh=np.asarray(self._expr_to_vec(block.pv_ac, T), dtype=np.float32),
+                    pv_to_battery_wh=np.asarray(pv_to_bat, dtype=np.float32),
+                    battery_soc_wh=battery_soc_wh,
+                )
+            )
 
             active_w = inv.parameters.active_inverter_consumption_w
             if active_w > 0.0:
@@ -788,20 +820,27 @@ class LinearOptimizer:
 
         modes: dict[str, np.ndarray] = {}
         rates: dict[str, np.ndarray] = {}
+        energy_wh: dict[str, np.ndarray] = {}
 
         for inv in self.inverters:
             inv_id = inv.device_id
-            plan = next((p for p in solution.inverter_plans if p["device_id"] == inv_id), None)
+            plan = next((p for p in solution.inverter_plans if p.device_id == inv_id), None)
             if plan is None:
                 modes[inv_id] = np.full(prep.T, int(InverterMode.IDLE), dtype=np.int32)
                 rates[inv_id] = np.zeros(prep.T, dtype=np.int32)
+                energy_wh[inv_id] = np.zeros(prep.T, dtype=np.float32)
             else:
-                modes[inv_id] = np.asarray(plan["modes"], dtype=np.int32)
-                rates[inv_id] = np.asarray([int(x) for x in plan["rates"]], dtype=np.int32)
+                modes[inv_id] = np.asarray(plan.modes, dtype=np.int32)
+                rates[inv_id] = np.asarray(plan.rates, dtype=np.int32)
+                energy_wh[inv_id] = np.asarray(
+                    np.maximum(plan.charge_ac_wh, plan.discharge_ac_wh),
+                    dtype=np.float32,
+                )
 
         sim_result = sim.simulate(
             inverter_modes=modes,
             inverter_ac_rates=rates,
+            inverter_ac_energy_wh=energy_wh,
             appliance_load=None,
             start_idx=0,
             dt=prep.dt,

@@ -499,7 +499,7 @@ class TestLinearSolverHybridEconomics:
         ID = InverterMode.IDLE
         AC = InverterMode.AC_CHARGE
         ZFI = InverterMode.DISCHARGE_ZERO_FEED_IN
-        assert plan["modes"][0:-1] == [int(AC), int(AC), int(AC), int(ZFI)]
+        assert plan["modes"][0:-1].tolist() == [int(AC), int(AC), int(AC), int(ZFI)]
         assert plan["rates"][1] < plan["rates"][2] < plan["rates"][0]
 
 
@@ -553,12 +553,12 @@ class TestLinearSolverHybridEconomics:
         low_cost_plan = make_solver(0.0).solve(OptimizationObjective.MINIMIZE_COST).inverter_plans[0]
         high_cost_plan = make_solver(0.05).solve(OptimizationObjective.MINIMIZE_COST).inverter_plans[0]
 
-        assert low_cost_plan["modes"] == [
+        assert low_cost_plan["modes"].tolist() == [
             int(InverterMode.IDLE),
             int(InverterMode.DISCHARGE_ZERO_FEED_IN),
             int(InverterMode.IDLE),
         ]
-        assert high_cost_plan["modes"] == [
+        assert high_cost_plan["modes"].tolist() == [
             int(InverterMode.IDLE),
             int(InverterMode.DISCHARGE_ZERO_FEED_IN),
             int(InverterMode.DISCHARGE_ZERO_FEED_IN),

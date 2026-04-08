@@ -24,6 +24,7 @@ class InverterSimulationDataStep:
     mode: InverterMode
     generation: float = 0.0
     ac_rate_pct: int | None = None
+    ac_energy_wh: float | None = None
 
 
 @dataclass(slots=True)
@@ -233,7 +234,18 @@ class GridSimulation:
 
         for idx, sb in enumerate(step_buf):
             m = sb.mode
-            if m == _ZFI_D:
+            if sb.ac_energy_wh is not None and m != InverterMode.IDLE:
+                res = sb.inverter.process_energy(
+                    generation=sb.generation,
+                    mode=m,
+                    dt=dt,
+                    energy_wh=sb.ac_energy_wh,
+                )
+                static_ie += res.ac_output_wh - res.ac_input_wh
+                static_pv += res.pv_ac_wh
+                losses += res.losses_wh
+                pv_per_inv[idx] = res.pv_ac_wh
+            elif m == _ZFI_D:
                 zfi_d = (idx, sb)
             elif m == _ZFI_C:
                 zfi_c = (idx, sb)
@@ -292,6 +304,7 @@ class GridSimulation:
         appliance_load: Sequence[float] | np.ndarray | None = None,
         start_idx: int = 0,
         dt: float = 1.0,
+        inverter_ac_energy_wh: Mapping[str, Sequence[float] | np.ndarray] | None = None,
     ) -> SimulationResult | None:
         """Simulate energy flows and costs for a contiguous time window."""
         if start_idx < 0 or start_idx > self.simulation_steps:
@@ -338,6 +351,15 @@ class GridSimulation:
             for inv in inv_list
         ]
 
+        energy_map = inverter_ac_energy_wh if inverter_ac_energy_wh is not None else {}
+        energy_arrs = [
+            np.asarray(
+                energy_map.get(inv.device_id, np.full(self.simulation_steps, np.nan)),
+                dtype=np.float32,
+            )
+            for inv in inv_list
+        ]
+
         for inv, arr in zip(inv_list, rates_arrs, strict=False):
             if inv.device_id in inverter_ac_rates and len(arr) < self.simulation_steps:
                 raise ValueError(
@@ -345,10 +367,19 @@ class GridSimulation:
                     f"{self.simulation_steps} entries, got {len(arr)}"
                 )
 
+        if inverter_ac_energy_wh is not None:
+            for inv, arr in zip(inv_list, energy_arrs, strict=False):
+                if inv.device_id in inverter_ac_energy_wh and len(arr) < self.simulation_steps:
+                    raise ValueError(
+                        f"inverter_ac_energy_wh[{inv.device_id!r}] must have at least "
+                        f"{self.simulation_steps} entries, got {len(arr)}"
+                    )
+
         _step = self._simulate_step
         pv_lens = [len(a) for a in pv_arrs]
         mode_lens = [len(a) for a in modes_arrs]
         rate_lens = [len(a) for a in rates_arrs]
+        energy_lens = [len(a) for a in energy_arrs]
         appl_arr = (
             np.asarray(appliance_load, dtype=np.float32) if appliance_load is not None else None
         )
@@ -390,6 +421,8 @@ class GridSimulation:
                 step.mode = InverterMode(int(mode_raw))
                 step.generation = pv_arrs[j][h] if h < pv_lens[j] else 0.0
                 step.ac_rate_pct = int(rates_arrs[j][h]) if h < rate_lens[j] else 0
+                energy_value = energy_arrs[j][h] if h < energy_lens[j] else np.nan
+                step.ac_energy_wh = None if np.isnan(energy_value) else float(energy_value)
 
             end_load, pv_ac_wh, losses_wh_per_dt[i], pv_per_inv_list = _step(step_buf, load_wh, dt)
 
