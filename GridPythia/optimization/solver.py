@@ -18,7 +18,7 @@ from typing import cast
 if machine() in ("armv7l", "armv6l"):
     import os
 
-    os.environ["LD_PRELOAD"] = "usr/lib/arm-linux-gnueabihf/libatomic.so.1"
+    os.environ["LD_PRELOAD"] = "/usr/lib/arm-linux-gnueabihf/libatomic.so.1"
 
 import cvxpy as cp
 import numpy as np
