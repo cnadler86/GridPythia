@@ -201,72 +201,159 @@ def profile_solver():
     else:
         inverters = [create_inverter()]
 
-    # Profile building + solve + re-solve with modified params on same instance
-    pr = cProfile.Profile()
-    pr.enable()
+    # Rolling-Horizon: 15 Durchläufe, jeweils PredictionData um 1 Sample kürzen, initial SoC übernehmen
+    num_rolls = 15
 
-    t_build_start = time.perf_counter()
-    optimizer = LinearOptimizer(inverters, pred)
-    t_build = time.perf_counter() - t_build_start
+    soc_percent = None  # Startwert: aus Config oder Default
+    inverter_mode = None  # Startwert: None (IDLE)
+    pred_current = pred
+    results_table = []
 
-    # First solve
-    t_solve1_start = time.perf_counter()
-    solution1 = optimizer.solve(
-        OptimizationObjective.MINIMIZE_COST,
-        validate_with_simulation=False,
-    )
-    t_solve1 = time.perf_counter() - t_solve1_start
+    for roll in range(num_rolls):
+        print(f"\n{'=' * 30} ROLLING HORIZON STEP {roll + 1} / {num_rolls} {'=' * 30}")
 
-    # Modify parameters on the same instance: update only first battery initial SoC
-    if optimization_cfg and optimization_cfg.batteries and inverters:
-        # update battery initial SoC (example change)
-        bat_cfg = optimization_cfg.batteries[0]
-        new_init = min(95, max(5, bat_cfg.initial_soc_percentage + 5))
-        new_bat_params = bat_cfg.model_copy(update={"initial_soc_percentage": new_init})
-        # find corresponding Battery object
-        target_bat = None
+        # Setze initial SoC und initial Mode für alle Batterien
+
         for inv in inverters:
             if inv.battery is not None:
-                target_bat = inv.battery
-                break
-        if target_bat is not None:
-            target_bat.parameters = new_bat_params
-            target_bat._setup()
+                params = inv.battery.parameters.model_copy(
+                    update={"initial_soc_percentage": soc_percent}
+                    if soc_percent is not None
+                    else {}
+                )
+                inv.battery.parameters = params
+                inv.battery._setup()
+                # Setze explizit den aktuellen SoC in Wh
+                if soc_percent is not None:
+                    inv.battery.soc_wh = inv.battery.capacity_wh * soc_percent / 100.0
 
-    # Second solve (same optimizer instance)
-    t_solve2_start = time.perf_counter()
-    solution2 = optimizer.solve(
-        OptimizationObjective.MINIMIZE_COST,
-        validate_with_simulation=False,
-    )
-    t_solve2 = time.perf_counter() - t_solve2_start
+        # initial_modes für Optimizer vorbereiten (immer mit dem mode aus dem letzten Run, analog zu soc_percent)
+        initial_modes = None
+        if inverter_mode is not None:
+            initial_modes = {inv.device_id: inverter_mode for inv in inverters}
 
-    pr.disable()
+        # Build and solve once per rolling step, using carried-over initial modes
+        pr = cProfile.Profile()
+        pr.enable()
 
-    # Print profiler stats (top 30)
-    s = io.StringIO()
-    ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
-    ps.print_stats(30)
-    print(s.getvalue())
+        t_build_start = time.perf_counter()
+        optimizer = LinearOptimizer(inverters, pred_current)
+        t_build = time.perf_counter() - t_build_start
 
-    # Summary
-    print("\n" + "=" * 80)
-    print("PROFILE SUMMARY:")
-    print(f"Build time: {t_build:.4f} s")
+        t_solve_start = time.perf_counter()
+        solution = optimizer.solve(
+            OptimizationObjective.MINIMIZE_COST,
+            validate_with_simulation=False,
+            initial_modes=initial_modes,
+        )
+        t_solve = time.perf_counter() - t_solve_start
+
+        pr.disable()
+
+        s = io.StringIO()
+        ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
+        ps.print_stats(15)
+        print(s.getvalue())
+
+        # Summary
+        print(f"Build time: {t_build:.4f} s")
+        print(f"Solve wall time: {t_solve:.4f} s (solver reported {solution.solve_time_s:.4f} s)")
+        print(f"Status: {solution.solver_status}")
+        print(f"Objective value (problem): {getattr(solution.result, 'total_cost', 'N/A')}")
+
+        # Rolling-Horizon: Hole SoC und Mode für nächsten Schritt (Index 1)
+        soc_dict = getattr(solution.result, "battery_soc_percentage_per_dt", None)
+        modes_dict = getattr(solution.result, "inverter_modes_per_dt", None)
+        soc_used = None
+        mode_used = None
+        inv_id = None
+        # prefer index 1 (next step) — fall back to index 0 if horizon==1
+        if soc_dict and isinstance(soc_dict, dict):
+            inv_ids = list(soc_dict.keys())
+            if inv_ids:
+                inv_id = inv_ids[0]
+                arr = soc_dict[inv_id]
+                if isinstance(arr, (list, np.ndarray)) and len(arr) > 1:
+                    soc_used = float(arr[1])
+                elif isinstance(arr, (list, np.ndarray)) and len(arr) > 0:
+                    soc_used = float(arr[0])
+                    print("WARN: SoC-Array nur Länge 1, verwende Index 0 für nächsten Start.")
+                else:
+                    print("WARN: SoC-Array zu kurz, initial SoC bleibt unverändert.")
+            else:
+                print("WARN: Keine Inverter-IDs im SoC-Ergebnis.")
+        else:
+            print("WARN: Ergebnis hat kein battery_soc_percentage_per_dt-Attribut.")
+
+        if modes_dict and isinstance(modes_dict, dict):
+            inv_ids = list(modes_dict.keys())
+            if inv_ids:
+                inv_id = inv_ids[0]
+                arr = modes_dict[inv_id]
+                if isinstance(arr, (list, np.ndarray)) and len(arr) > 1:
+                    mode_used = int(arr[1])
+                elif isinstance(arr, (list, np.ndarray)) and len(arr) > 0:
+                    mode_used = int(arr[0])
+                    print("WARN: Mode-Array nur Länge 1, verwende Index 0 für nächsten Start.")
+                else:
+                    print("WARN: Mode-Array zu kurz, initial Mode bleibt unverändert.")
+            else:
+                print("WARN: Keine Inverter-IDs im Mode-Ergebnis.")
+        else:
+            print("WARN: Ergebnis hat kein inverter_modes_per_dt-Attribut.")
+
+        if soc_used is not None:
+            print(f"Initial SoC für nächsten Schritt: {soc_used:.2f}% (aus {inv_id})")
+            soc_percent = soc_used
+        if mode_used is not None:
+            print(f"Initial Mode für nächsten Schritt: {mode_used} (aus {inv_id})")
+            inverter_mode = mode_used
+
+        # Ergebnisse für Tabelle sammeln
+        results_table.append(
+            {
+                "roll": roll + 1,
+                "build_time": t_build,
+                "solve_time": t_solve,
+                "solver_time": solution.solve_time_s,
+                "status": solution.solver_status,
+                "objective": getattr(solution.result, "total_cost", None),
+                "soc_next": soc_used,
+                "mode_next": mode_used,
+                "steps": pred_current.steps,
+            }
+        )
+
+        # PredictionData für nächsten Schritt: entferne erstes Sample
+        if pred_current.steps > 1:
+            pred_current = PredictionData(
+                timestamps=pred_current.timestamps[1:],
+                dt_hours=pred_current.dt_hours,
+                load_wh=pred_current.load_wh[1:],
+                electricprice_eur_wh=pred_current.electricprice[1:]
+                if pred_current.electricprice is not None
+                else None,
+                feedintariff_eur_wh=pred_current.feedintariff[1:]
+                if pred_current.feedintariff is not None
+                else None,
+                pv_by_inverter={k: v[1:] for k, v in pred_current.pv_by_inverter.items()},
+                weather_by_channel={k: v[1:] for k, v in pred_current.weather_by_channel.items()}
+                if hasattr(pred_current, "weather_by_channel") and pred_current.weather_by_channel
+                else None,
+            )
+        else:
+            print("Rolling horizon beendet: PredictionData leer.")
+
+    # Am Ende: Tabelle ausgeben
+    print("\n==================== ROLLING HORIZON SUMMARY ====================")
     print(
-        f"First solve wall time: {t_solve1:.4f} s (solver reported {solution1.solve_time_s:.4f} s)"
+        f"{'Step':>4} | {'Steps':>5} | {'Build [s]':>9} | {'Solve [s]':>9} | {'Solver [s]':>10} | {'Status':>8} | {'Obj':>12} | {'SoC_next':>9} | {'Mode_next':>9}"
     )
-    print(
-        f"Second solve wall time: {t_solve2:.4f} s (solver reported {solution2.solve_time_s:.4f} s)"
-    )
-    print()
-    print("SOLUTION 1:")
-    print(f"Status: {solution1.solver_status}")
-    print(f"Objective value (problem): {getattr(solution1.result, 'total_cost', 'N/A')}")
-    print()
-    print("SOLUTION 2:")
-    print(f"Status: {solution2.solver_status}")
-    print(f"Objective value (problem): {getattr(solution2.result, 'total_cost', 'N/A')}")
+    print("-" * 100)
+    for row in results_table:
+        print(
+            f"{row['roll']:>4} | {row['steps']:>5} | {row['build_time']:9.4f} | {row['solve_time']:9.4f} | {row['solver_time']:10.4f} | {row['status']:>8} | {row['objective']:12.6f} | {row['soc_next']:.2f} | {str(row['mode_next']):>9}"
+        )
 
 
 if __name__ == "__main__":
