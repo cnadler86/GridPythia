@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from GridPythia.prediction.weather.brightsky import WeatherBrightSky
 from GridPythia.prediction.weather.openmeteo import WeatherOpenMeteo
 
+from typing import Any
 
 class _FakeResponse:
     def __init__(self, body: dict) -> None:
@@ -41,7 +42,7 @@ class _FakeSession:
 
 
 async def test_brightsky_maps_channels_and_converts_solar(monkeypatch) -> None:
-    capture: dict[str, object] = {}
+    capture: dict[str, Any] = {}
     body = {
         "weather": [
             {
@@ -91,7 +92,7 @@ async def test_brightsky_maps_channels_and_converts_solar(monkeypatch) -> None:
 
 
 async def test_openmeteo_maps_hourly_fields(monkeypatch) -> None:
-    capture: dict[str, object] = {}
+    capture: dict[str, Any] = {}
     start = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
     end = datetime(2025, 6, 15, 1, 0, tzinfo=timezone.utc)
     body = {

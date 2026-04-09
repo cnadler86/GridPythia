@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from platform import machine
-from typing import cast
+from typing import Any, cast
 
 if machine() in ("armv7l", "armv6l"):
     import os
@@ -65,10 +65,10 @@ class InverterPlan:
     pv_to_battery_wh: np.ndarray
     battery_soc_wh: np.ndarray | None = None
 
-    def __getitem__(self, key: str) -> object:
+    def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
 
-    def get(self, key: str, default: object | None = None) -> object | None:
+    def get(self, key: str, default: Any | None = None) -> Any | None:
         return getattr(self, key, default)
 
 
@@ -420,7 +420,7 @@ class LinearOptimizer:
         self._price_param.value = prep.price
         if self._feedin_param is not None:
             self._feedin_param.value = prep.feedin_tariff
-        else:
+        elif self._feedin_scalar_param is not None:
             self._feedin_scalar_param.value = float(prep.feedin_tariff[0]) if prep.T > 0 else 0.0
 
         c_pv_arr = np.empty(prep.T, dtype=float)
