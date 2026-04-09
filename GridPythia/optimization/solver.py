@@ -183,6 +183,8 @@ class LinearOptimizer:
             "time_limit": 120,
             "mip_rel_gap": 0.03,
             "presolve": "on",
+            "mip_lp_solver": "ipm",
+            "mip_heuristic_run_rens": False,
             **(solver_opts or {}),
         }
 
