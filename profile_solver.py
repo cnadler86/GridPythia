@@ -14,7 +14,6 @@ import yaml
 from GridPythia.config.optimization import BatteryParameters, InverterParameters, OptimizationConfig
 from GridPythia.optimization.solver import LinearOptimizer, OptimizationObjective
 from GridPythia.prediction.prediction import PredictionData
-from GridPythia.simulation.devices import SystemTopology
 from GridPythia.simulation.devices.battery import Battery
 from GridPythia.simulation.devices.inverterbase import InverterBase
 
@@ -26,8 +25,9 @@ def load_result_json(json_path: str | Path) -> dict:
 
 
 def create_prediction_from_result(result: dict) -> PredictionData:
-    """Create PredictionData from either a result JSON (with `prediction`) or
-    directly from a prediction payload (contains `load_wh`, `electricprice_eur_wh`, etc.).
+    """Create PredictionData from either a result JSON (with `prediction`).
+
+    or directly from a prediction payload (contains `load_wh`, `electricprice_eur_wh`, etc.).
     """
     # Accept either {"prediction": {...}} or the prediction dict itself.
     if isinstance(result.get("prediction"), dict):
@@ -217,11 +217,11 @@ def profile_solver():
     )
     t_solve1 = time.perf_counter() - t_solve1_start
 
-    # Modify parameters on the same instance: update first battery initial SoC and inverter mode cost
+    # Modify parameters on the same instance: update only first battery initial SoC
     if optimization_cfg and optimization_cfg.batteries and inverters:
         # update battery initial SoC (example change)
         bat_cfg = optimization_cfg.batteries[0]
-        new_init = min(95, max(5, bat_cfg.initial_soc_percentage + 30))
+        new_init = min(95, max(5, bat_cfg.initial_soc_percentage + 5))
         new_bat_params = bat_cfg.model_copy(update={"initial_soc_percentage": new_init})
         # find corresponding Battery object
         target_bat = None
@@ -232,29 +232,6 @@ def profile_solver():
         if target_bat is not None:
             target_bat.parameters = new_bat_params
             target_bat._setup()
-
-        # update inverter params (increase mode_switch_cost) on first inverter
-        inv0 = inverters[0]
-        try:
-            new_inv_params = inv0.parameters.model_copy(
-                update={"mode_switch_cost": inv0.parameters.mode_switch_cost * 2.0}
-            )
-        except Exception:
-            new_inv_params = inv0.parameters
-
-        # apply new inverter params (update derived attrs)
-        inv0.parameters = new_inv_params
-        inv0._max_ac_output_power_w = new_inv_params.max_ac_output_power_w
-        inv0._max_ac_charge_power_w = new_inv_params.max_ac_charge_power_w
-        inv0._dc_to_ac_efficiency = new_inv_params.dc_to_ac_efficiency
-        inv0._ac_to_dc_efficiency = new_inv_params.ac_to_dc_efficiency
-        inv0._zero_feed_in = new_inv_params.zero_feed_in
-        inv0._has_pv = getattr(new_inv_params, "has_pv", False)
-        inv0.topology = inv0._resolve_topology()
-        inv0.available_modes = inv0._resolve_available_modes()
-        inv0.is_optimizable = (
-            inv0.topology != SystemTopology.PV_ONLY and len(inv0.available_modes) > 1
-        )
 
     # Second solve (same optimizer instance)
     t_solve2_start = time.perf_counter()
