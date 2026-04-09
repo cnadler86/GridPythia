@@ -51,7 +51,7 @@ def create_prediction_from_result(result: dict) -> PredictionData:
     if "pv_by_inverter" in pred and isinstance(pred["pv_by_inverter"], dict):
         # use first inverter series
         first = next(iter(pred["pv_by_inverter"].values()), [])
-        pv_series = list(first)
+        pv_series = list(first) if isinstance(first, (list, tuple, np.ndarray)) else []
     else:
         pv_keys = [k for k in pred.keys() if k.startswith("pv_") and k.endswith("_wh")]
         if pv_keys:
@@ -129,6 +129,37 @@ def create_inverter() -> InverterBase:
     return inv
 
 
+def slice_prediction_window(
+    prediction: PredictionData,
+    *,
+    start_idx: int,
+    length: int,
+) -> PredictionData:
+    """Return a fixed-length rolling-horizon window from prediction data."""
+    end_idx = start_idx + length
+    return PredictionData(
+        timestamps=prediction.timestamps[start_idx:end_idx],
+        dt_hours=prediction.dt_hours,
+        load_wh=prediction.load_wh[start_idx:end_idx],
+        electricprice_eur_wh=prediction.electricprice[start_idx:end_idx]
+        if prediction.electricprice is not None
+        else None,
+        feedintariff_eur_wh=prediction.feedintariff[start_idx:end_idx]
+        if prediction.feedintariff is not None
+        else None,
+        pv_by_inverter={
+            inverter_id: values[start_idx:end_idx]
+            for inverter_id, values in prediction.pv_by_inverter.items()
+        },
+        weather_by_channel={
+            channel: values[start_idx:end_idx]
+            for channel, values in prediction.weather_by_channel.items()
+        }
+        if prediction.weather_by_channel
+        else None,
+    )
+
+
 def profile_solver():
     """Profile the LinearOptimizer with real data from result.
 
@@ -201,15 +232,25 @@ def profile_solver():
     else:
         inverters = [create_inverter()]
 
-    # Rolling-Horizon: 15 Durchläufe, jeweils PredictionData um 1 Sample kürzen, initial SoC übernehmen
-    num_rolls = 15
+    # Rolling-Horizon: konstante Horizontlänge mit realen Datenfenstern.
+    requested_rolls = 15
+    num_rolls = min(requested_rolls, 20)
+    if pred.steps <= num_rolls:
+        raise RuntimeError(
+            f"Prediction horizon ({pred.steps}) must be longer than num_rolls ({num_rolls})."
+        )
+    window_steps = pred.steps - num_rolls
+    print(f"Rolling horizon windows: {num_rolls}")
+    print(f"Window length per solve: {window_steps} steps")
+    print()
 
     soc_percent = None  # Startwert: aus Config oder Default
     inverter_mode = None  # Startwert: None (IDLE)
-    pred_current = pred
     results_table = []
+    optimizer: LinearOptimizer | None = None
 
     for roll in range(num_rolls):
+        pred_current = slice_prediction_window(pred, start_idx=roll, length=window_steps)
         print(f"\n{'=' * 30} ROLLING HORIZON STEP {roll + 1} / {num_rolls} {'=' * 30}")
 
         # Setze initial SoC und initial Mode für alle Batterien
@@ -232,13 +273,17 @@ def profile_solver():
         if inverter_mode is not None:
             initial_modes = {inv.device_id: inverter_mode for inv in inverters}
 
-        # Build and solve once per rolling step, using carried-over initial modes
+        # Reuse one optimizer model for all fixed-size windows to avoid repeated recompilation.
         pr = cProfile.Profile()
         pr.enable()
 
-        t_build_start = time.perf_counter()
-        optimizer = LinearOptimizer(inverters, pred_current)
-        t_build = time.perf_counter() - t_build_start
+        t_build = 0.0
+        if optimizer is None:
+            t_build_start = time.perf_counter()
+            optimizer = LinearOptimizer(inverters, pred_current)
+            t_build = time.perf_counter() - t_build_start
+        else:
+            optimizer.prediction = pred_current
 
         t_solve_start = time.perf_counter()
         solution = optimizer.solve(
@@ -323,26 +368,6 @@ def profile_solver():
                 "steps": pred_current.steps,
             }
         )
-
-        # PredictionData für nächsten Schritt: entferne erstes Sample
-        if pred_current.steps > 1:
-            pred_current = PredictionData(
-                timestamps=pred_current.timestamps[1:],
-                dt_hours=pred_current.dt_hours,
-                load_wh=pred_current.load_wh[1:],
-                electricprice_eur_wh=pred_current.electricprice[1:]
-                if pred_current.electricprice is not None
-                else None,
-                feedintariff_eur_wh=pred_current.feedintariff[1:]
-                if pred_current.feedintariff is not None
-                else None,
-                pv_by_inverter={k: v[1:] for k, v in pred_current.pv_by_inverter.items()},
-                weather_by_channel={k: v[1:] for k, v in pred_current.weather_by_channel.items()}
-                if hasattr(pred_current, "weather_by_channel") and pred_current.weather_by_channel
-                else None,
-            )
-        else:
-            print("Rolling horizon beendet: PredictionData leer.")
 
     # Am Ende: Tabelle ausgeben
     print("\n==================== ROLLING HORIZON SUMMARY ====================")

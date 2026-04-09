@@ -183,7 +183,7 @@ class LinearOptimizer:
             "time_limit": 120,
             "mip_rel_gap": 0.03,
             "presolve": "on",
-            "mip_lp_solver": "ipm",
+            "mip_lp_solver": "simplex",
             "mip_heuristic_run_rens": False,
             **(solver_opts or {}),
         }
@@ -266,16 +266,28 @@ class LinearOptimizer:
             pv_by_source=solver_view.pv_by_inverter,
         )
 
+    @staticmethod
+    def _is_constant_series(series: np.ndarray, *, atol: float = 1e-12) -> bool:
+        if series.size <= 1:
+            return True
+        return bool(np.all(np.abs(series - float(series[0])) <= atol))
+
     def _compile_problem(self, prep: _PreparedInputs) -> None:
         self._T = prep.T
         self._dt = prep.dt
+        self._feedin_is_constant = self._is_constant_series(prep.feedin_tariff)
 
         self._constraints: list[cp.Constraint] = []
         self._mode_switch_costs: list[cp.Expression] = []
 
         self._load_param = cp.Parameter(self._T, name="load_wh")
         self._price_param = cp.Parameter(self._T, name="price")
-        self._feedin_param = cp.Parameter(self._T, name="feedin_tariff")
+        if self._feedin_is_constant:
+            self._feedin_scalar_param = cp.Parameter(name="feedin_tariff_scalar")
+            self._feedin_param = None
+        else:
+            self._feedin_param = cp.Parameter(self._T, name="feedin_tariff")
+            self._feedin_scalar_param = None
         self._c_pv_param = cp.Parameter(self._T, name="c_pv")
         self._rhs_sc_param = cp.Parameter(self._T, name="rhs_sc")
         self._terminal_value_param = cp.Parameter(nonneg=True, name="terminal_value")
@@ -283,6 +295,7 @@ class LinearOptimizer:
         self._pv_params: dict[str, cp.Parameter] = {
             inv.device_id: cp.Parameter(self._T, nonneg=True, name=f"pv_pred_{inv.device_id}")
             for inv in self.inverters
+            if inv.parameters.has_pv
         }
         self._pv_external_param = cp.Parameter(self._T, nonneg=True, name="pv_pred_external")
 
@@ -356,11 +369,13 @@ class LinearOptimizer:
         mode_switch_costs_term = cp.sum(self._mode_switch_costs) if self._mode_switch_costs else 0.0
         terminal_reward = self._terminal_reward_expr()
 
+        if self._feedin_param is not None:
+            feedin_revenue_term = cp.multiply(self._g_feedin, self._feedin_param)
+        else:
+            feedin_revenue_term = self._feedin_scalar_param * self._g_feedin
+
         objective_cost = (
-            cp.sum(
-                cp.multiply(self._g_import, self._price_param)
-                - cp.multiply(self._g_feedin, self._feedin_param)
-            )
+            cp.sum(cp.multiply(self._g_import, self._price_param) - feedin_revenue_term)
             + mode_switch_costs_term
             - terminal_reward
         )
@@ -384,7 +399,12 @@ class LinearOptimizer:
         self._compiled = True
 
     def _ensure_compiled_layout(self, prep: _PreparedInputs) -> None:
-        if not self._compiled or prep.T != self._T or prep.dt != self._dt:
+        if (
+            not self._compiled
+            or prep.T != self._T
+            or prep.dt != self._dt
+            or self._is_constant_series(prep.feedin_tariff) != self._feedin_is_constant
+        ):
             self._sc_model = FraunhoferSCModel(
                 baseload_wh=max(float(np.min(prep.load_wh)) if prep.T > 0 else 1.0, 1e-6),
                 dt=prep.dt,
@@ -398,7 +418,10 @@ class LinearOptimizer:
     ) -> None:
         self._load_param.value = prep.load_wh
         self._price_param.value = prep.price
-        self._feedin_param.value = prep.feedin_tariff
+        if self._feedin_param is not None:
+            self._feedin_param.value = prep.feedin_tariff
+        else:
+            self._feedin_scalar_param.value = float(prep.feedin_tariff[0]) if prep.T > 0 else 0.0
 
         c_pv_arr = np.empty(prep.T, dtype=float)
         rhs_arr = np.empty(prep.T, dtype=float)
@@ -411,8 +434,9 @@ class LinearOptimizer:
 
         for inv in self.inverters:
             inv_id = inv.device_id
-            pv_arr = prep.pv_by_source.get(inv_id, np.zeros(prep.T, dtype=float))
-            self._pv_params[inv_id].value = pv_arr
+            if inv_id in self._pv_params:
+                pv_arr = prep.pv_by_source.get(inv_id, np.zeros(prep.T, dtype=float))
+                self._pv_params[inv_id].value = pv_arr
 
             if inv_id in self._soc_init_params:
                 if inv.battery is None:
