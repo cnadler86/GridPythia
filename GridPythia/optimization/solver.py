@@ -18,6 +18,7 @@ from typing import cast
 if machine() in ("armv7l", "armv6l"):
     import os
 
+    print("Detected ARM architecture, preloading libatomic for HiGHS solver...")
     os.environ["LD_PRELOAD"] = "/usr/lib/arm-linux-gnueabihf/libatomic.so.1"
 
 import cvxpy as cp
