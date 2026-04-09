@@ -12,7 +12,13 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
+from platform import machine
 from typing import cast
+
+if machine() in ("armv7l", "armv6l"):
+    import os
+
+    os.environ["LD_PRELOAD"] = "usr/lib/arm-linux-gnueabihf/libatomic.so.1"
 
 import cvxpy as cp
 import numpy as np
@@ -172,6 +178,7 @@ class LinearOptimizer:
 
         opts = {
             "verbose": False,
+            "warm_start": True,
             "time_limit": 30,
             "mip_rel_gap": 0.02,
             **(solver_opts or {}),
@@ -179,7 +186,7 @@ class LinearOptimizer:
 
         t0 = time.perf_counter()
         try:
-            problem.solve(solver=cp.HIGHS, **opts)
+            problem.solve(solver=cp.HIGHS, canon_backend=cp.SCIPY_CANON_BACKEND, **opts)
         except cp.SolverError as exc:
             raise RuntimeError(f"CVXPY/HiGHS solver error: {exc}") from exc
         solve_time = time.perf_counter() - t0
