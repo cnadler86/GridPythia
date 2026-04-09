@@ -121,6 +121,7 @@ class LinearOptimizer:
     """
 
     _MIN_ACTIVE_AC_RATE_PCT = 1.0
+    _MONETARY_OBJECTIVE_SCALE = 100.0
 
     def __init__(
         self,
@@ -224,7 +225,9 @@ class LinearOptimizer:
             solver_status=status,
             solve_time_s=round(solve_time, 3),
             objective=objective.value,
-            objective_value=round(float(problem.value), 4) if problem.value is not None else None,
+            objective_value=round(self._objective_value_for_logging(objective, problem.value), 4)
+            if problem.value is not None
+            else None,
         )
 
         solution = self._build_solution(
@@ -374,11 +377,12 @@ class LinearOptimizer:
         else:
             feedin_revenue_term = self._feedin_scalar_param * self._g_feedin
 
-        objective_cost = (
+        objective_cost_eur = (
             cp.sum(cp.multiply(self._g_import, self._price_param) - feedin_revenue_term)
             + mode_switch_costs_term
             - terminal_reward
         )
+        objective_cost = self._MONETARY_OBJECTIVE_SCALE * objective_cost_eur
 
         objective_self = cp.sum(self._g_feedin) - terminal_reward
 
@@ -648,6 +652,17 @@ class LinearOptimizer:
         if isinstance(self._terminal_soc_sum, (int, float)):
             return 0.0
         return self._terminal_value_param * self._terminal_soc_sum
+
+    def _objective_value_for_logging(
+        self,
+        objective: OptimizationObjective,
+        value: float | None,
+    ) -> float:
+        if value is None:
+            return 0.0
+        if objective == OptimizationObjective.MINIMIZE_COST:
+            return float(value) / self._MONETARY_OBJECTIVE_SCALE
+        return float(value)
 
     @staticmethod
     def _sum_terms(terms: list[object], T: int) -> cp.Expression:
