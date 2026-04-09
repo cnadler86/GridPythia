@@ -181,7 +181,7 @@ class LinearOptimizer:
             "verbose": False,
             "warm_start": True,
             "time_limit": 30,
-            "mip_rel_gap": 0.2,
+            "mip_rel_gap": 0.03,
             "presolve": "on",
             **(solver_opts or {}),
         }
