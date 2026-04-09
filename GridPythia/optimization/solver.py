@@ -180,10 +180,9 @@ class LinearOptimizer:
         opts = {
             "verbose": False,
             "warm_start": True,
-            "time_limit": 60,
+            "time_limit": 120,
             "mip_rel_gap": 0.03,
             "presolve": "on",
-            "parallel": "on",
             **(solver_opts or {}),
         }
 
