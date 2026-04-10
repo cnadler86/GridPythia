@@ -21,6 +21,8 @@ if machine() in ("armv7l", "armv6l"):
     print("Detected ARM architecture, preloading libatomic for HiGHS solver...")
     os.environ["LD_PRELOAD"] = "/usr/lib/arm-linux-gnueabihf/libatomic.so.1"
 
+import math
+
 import cvxpy as cp
 import numpy as np
 from structlog import get_logger
@@ -182,10 +184,13 @@ class LinearOptimizer:
             "verbose": False,
             "warm_start": True,
             "time_limit": 120,
-            "mip_rel_gap": 0.05,
+            "mip_rel_gap": 0.01,
             "presolve": "on",
             "mip_lp_solver": "ipm",
-            "mip_heuristic_run_rens": False,
+            "mip_heuristic_run_rens": True,
+            "mip_heuristic_run_rins": False,
+            "mip_heuristic_run_feasibility_jump": False,
+            "mip_heuristic_run_root_reduced_cost": False,
             **(solver_opts or {}),
         }
 
@@ -465,6 +470,85 @@ class LinearOptimizer:
 
         terminal_value = self._estimate_terminal_value(prep, self._blocks)
         self._terminal_value_param.value = terminal_value
+
+        # Warm-start / smart initialization for AC activity and power variables.
+        # Strategy:
+        # - Split horizon into two halves.
+        # - Compute total slots required to move the battery by max AC charge per slot
+        #   then distribute slots between halves (ceil(total_slots/2)).
+        # - For each half, activate charge on the lowest-price slots and set p_ch to max.
+        # - For discharge, activate on the highest-price slots (per-half) and set p_dc to load (capped by max).
+        if prep.T > 0 and hasattr(self, "_blocks"):
+            prices = np.asarray(prep.price, dtype=float)
+            loads = np.asarray(prep.load_wh, dtype=float)
+            mid = prep.T // 2
+            for block in self._blocks:
+                inv = block.inverter
+                inv_id = inv.device_id
+                # Only for optimizable inverters with a battery
+                if inv.battery is None or not inv.is_optimizable:
+                    continue
+
+                max_ch_wh = float(inv.battery.max_charge_power_w * prep.dt) if inv.battery else 0.0
+                max_dc_wh = (
+                    float(inv.battery.max_discharge_power_w * prep.dt) if inv.battery else 0.0
+                )
+                if max_ch_wh <= 0 and max_dc_wh <= 0:
+                    continue
+
+                # compute total number of full charge slots needed to move one capacity
+                total_slots = 0
+                try:
+                    total_slots = math.ceil(float(inv.battery.capacity_wh) / max(1e-9, max_ch_wh))
+                except Exception:
+                    total_slots = 0
+                slots_per_half = math.ceil(total_slots / 2) if total_slots > 0 else 0
+
+                # helper to safe-assign cvxpy variable values
+                def _assign_var(var: cp.Variable | cp.Expression | None, arr: np.ndarray) -> None:
+                    if isinstance(var, cp.Variable):
+                        var.value = arr.copy()
+
+                # initialize p_ch and mode_ch_activity
+                if block.mode_ch_activity is not None and isinstance(
+                    block.mode_ch_activity, cp.Variable
+                ):
+                    ch_vals = np.zeros(prep.T, dtype=float)
+                    pch_vals = np.zeros(prep.T, dtype=float)
+                    for s_idx, e_idx in ((0, mid), (mid, prep.T)):
+                        if s_idx >= e_idx or slots_per_half <= 0:
+                            continue
+                        half_prices = prices[s_idx:e_idx]
+                        # indices within half with lowest prices
+                        order = np.argsort(half_prices, kind="stable")
+                        pick = order[: min(slots_per_half, len(order))]
+                        for p in pick:
+                            idx = s_idx + int(p)
+                            ch_vals[idx] = 1.0
+                            pch_vals[idx] = max_ch_wh
+                    _assign_var(block.mode_ch_activity, ch_vals)
+                    _assign_var(block.p_ch, pch_vals)
+
+                # initialize p_dc and mode_dc_activity
+                if block.mode_dc_activity is not None and isinstance(
+                    block.mode_dc_activity, cp.Variable
+                ):
+                    dc_vals = np.zeros(prep.T, dtype=float)
+                    pdc_vals = np.zeros(prep.T, dtype=float)
+                    for s_idx, e_idx in ((0, mid), (mid, prep.T)):
+                        if s_idx >= e_idx or slots_per_half <= 0:
+                            continue
+                        half_prices = prices[s_idx:e_idx]
+                        # indices within half with highest prices
+                        order_desc = np.argsort(-half_prices, kind="stable")
+                        pick = order_desc[: min(slots_per_half, len(order_desc))]
+                        for p in pick:
+                            idx = s_idx + int(p)
+                            dc_vals[idx] = 1.0
+                            # set p_dc to load at this time, but cap by inverter max discharge
+                            pdc_vals[idx] = min(loads[idx], max_dc_wh) if max_dc_wh > 0 else 0.0
+                    _assign_var(block.mode_dc_activity, dc_vals)
+                    _assign_var(block.p_dc, pdc_vals)
 
     def _build_inverter_block(self, inv: InverterBase) -> _InverterModelBlock:
         T = self._T
