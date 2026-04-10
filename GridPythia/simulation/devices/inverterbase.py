@@ -55,10 +55,12 @@ class InverterBase:
         self,
         parameters: InverterParameters,
         battery: Optional[Battery] = None,
+        *,
+        initial_mode: InverterMode = InverterMode.IDLE,
     ):
         self.parameters: InverterParameters = parameters
         self.battery: Optional[Battery] = battery
-        self.current_state: InverterMode = InverterMode.IDLE
+        self.current_state: InverterMode = initial_mode
         self.device_id = self.parameters.device_id
         self._log = logger.bind(device_id=self.device_id, component="inverter")
 

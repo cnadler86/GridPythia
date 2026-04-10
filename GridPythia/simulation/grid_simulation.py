@@ -177,6 +177,11 @@ class GridSimulation:
             for inv in self._inv_list
         ]
 
+        # Save initial inverter states for reset functionality and mode switch cost calculation
+        self._initial_inverter_states: dict[str, InverterMode] = {
+            inv.device_id: inv.current_state for inv in self._inv_list
+        }
+
         self.home_appliances = home_appliances or []
         self.home_appliance_start_hours = [None] * len(self.home_appliances)
         self.home_appliance_start_hour = None
@@ -187,6 +192,14 @@ class GridSimulation:
             dt=dt,
         )
 
+        self._CHARGE_MODES_ARRAY = np.array(
+            [int(InverterMode.AC_CHARGE), int(InverterMode.AC_CHARGE_ZERO_FEED_IN)], dtype=np.int8
+        )
+        self._DISCHARGE_MODES_ARRAY = np.array(
+            [int(InverterMode.DISCHARGE), int(InverterMode.DISCHARGE_ZERO_FEED_IN)], dtype=np.int8
+        )
+        self._IDLE_INT = int(InverterMode.IDLE)
+
         logger.info(
             "simulation_initialized",
             steps=self.simulation_steps,
@@ -196,10 +209,11 @@ class GridSimulation:
         )
 
     def reset(self) -> None:
-        """Reset all battery states to their initial SoC."""
+        """Reset all battery states to their initial SoC and inverter states."""
         for inv in self._inv_list:
             if inv.battery:
                 inv.battery.reset()
+            inv.current_state = self._initial_inverter_states[inv.device_id]
         self.home_appliance_start_hour = None
         if self.home_appliance_start_hours:
             self.home_appliance_start_hours = [None] * len(self.home_appliances)
@@ -475,6 +489,38 @@ class GridSimulation:
             if start_idx < appl_len:
                 copy_len = min(total_idx, appl_len - start_idx)
                 appliance_load_series[:copy_len] = appl_arr[start_idx : start_idx + copy_len]
+
+        for inv in inv_list:
+            modes = inverter_modes_per_dt.get(inv.device_id)
+            if modes is None or len(modes) < 1:
+                continue
+            switch_cost = inv.parameters.mode_switch_cost
+
+            # Prepend initial state (vor Simulation) für korrekte erste Mode-Wechsel-Berechnung
+            arr = np.asarray(modes, dtype=np.int8)
+            initial_int = int(self._initial_inverter_states[inv.device_id])
+            arr_with_initial = np.concatenate([np.array([initial_int], dtype=np.int8), arr])
+            prev = arr_with_initial[:-1]
+            curr = arr_with_initial[1:]
+
+            # Kosten pro Wechsel bestimmen mit vorkompilierten Arrays
+            # 1. Idle <-> aktiv
+            IDLE_INT = self._IDLE_INT
+            idle_to_active = ((prev == IDLE_INT) & (curr != IDLE_INT)) | (
+                (prev != IDLE_INT) & (curr == IDLE_INT)
+            )
+            # 2. Charge <-> Discharge (mit numpy array statt isin())
+            in_charge_prev = np.isin(prev, self._CHARGE_MODES_ARRAY)
+            in_discharge_prev = np.isin(prev, self._DISCHARGE_MODES_ARRAY)
+            in_charge_curr = np.isin(curr, self._CHARGE_MODES_ARRAY)
+            in_discharge_curr = np.isin(curr, self._DISCHARGE_MODES_ARRAY)
+            charge_to_discharge = (in_charge_prev & in_discharge_curr) | (
+                in_discharge_prev & in_charge_curr
+            )
+
+            # Direkt in costs_per_dt schreiben (Index 0 ist jetzt initial->first, Index 1+ sind die normalen)
+            costs_per_dt[: len(prev)][idle_to_active] += switch_cost
+            costs_per_dt[: len(prev)][charge_to_discharge] += 2 * switch_cost
 
         return SimulationResult(
             costs_per_dt=costs_per_dt,
