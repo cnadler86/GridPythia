@@ -303,7 +303,12 @@ class FraunhoferSCModel:
         if load_0 is None:
             load_0 = self.baseload_wh
         a, b = self.params.a, self.params.b
-        r0 = pv_0 / load_0 if load_0 > 1e-9 else 1e9
+        if load_0 <= 1e-9:
+            r0 = 1e9
+        else:
+            # For b < 1, dSS/dr contains r^(b-1) and can diverge at r=0.
+            # Keep a tiny positive floor so linearization remains numerically stable.
+            r0 = max(float(pv_0) / float(load_0), 1e-6)
         exp0 = float(np.exp(-a * r0**b))
         ss0 = 1.0 - exp0
         c_pv = a * b * r0 ** (b - 1) * exp0

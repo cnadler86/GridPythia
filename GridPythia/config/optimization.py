@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from itertools import count
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -93,7 +93,18 @@ class InverterParameters(BaseModel):
 class OptimizationSolverConfig(BaseModel):
     """Optimizer objective and solver-wide settings."""
 
+    provider: Literal["highs", "blackbox"] = "highs"
     objective: Literal["cost", "self_consumption"] = "cost"
+    solver_opts: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("solver_opts", mode="before")
+    @classmethod
+    def _normalize_solver_opts(cls, v: Any) -> dict[str, Any]:
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            return v
+        raise TypeError("solver_opts must be a mapping")
 
 
 class OptimizationConfig(BaseModel):
