@@ -1,10 +1,7 @@
 """Profiling script to identify performance bottlenecks in LinearOptimizer."""
 
 import argparse
-import cProfile
-import io
 import json
-import pstats
 import time
 from pathlib import Path
 
@@ -14,8 +11,29 @@ import yaml
 from GridPythia.config.optimization import BatteryParameters, InverterParameters, OptimizationConfig
 from GridPythia.optimization.solver import LinearOptimizer, OptimizationObjective
 from GridPythia.prediction.prediction import PredictionData
+from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.battery import Battery
 from GridPythia.simulation.devices.inverterbase import InverterBase
+
+# Constants for tuning candidates and run duration
+TUNING_CANDIDATES = [
+    {},
+    {"mip_rel_gap": 0.02},
+    {"mip_rel_gap": 0.03, "presolve": "on"},
+    {"mip_rel_gap": 0.05, "presolve": "on"},
+    {"mip_lp_solver": "simplex"},
+    {"mip_lp_solver": "ipm", "mip_rel_gap": 0.02},
+    {"mip_heuristic_run_rens": False, "mip_heuristic_run_rins": True},
+    {"mip_heuristic_run_rens": True, "mip_heuristic_run_rins": True},
+    {"mip_heuristic_run_root_reduced_cost": True, "mip_rel_gap": 0.03},
+    {"time_limit": 45, "mip_rel_gap": 0.05},
+]
+
+# Constants for default argument values
+DEFAULT_ROLLING_STEPS = 15
+DEFAULT_WINDOW_STEPS = 0
+DEFAULT_WARM_START = True
+DEFAULT_TUNE_ITERS = 10
 
 
 def load_result_json(json_path: str | Path) -> dict:
@@ -170,10 +188,32 @@ def profile_solver():
     - second solve time
     """
     # Determine input path: default to result.json in script dir
-    parser = argparse.ArgumentParser(
-        description="Profile LinearOptimizer using a prediction/result JSON"
-    )
+    parser = argparse.ArgumentParser(description="Profile LinearOptimizer on rolling horizon")
     parser.add_argument("input", nargs="?", help="Path to result or prediction JSON (fixture)")
+    parser.add_argument(
+        "--rolling-steps",
+        type=int,
+        default=DEFAULT_ROLLING_STEPS,
+        help="Number of rolling-horizon solves",
+    )
+    parser.add_argument(
+        "--window-steps",
+        type=int,
+        default=DEFAULT_WINDOW_STEPS,
+        help="Window length in steps (0 -> pred.steps - rolling_steps)",
+    )
+    parser.add_argument(
+        "--warm-start",
+        action="store_true",
+        default=DEFAULT_WARM_START,
+        help="Enable plan-shift warm start between rolling runs",
+    )
+    parser.add_argument(
+        "--tune-iters",
+        type=int,
+        default=DEFAULT_TUNE_ITERS,
+        help="Try up to N predefined solver option sets (max 10)",
+    )
     args = parser.parse_args()
 
     if args.input:
@@ -232,153 +272,199 @@ def profile_solver():
     else:
         inverters = [create_inverter()]
 
-    # Rolling-Horizon: konstante Horizontlänge mit realen Datenfenstern.
-    requested_rolls = 15
+    solver_provider = optimization_cfg.solver.provider if optimization_cfg else "highs"
+    if str(solver_provider).lower() != "highs":
+        raise RuntimeError(
+            f"This profiler currently supports only provider='highs'. Got '{solver_provider}'."
+        )
+
+    objective = OptimizationObjective.MINIMIZE_COST
+    if optimization_cfg and optimization_cfg.solver.objective == "self_consumption":
+        objective = OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
+
+    base_solver_opts = dict(optimization_cfg.solver.solver_opts) if optimization_cfg else {}
+
+    # Rolling horizon layout
+    requested_rolls = max(int(args.rolling_steps), 1)
     num_rolls = min(requested_rolls, 20)
     if pred.steps <= num_rolls:
         raise RuntimeError(
             f"Prediction horizon ({pred.steps}) must be longer than num_rolls ({num_rolls})."
         )
-    window_steps = pred.steps - num_rolls
+    if args.window_steps > 0:
+        window_steps = max(1, min(int(args.window_steps), pred.steps - 1))
+        num_rolls = min(num_rolls, pred.steps - window_steps)
+    else:
+        window_steps = pred.steps - num_rolls
+
     print(f"Rolling horizon windows: {num_rolls}")
     print(f"Window length per solve: {window_steps} steps")
+    print(f"Solver provider: {solver_provider}")
+    print(f"Objective: {objective.value}")
+    print(f"Warm start enabled: {bool(args.warm_start)}")
     print()
 
-    soc_percent = None  # Startwert: aus Config oder Default
-    inverter_mode = None  # Startwert: None (IDLE)
-    results_table = []
+    candidate_overrides = TUNING_CANDIDATES
+    best_opts = dict(base_solver_opts)
+    best_avg = float("inf")
+    best_idx = -1
+    if candidate_overrides:
+        print("Tuning solver options...")
+        tuning_rolls = min(num_rolls, 2)
+        print(f"Tuning horizon subset: {tuning_rolls} rolling windows")
+        for idx, override in enumerate(candidate_overrides, start=1):
+            merged = {**base_solver_opts, **override}
+            summary = _run_rolling_horizon(
+                prediction=pred,
+                inverters=inverters,
+                objective=objective,
+                solver_opts=merged,
+                num_rolls=tuning_rolls,
+                window_steps=window_steps,
+                use_warm_start=bool(args.warm_start),
+                verbose=False,
+            )
+            print(
+                f"  candidate {idx}: avg_solve={summary['avg_solve_time']:.4f}s total={summary['total_solve_time']:.4f}s opts={override}"
+            )
+            if summary["avg_solve_time"] < best_avg:
+                best_avg = float(summary["avg_solve_time"])
+                best_opts = merged
+                best_idx = idx
+
+        print(f"Best candidate: {best_idx} with avg_solve={best_avg:.4f}s")
+        print(f"Best solver_opts: {best_opts}")
+        print()
+
+    final = _run_rolling_horizon(
+        prediction=pred,
+        inverters=inverters,
+        objective=objective,
+        solver_opts=best_opts,
+        num_rolls=num_rolls,
+        window_steps=window_steps,
+        use_warm_start=bool(args.warm_start),
+        verbose=True,
+    )
+
+    # Am Ende: Tabelle ausgeben
+    print("\n==================== ROLLING HORIZON SUMMARY ====================")
+    print(
+        f"{'Step':>4} | {'Steps':>5} | {'Build [s]':>9} | {'Solve [s]':>9} | {'Solver [s]':>10} | {'Status':>12} | {'Obj':>12}"
+    )
+    print("-" * 92)
+    for row in final["rows"]:
+        print(
+            f"{row['roll']:>4} | {row['steps']:>5} | {row['build_time']:9.4f} | {row['solve_time']:9.4f} | {row['solver_time']:10.4f} | {row['status']:>12} | {row['objective']:12.6f}"
+        )
+    print(
+        f"TOTAL solve wall time: {final['total_solve_time']:.4f}s (avg {final['avg_solve_time']:.4f}s)"
+    )
+
+
+def _run_rolling_horizon(
+    *,
+    prediction: PredictionData,
+    inverters: list[InverterBase],
+    objective: OptimizationObjective,
+    solver_opts: dict,
+    num_rolls: int,
+    window_steps: int,
+    use_warm_start: bool,
+    verbose: bool,
+) -> dict:
+    rows: list[dict] = []
     optimizer: LinearOptimizer | None = None
+    initial_modes: dict[str, InverterMode] | None = None
+    initial_soc_wh: dict[str, float] | None = None
+    warm_start_plan: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+    total_solve_time = 0.0
 
     for roll in range(num_rolls):
-        pred_current = slice_prediction_window(pred, start_idx=roll, length=window_steps)
-        print(f"\n{'=' * 30} ROLLING HORIZON STEP {roll + 1} / {num_rolls} {'=' * 30}")
+        pred_current = slice_prediction_window(prediction, start_idx=roll, length=window_steps)
+        if verbose:
+            print(f"\n{'=' * 30} ROLLING HORIZON STEP {roll + 1} / {num_rolls} {'=' * 30}")
 
-        # Setze initial SoC und initial Mode für alle Batterien
-
-        for inv in inverters:
-            if inv.battery is not None:
-                params = inv.battery.parameters.model_copy(
-                    update={"initial_soc_percentage": soc_percent}
-                    if soc_percent is not None
-                    else {}
-                )
-                inv.battery.parameters = params
-                inv.battery._setup()
-                # Setze explizit den aktuellen SoC in Wh
-                if soc_percent is not None:
-                    inv.battery.soc_wh = inv.battery.capacity_wh * soc_percent / 100.0
-
-        # initial_modes für Optimizer vorbereiten (immer mit dem mode aus dem letzten Run, analog zu soc_percent)
-        initial_modes = None
-        if inverter_mode is not None:
-            initial_modes = {inv.device_id: inverter_mode for inv in inverters}
-
-        # Reuse one optimizer model for all fixed-size windows to avoid repeated recompilation.
-        pr = cProfile.Profile()
-        pr.enable()
+        # Apply runtime start state to physical objects
+        if initial_soc_wh:
+            for inv in inverters:
+                if inv.battery is None:
+                    continue
+                start = initial_soc_wh.get(inv.device_id)
+                if start is not None:
+                    inv.battery.soc_wh = float(
+                        np.clip(start, inv.battery.min_soc_wh, inv.battery.max_soc_wh)
+                    )
 
         t_build = 0.0
         if optimizer is None:
-            t_build_start = time.perf_counter()
+            t0_build = time.perf_counter()
             optimizer = LinearOptimizer(inverters, pred_current)
-            t_build = time.perf_counter() - t_build_start
+            t_build = time.perf_counter() - t0_build
         else:
             optimizer.prediction = pred_current
 
-        t_solve_start = time.perf_counter()
+        t0 = time.perf_counter()
         solution = optimizer.solve(
-            OptimizationObjective.MINIMIZE_COST,
+            objective=objective,
+            solver_opts=solver_opts,
             validate_with_simulation=False,
             initial_modes=initial_modes,
+            warm_start_plan=warm_start_plan if use_warm_start else None,
         )
-        t_solve = time.perf_counter() - t_solve_start
+        t_solve = time.perf_counter() - t0
+        total_solve_time += t_solve
 
-        pr.disable()
+        # next initial state is state right after first control interval
+        next_modes: dict[str, InverterMode] = {}
+        next_soc_wh: dict[str, float] = {}
+        for plan in solution.inverter_plans:
+            if plan.modes.size > 0:
+                next_modes[plan.device_id] = InverterMode(int(plan.modes[0]))
+            soc_trace = solution.result.battery_wh_per_dt.get(plan.device_id)
+            if soc_trace is not None and len(soc_trace) > 0:
+                next_soc_wh[plan.device_id] = float(soc_trace[0])
 
-        s = io.StringIO()
-        ps = pstats.Stats(pr, stream=s).sort_stats("cumulative")
-        ps.print_stats(15)
-        print(s.getvalue())
+        initial_modes = next_modes or None
+        initial_soc_wh = next_soc_wh or None
 
-        # Summary
-        print(f"Build time: {t_build:.4f} s")
-        print(f"Solve wall time: {t_solve:.4f} s (solver reported {solution.solve_time_s:.4f} s)")
-        print(f"Status: {solution.solver_status}")
-        print(f"Objective value (problem): {getattr(solution.result, 'total_cost', 'N/A')}")
+        if use_warm_start:
+            warm_start_plan = LinearOptimizer.shift_solution_for_next_horizon(
+                solution,
+                horizon_steps=window_steps,
+                shift_steps=1,
+            )
 
-        # Rolling-Horizon: Hole SoC und Mode für nächsten Schritt (Index 1)
-        soc_dict = getattr(solution.result, "battery_soc_percentage_per_dt", None)
-        modes_dict = getattr(solution.result, "inverter_modes_per_dt", None)
-        soc_used = None
-        mode_used = None
-        inv_id = None
-        # prefer index 1 (next step) — fall back to index 0 if horizon==1
-        if soc_dict and isinstance(soc_dict, dict):
-            inv_ids = list(soc_dict.keys())
-            if inv_ids:
-                inv_id = inv_ids[0]
-                arr = soc_dict[inv_id]
-                if isinstance(arr, (list, np.ndarray)) and len(arr) > 1:
-                    soc_used = float(arr[1])
-                elif isinstance(arr, (list, np.ndarray)) and len(arr) > 0:
-                    soc_used = float(arr[0])
-                    print("WARN: SoC-Array nur Länge 1, verwende Index 0 für nächsten Start.")
-                else:
-                    print("WARN: SoC-Array zu kurz, initial SoC bleibt unverändert.")
-            else:
-                print("WARN: Keine Inverter-IDs im SoC-Ergebnis.")
-        else:
-            print("WARN: Ergebnis hat kein battery_soc_percentage_per_dt-Attribut.")
-
-        if modes_dict and isinstance(modes_dict, dict):
-            inv_ids = list(modes_dict.keys())
-            if inv_ids:
-                inv_id = inv_ids[0]
-                arr = modes_dict[inv_id]
-                if isinstance(arr, (list, np.ndarray)) and len(arr) > 1:
-                    mode_used = int(arr[1])
-                elif isinstance(arr, (list, np.ndarray)) and len(arr) > 0:
-                    mode_used = int(arr[0])
-                    print("WARN: Mode-Array nur Länge 1, verwende Index 0 für nächsten Start.")
-                else:
-                    print("WARN: Mode-Array zu kurz, initial Mode bleibt unverändert.")
-            else:
-                print("WARN: Keine Inverter-IDs im Mode-Ergebnis.")
-        else:
-            print("WARN: Ergebnis hat kein inverter_modes_per_dt-Attribut.")
-
-        if soc_used is not None:
-            print(f"Initial SoC für nächsten Schritt: {soc_used:.2f}% (aus {inv_id})")
-            soc_percent = soc_used
-        if mode_used is not None:
-            print(f"Initial Mode für nächsten Schritt: {mode_used} (aus {inv_id})")
-            inverter_mode = mode_used
-
-        # Ergebnisse für Tabelle sammeln
-        results_table.append(
+        objective_value = (
+            float(solution.result.total_cost)
+            if objective == OptimizationObjective.MINIMIZE_COST
+            else float(solution.result.total_self_consumption)
+        )
+        rows.append(
             {
                 "roll": roll + 1,
                 "build_time": t_build,
                 "solve_time": t_solve,
                 "solver_time": solution.solve_time_s,
                 "status": solution.solver_status,
-                "objective": getattr(solution.result, "total_cost", None),
-                "soc_next": soc_used,
-                "mode_next": mode_used,
+                "objective": objective_value,
                 "steps": pred_current.steps,
             }
         )
 
-    # Am Ende: Tabelle ausgeben
-    print("\n==================== ROLLING HORIZON SUMMARY ====================")
-    print(
-        f"{'Step':>4} | {'Steps':>5} | {'Build [s]':>9} | {'Solve [s]':>9} | {'Solver [s]':>10} | {'Status':>8} | {'Obj':>12} | {'SoC_next':>9} | {'Mode_next':>9}"
-    )
-    print("-" * 100)
-    for row in results_table:
-        print(
-            f"{row['roll']:>4} | {row['steps']:>5} | {row['build_time']:9.4f} | {row['solve_time']:9.4f} | {row['solver_time']:10.4f} | {row['status']:>8} | {row['objective']:12.6f} | {row['soc_next']:.2f} | {str(row['mode_next']):>9}"
-        )
+        if verbose:
+            print(f"Build time: {t_build:.4f} s")
+            print(
+                f"Solve wall time: {t_solve:.4f} s (solver reported {solution.solve_time_s:.4f} s)"
+            )
+            print(f"Status: {solution.solver_status}")
+            print(f"Objective value: {objective_value:.6f}")
+
+    return {
+        "rows": rows,
+        "total_solve_time": total_solve_time,
+        "avg_solve_time": total_solve_time / max(len(rows), 1),
+    }
 
 
 if __name__ == "__main__":

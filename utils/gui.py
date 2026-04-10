@@ -392,15 +392,28 @@ class _Tab:
 
     def _build_layout(self) -> None:
         # Left panel (fixed width)
-        left = ttk.Frame(self.frame, width=self._LEFT_WIDTH)
-        left.grid(row=0, column=0, sticky="nsew", padx=(4, 2), pady=4)
-        left.grid_propagate(False)
-        left.columnconfigure(0, weight=1)
-        left.rowconfigure(1, weight=1)  # config section expands
+        left_frame = ttk.Frame(self.frame, width=self._LEFT_WIDTH)
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=(4, 2), pady=4)
+        left_frame.grid_propagate(False)
+
+        # Add a canvas and scrollbar for the left panel
+        canvas = tk.Canvas(left_frame, width=275)  # Adjusted width to make the window narrower
+        scrollbar = ttk.Scrollbar(left_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
         # Row 0: provider combobox
         if self.PROVIDERS:
-            pf = ttk.LabelFrame(left, text="Provider", padding=4)
+            pf = ttk.LabelFrame(scrollable_frame, text="Provider", padding=4)
             pf.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
             pf.columnconfigure(0, weight=1)
             self._prov_var = tk.StringVar(value=self._initial_provider())
@@ -409,17 +422,18 @@ class _Tab:
                 textvariable=self._prov_var,
                 values=self.PROVIDERS,
                 state="readonly",
+                width=14,  # Adjusted width to make the dropdown narrower
             )
             cb.grid(sticky="ew")
             cb.bind("<<ComboboxSelected>>", lambda _: self._rebuild())
 
         # Row 1: dynamic config (expandable)
-        self._cfg = ttk.LabelFrame(left, text="Configuration", padding=4)
+        self._cfg = ttk.LabelFrame(scrollable_frame, text="Configuration", padding=4)
         self._cfg.grid(row=1, column=0, sticky="nsew", padx=4, pady=2)
         self._cfg.columnconfigure(1, weight=1)
 
         # Row 2: fetch button + status
-        af = ttk.Frame(left)
+        af = ttk.Frame(scrollable_frame)
         af.grid(row=2, column=0, sticky="ew", padx=4, pady=(2, 6))
         af.columnconfigure(0, weight=1)
         ttk.Button(af, text="▶  Fetch", command=self.fetch).grid(row=0, column=0, sticky="ew")
@@ -428,7 +442,7 @@ class _Tab:
             af,
             textvariable=self._status,
             foreground="#666",
-            wraplength=235,
+            wraplength=200,  # Adjusted wrap length to fit narrower window
             justify="left",
         ).grid(row=1, column=0, sticky="w", pady=(3, 0))
 
@@ -438,7 +452,7 @@ class _Tab:
         right.rowconfigure(0, weight=1)
         right.columnconfigure(0, weight=1)
 
-        self._fig = Figure(figsize=(8, 5), dpi=100, tight_layout=True)
+        self._fig = Figure(figsize=(6, 4), dpi=100, tight_layout=True)  # Adjusted figure size
         self._canvas = FigureCanvasTkAgg(self._fig, master=right)
         self._canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
         tb = ttk.Frame(right)
@@ -1091,8 +1105,46 @@ class OptimizationTab(_Tab):
     _prediction_cache: PredictionData | None = None
     _prediction_cache_sig: str | None = None
 
+    @staticmethod
+    def _solver_opt_str(opts: Mapping[str, Any], key: str, default: str) -> str:
+        value = opts.get(key, default)
+        return str(value)
+
+    @staticmethod
+    def _solver_opt_float(opts: Mapping[str, Any], key: str, default: float) -> str:
+        value = opts.get(key, default)
+        try:
+            return str(float(value))
+        except (TypeError, ValueError):
+            return str(default)
+
+    @staticmethod
+    def _solver_opt_int(opts: Mapping[str, Any], key: str, default: int) -> str:
+        value = opts.get(key, default)
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            return str(default)
+
+    @staticmethod
+    def _solver_opt_bool(opts: Mapping[str, Any], key: str, default: bool) -> bool:
+        value = opts.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in {"1", "true", "yes", "on"}:
+                return True
+            if v in {"0", "false", "no", "off"}:
+                return False
+        return default
+
     def _build_fields(self) -> None:
         f, row = self._cfg, 0
+        solver_cfg = self.app.app_config.optimization.solver
+        solver_opts: Mapping[str, Any] = solver_cfg.solver_opts
 
         objective_raw = self.app.app_config.optimization.solver.objective
         objective_default = (
@@ -1106,6 +1158,148 @@ class OptimizationTab(_Tab):
             ["Minimize Cost", "Maximize Self-consumption"],
             objective_default,
         )
+        row += 1
+
+        # ── Solver configuration (CVXPY + HiGHS) ────────────────────
+        ttk.Label(
+            f,
+            text="Solver (HiGHS)",
+            foreground="#555",
+            font=("TkDefaultFont", 8, "bold"),
+        ).grid(row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 0))
+        row += 1
+
+        self._solver_time_limit = _field(
+            f,
+            row,
+            "Time limit [s]",
+            self._solver_opt_float(solver_opts, "time_limit", 120.0),
+        )
+        row += 1
+        self._solver_mip_rel_gap = _field(
+            f,
+            row,
+            "MIP rel gap",
+            self._solver_opt_float(solver_opts, "mip_rel_gap", 0.05),
+        )
+        row += 1
+        self._solver_presolve = _combofield(
+            f,
+            row,
+            "Presolve",
+            ["choose", "on", "off"],
+            self._solver_opt_str(solver_opts, "presolve", "on"),
+        )
+        row += 1
+        self._solver_mip_lp_solver = _combofield(
+            f,
+            row,
+            "MIP LP solver",
+            ["choose", "simplex", "ipm", "ipx", "hipo"],
+            self._solver_opt_str(solver_opts, "mip_lp_solver", "choose"),
+        )
+        row += 1
+        self._solver_parallel = _combofield(
+            f,
+            row,
+            "Parallel",
+            ["choose", "on", "off"],
+            self._solver_opt_str(solver_opts, "parallel", "choose"),
+        )
+        row += 1
+        self._solver_threads = _field(
+            f,
+            row,
+            "Threads (0=auto)",
+            self._solver_opt_int(solver_opts, "threads", 0),
+        )
+        row += 1
+        self._solver_random_seed = _field(
+            f,
+            row,
+            "Random seed",
+            self._solver_opt_int(solver_opts, "random_seed", 0),
+        )
+        row += 1
+        self._solver_mip_heuristic_effort = _field(
+            f,
+            row,
+            "Heuristic effort [0..1]",
+            self._solver_opt_float(solver_opts, "mip_heuristic_effort", 0.05),
+        )
+        row += 1
+
+        self._solver_mip_detect_symmetry = tk.BooleanVar(
+            value=self._solver_opt_bool(solver_opts, "mip_detect_symmetry", True)
+        )
+        ttk.Checkbutton(
+            f,
+            text="Detect symmetry",
+            variable=self._solver_mip_detect_symmetry,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
+        row += 1
+        self._solver_mip_allow_restart = tk.BooleanVar(
+            value=self._solver_opt_bool(solver_opts, "mip_allow_restart", True)
+        )
+        ttk.Checkbutton(
+            f,
+            text="Allow MIP restart",
+            variable=self._solver_mip_allow_restart,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
+        row += 1
+        self._solver_mip_heuristic_run_rens = tk.BooleanVar(
+            value=self._solver_opt_bool(solver_opts, "mip_heuristic_run_rens", True)
+        )
+        ttk.Checkbutton(
+            f,
+            text="Heuristic RENS",
+            variable=self._solver_mip_heuristic_run_rens,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
+        row += 1
+        self._solver_mip_heuristic_run_rins = tk.BooleanVar(
+            value=self._solver_opt_bool(solver_opts, "mip_heuristic_run_rins", True)
+        )
+        ttk.Checkbutton(
+            f,
+            text="Heuristic RINS",
+            variable=self._solver_mip_heuristic_run_rins,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
+        row += 1
+        self._solver_mip_heuristic_run_feas_jump = tk.BooleanVar(
+            value=self._solver_opt_bool(solver_opts, "mip_heuristic_run_feasibility_jump", True)
+        )
+        ttk.Checkbutton(
+            f,
+            text="Heuristic feasibility jump",
+            variable=self._solver_mip_heuristic_run_feas_jump,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
+        row += 1
+        self._solver_mip_heuristic_run_root_rc = tk.BooleanVar(
+            value=self._solver_opt_bool(solver_opts, "mip_heuristic_run_root_reduced_cost", True)
+        )
+        ttk.Checkbutton(
+            f,
+            text="Heuristic root reduced cost",
+            variable=self._solver_mip_heuristic_run_root_rc,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
+        row += 1
+        self._solver_verbose = tk.BooleanVar(
+            value=self._solver_opt_bool(solver_opts, "verbose", False)
+        )
+        ttk.Checkbutton(
+            f,
+            text="Verbose solver output",
+            variable=self._solver_verbose,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
+        row += 1
+        self._solver_warm_start = tk.BooleanVar(
+            value=self._solver_opt_bool(solver_opts, "warm_start", True)
+        )
+        ttk.Checkbutton(
+            f,
+            text="Warm start",
+            variable=self._solver_warm_start,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", **_PAD)
         row += 1
 
         # ── Battery configuration ─────────────────────────────────────
@@ -1248,6 +1442,68 @@ class OptimizationTab(_Tab):
         ttk.Button(f, text="▶ Run Optimization", command=self.run_optimization).grid(
             row=row, column=0, columnspan=2, sticky="ew"
         )
+
+    def _collect_solver_opts(self) -> dict[str, Any]:
+        """Collect typed solver options from GUI fields for CVXPY + HiGHS."""
+
+        def _float_from(var: tk.StringVar, label: str) -> float:
+            raw = var.get().strip()
+            try:
+                return float(raw)
+            except ValueError as exc:
+                raise ValueError(f"{label} must be a number (got {raw!r})") from exc
+
+        def _int_from(var: tk.StringVar, label: str) -> int:
+            raw = var.get().strip()
+            try:
+                return int(raw)
+            except ValueError as exc:
+                raise ValueError(f"{label} must be an integer (got {raw!r})") from exc
+
+        time_limit = _float_from(self._solver_time_limit, "Time limit")
+        mip_rel_gap = _float_from(self._solver_mip_rel_gap, "MIP rel gap")
+        mip_heuristic_effort = _float_from(
+            self._solver_mip_heuristic_effort,
+            "Heuristic effort",
+        )
+        threads = _int_from(self._solver_threads, "Threads")
+        random_seed = _int_from(self._solver_random_seed, "Random seed")
+
+        if time_limit < 0.0:
+            raise ValueError("Time limit must be >= 0")
+        if mip_rel_gap < 0.0:
+            raise ValueError("MIP rel gap must be >= 0")
+        if not 0.0 <= mip_heuristic_effort <= 1.0:
+            raise ValueError("Heuristic effort must be in [0, 1]")
+        if threads < 0:
+            raise ValueError("Threads must be >= 0")
+        if random_seed < 0:
+            raise ValueError("Random seed must be >= 0")
+
+        return {
+            # CVXPY-level toggles
+            "verbose": bool(self._solver_verbose.get()),
+            "warm_start": bool(self._solver_warm_start.get()),
+            # HiGHS options
+            "time_limit": time_limit,
+            "mip_rel_gap": mip_rel_gap,
+            "presolve": self._solver_presolve.get().strip(),
+            "mip_lp_solver": self._solver_mip_lp_solver.get().strip(),
+            "parallel": self._solver_parallel.get().strip(),
+            "threads": threads,
+            "random_seed": random_seed,
+            "mip_detect_symmetry": bool(self._solver_mip_detect_symmetry.get()),
+            "mip_allow_restart": bool(self._solver_mip_allow_restart.get()),
+            "mip_heuristic_effort": mip_heuristic_effort,
+            "mip_heuristic_run_rens": bool(self._solver_mip_heuristic_run_rens.get()),
+            "mip_heuristic_run_rins": bool(self._solver_mip_heuristic_run_rins.get()),
+            "mip_heuristic_run_feasibility_jump": bool(
+                self._solver_mip_heuristic_run_feas_jump.get()
+            ),
+            "mip_heuristic_run_root_reduced_cost": bool(
+                self._solver_mip_heuristic_run_root_rc.get()
+            ),
+        }
 
     def make_provider(self) -> object:
         """Not used for OptimizationTab; return None."""
@@ -1482,14 +1738,17 @@ class OptimizationTab(_Tab):
                     optimizer = self._get_cached_optimizer(inv_obj, hours, pdata)
                     # Prediction is runtime data and should be set per solve call.
                     optimizer.prediction = pdata
+                    solver_opts = self._collect_solver_opts()
                     logger.info(
                         "optimizer_build_start",
                         objective=objective.value,
                         inverters=1,
+                        solver_opts=solver_opts,
                     )
                     sol: LinearSolution = await asyncio.to_thread(
                         lambda: optimizer.solve(
                             objective=objective,
+                            solver_opts=solver_opts,
                             validate_with_simulation=False,
                         )
                     )
