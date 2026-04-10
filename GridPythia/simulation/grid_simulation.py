@@ -248,18 +248,7 @@ class GridSimulation:
 
         for idx, sb in enumerate(step_buf):
             m = sb.mode
-            if sb.ac_energy_wh is not None and m != InverterMode.IDLE:
-                res = sb.inverter.process_energy(
-                    generation=sb.generation,
-                    mode=m,
-                    dt=dt,
-                    energy_wh=sb.ac_energy_wh,
-                )
-                static_ie += res.ac_output_wh - res.ac_input_wh
-                static_pv += res.pv_ac_wh
-                losses += res.losses_wh
-                pv_per_inv[idx] = res.pv_ac_wh
-            elif m == _ZFI_D:
+            if m == _ZFI_D:
                 zfi_d = (idx, sb)
             elif m == _ZFI_C:
                 zfi_c = (idx, sb)

@@ -371,3 +371,56 @@ def test_simulation_appliance_output_matches_window(grid_simulation: GridSimulat
     assert result.home_appliance_load_per_dt[0] == pytest.approx(20.0)
     assert result.home_appliance_load_per_dt[1] == pytest.approx(30.0)
     assert np.all(result.home_appliance_load_per_dt[2:] == 0.0)
+
+
+def test_simulation_uses_rate_for_non_zero_feed_modes_even_if_energy_is_present() -> None:
+    prediction = PredictionData(
+        timestamps=[datetime(2025, 1, 1), datetime(2025, 1, 1, 1)],
+        dt_hours=1.0,
+        load_wh=np.array([0.0, 0.0], dtype=np.float32),
+        electricprice_eur_wh=np.array([0.1, 0.1], dtype=np.float32),
+        feedintariff_eur_wh=np.zeros(2, dtype=np.float32),
+        pv_by_inverter={},
+    )
+    battery = Battery(
+        BatteryParameters(
+            device_id="battery-rate-energy",
+            capacity_wh=2000,
+            initial_soc_percentage=20,
+            min_soc_percentage=20,
+            max_soc_percentage=100,
+            max_charge_power_w=1000,
+            max_discharge_power_w=1000,
+        )
+    )
+    inverter = InverterBase(
+        InverterParameters(
+            device_id="inverter-rate-energy",
+            battery_id="battery-rate-energy",
+            has_pv=False,
+            max_ac_output_power_w=1000,
+            max_ac_charge_power_w=1000,
+            dc_to_ac_efficiency=1.0,
+            ac_to_dc_efficiency=1.0,
+            zero_feed_in=False,
+            active_inverter_consumption_w=0.0,
+        ),
+        battery=battery,
+    )
+    sim = GridSimulation(prediction=prediction, inverters=[inverter])
+
+    modes = {
+        inverter.device_id: np.array([int(InverterMode.AC_CHARGE), int(InverterMode.IDLE)], dtype=np.int32)
+    }
+    rates = {inverter.device_id: np.array([50, 0], dtype=np.int32)}
+    energies = {inverter.device_id: np.array([0.0, np.nan], dtype=np.float32)}
+
+    result = sim.simulate(
+        inverter_modes=modes,
+        inverter_ac_rates=rates,
+        inverter_ac_energy_wh=energies,
+        dt=prediction.dt_hours,
+    )
+
+    assert result is not None
+    assert result.battery_wh_per_dt[inverter.device_id][0] > battery.min_soc_wh
