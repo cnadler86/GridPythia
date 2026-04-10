@@ -207,8 +207,14 @@ class InverterBase:
         active_w = self.parameters.active_inverter_consumption_w
         if active_w > 0.0 and mode != InverterMode.IDLE:
             active_wh = active_w * dt
-            result.ac_input_wh += active_wh
-            result.losses_wh += active_wh
+            # Versuche, den Eigenverbrauch aus der Batterie zu decken
+            battery_loss = 0.0
+            from_grid = active_wh
+            if self.battery is not None:
+                delivered, battery_loss = self.battery.discharge_energy(active_wh, dt=dt)
+                from_grid = max(active_wh - delivered, 0.0)
+            result.ac_input_wh += from_grid
+            result.losses_wh += battery_loss + from_grid
 
         return result
 

@@ -1,4 +1,5 @@
 """Tests for topology-aware InverterBase."""
+from contourpy.util.data import simple
 
 import pytest
 
@@ -254,6 +255,7 @@ class TestActiveInverterConsumption:
             generation=0.0, mode=InverterMode.DISCHARGE, dt=dt, ac_rate_pct=50
         )
 
+        simple_battery._initial_soc_wh = simple_battery.min_soc_wh
         simple_battery.reset()
         inv_with = self._make_inv(simple_battery, active_w=active_w)
         res_with = inv_with.process_energy(
@@ -263,7 +265,7 @@ class TestActiveInverterConsumption:
         assert res_with.ac_input_wh == pytest.approx(res_no.ac_input_wh + expected_extra, abs=1e-6)
         assert res_with.losses_wh == pytest.approx(res_no.losses_wh + expected_extra, abs=1e-6)
 
-    def test_ac_charge_mode_adds_active_consumption(self, simple_battery: Battery) -> None:
+    def test_active_w_lowers_soc(self, simple_battery: Battery) -> None:
         """AC_CHARGE mode should also add active consumption to ac_input_wh and losses_wh."""
         active_w = 20.0
         dt = 0.25
@@ -273,15 +275,14 @@ class TestActiveInverterConsumption:
         res_no = inv_no.process_energy(
             generation=0.0, mode=InverterMode.AC_CHARGE, dt=dt, ac_rate_pct=100
         )
-
+        soc_wh_no = simple_battery.soc_wh
         simple_battery.reset()
         inv_with = self._make_inv(simple_battery, active_w=active_w)
         res_with = inv_with.process_energy(
             generation=0.0, mode=InverterMode.AC_CHARGE, dt=dt, ac_rate_pct=100
         )
-
-        assert res_with.ac_input_wh == pytest.approx(res_no.ac_input_wh + expected_extra, abs=1e-6)
-        assert res_with.losses_wh == pytest.approx(res_no.losses_wh + expected_extra, abs=1e-6)
+        soc_wh = simple_battery.soc_wh
+        assert soc_wh_no == soc_wh + expected_extra
 
     def test_zero_active_consumption_leaves_result_unchanged(self, simple_battery: Battery) -> None:
         """When active_inverter_consumption_w=0 the result must be identical to the baseline."""
