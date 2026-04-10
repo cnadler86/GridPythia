@@ -36,6 +36,20 @@ from GridPythia.simulation.grid_simulation import GridSimulation, SimulationResu
 logger = get_logger(__name__)
 
 
+_DEFAULT_HIGHS_OPTS = {
+    "verbose": True,
+    "warm_start": True,
+    "time_limit": 120,
+    "mip_rel_gap": 0.05,
+    "presolve": "on",
+    "mip_lp_solver": "ipm",
+    "mip_heuristic_run_rens": True,
+    "mip_heuristic_run_rins": False,
+    "mip_heuristic_run_feasibility_jump": False,
+    "mip_heuristic_run_root_reduced_cost": False,
+}
+
+
 class OptimizationObjective(str, Enum):
     """Supported objective functions for :class:`LinearOptimizer`."""
 
@@ -86,6 +100,15 @@ class LinearSolution:
     parity_report: SimulationParityReport | None = None
     simulation_result: SimulationResult | None = None
     prediction: dict | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RollingWarmStartPlan:
+    """Warm-start seed for one inverter over one horizon."""
+
+    device_id: str
+    modes: np.ndarray
+    rates: np.ndarray
 
 
 @dataclass
@@ -150,9 +173,10 @@ class LinearOptimizer:
     def solve(
         self,
         objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
-        solver_opts: dict | None = None,
+        solver_opts: dict = {},
         validate_with_simulation: bool = False,
         initial_modes: Mapping[str, InverterMode | int] | None = None,
+        warm_start_plan: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> LinearSolution:
         """Solve the compiled MILP with updated runtime data."""
         prep = self._prepare_inputs()
@@ -170,6 +194,7 @@ class LinearOptimizer:
             )
 
         self._update_runtime_parameters(prep, normalized_initial_modes)
+        self._apply_warm_start_values(prep, warm_start_plan)
 
         problem = self._problems[objective]
         size = problem.size_metrics
@@ -180,19 +205,8 @@ class LinearOptimizer:
             num_constraints=size.num_scalar_eq_constr + size.num_scalar_leq_constr,
         )
 
-        opts = {
-            "verbose": False,
-            "warm_start": True,
-            "time_limit": 120,
-            "mip_rel_gap": 0.01,
-            "presolve": "on",
-            "mip_lp_solver": "ipm",
-            "mip_heuristic_run_rens": True,
-            "mip_heuristic_run_rins": False,
-            "mip_heuristic_run_feasibility_jump": False,
-            "mip_heuristic_run_root_reduced_cost": False,
-            **(solver_opts or {}),
-        }
+        opts = _DEFAULT_HIGHS_OPTS
+        opts.update(solver_opts)
 
         t0 = time.perf_counter()
         try:
@@ -263,6 +277,55 @@ class LinearOptimizer:
 
         return solution
 
+    @staticmethod
+    def shift_solution_for_next_horizon(
+        solution: LinearSolution,
+        horizon_steps: int,
+        *,
+        shift_steps: int = 1,
+    ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """Shift a solved plan in time to seed the next rolling-horizon solve."""
+        if horizon_steps <= 0:
+            return {}
+
+        shift = max(int(shift_steps), 0)
+        out: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for inv_plan in solution.inverter_plans:
+            src_modes = np.asarray(inv_plan.modes, dtype=np.int32)
+            src_rates = np.asarray(inv_plan.rates, dtype=np.int32)
+            if src_modes.size == 0:
+                out[inv_plan.device_id] = (
+                    np.full(horizon_steps, int(InverterMode.IDLE), dtype=np.int8),
+                    np.zeros(horizon_steps, dtype=np.int32),
+                )
+                continue
+
+            shifted_modes = np.empty(horizon_steps, dtype=np.int8)
+            shifted_rates = np.zeros(horizon_steps, dtype=np.int32)
+            src_start = min(shift, int(src_modes.size))
+            copied = min(max(int(src_modes.size) - src_start, 0), horizon_steps)
+            if copied > 0:
+                shifted_modes[:copied] = src_modes[src_start : src_start + copied].astype(np.int8)
+                shifted_rates[:copied] = src_rates[src_start : src_start + copied].astype(np.int32)
+
+            fill_mode = int(src_modes[-1])
+            fill_rate = int(src_rates[-1])
+            if copied < horizon_steps:
+                shifted_modes[copied:] = np.int8(fill_mode)
+                shifted_rates[copied:] = np.int32(fill_rate)
+
+            zfi_mask = np.isin(
+                shifted_modes,
+                [
+                    int(InverterMode.IDLE),
+                    int(InverterMode.DISCHARGE_ZERO_FEED_IN),
+                    int(InverterMode.AC_CHARGE_ZERO_FEED_IN),
+                ],
+            )
+            shifted_rates[zfi_mask] = 0
+            out[inv_plan.device_id] = (shifted_modes, shifted_rates)
+        return out
+
     def _prepare_inputs(self) -> _PreparedInputs:
         solver_view = self.prediction.to_solver_view(dtype=np.float64)
         return _PreparedInputs(
@@ -319,35 +382,17 @@ class LinearOptimizer:
         total_p_dc_terms: list[object] = []
         total_pv_ac_terms: list[object] = [self._pv_external_param]
         total_pv_ac_decision_terms: list[object] = []
-        total_inv_consumption_terms: list[object] = []
-
         blocks = [self._build_inverter_block(inv) for inv in self.inverters]
-        for inv, block in zip(self.inverters, blocks, strict=False):
+        for _inv, block in zip(self.inverters, blocks, strict=False):
             total_p_ch_terms.append(cast(cp.Expression, block.p_ch))
             total_p_dc_terms.append(cast(cp.Expression, block.p_dc))
             total_pv_ac_terms.append(cast(cp.Expression, block.pv_ac))
             total_pv_ac_decision_terms.append(cast(cp.Expression, block.pv_ac))
 
-            active_w = inv.parameters.active_inverter_consumption_w
-            if active_w > 0.0:
-                active_wh = active_w * self._dt
-                if block.mode_ch_activity is not None and block.mode_dc_activity is not None:
-                    is_active = block.mode_ch_activity + block.mode_dc_activity
-                elif block.mode_ch_activity is not None:
-                    is_active = block.mode_ch_activity
-                elif block.mode_dc_activity is not None:
-                    is_active = block.mode_dc_activity
-                else:
-                    is_active = None
-                if is_active is not None:
-                    total_inv_consumption_terms.append(cp.multiply(active_wh, is_active))
-
         total_p_ch = self._sum_terms(total_p_ch_terms, self._T)
         total_p_dc = self._sum_terms(total_p_dc_terms, self._T)
         total_pv_ac = self._sum_terms(total_pv_ac_terms, self._T)
         total_pv_ac_decision = self._sum_terms(total_pv_ac_decision_terms, self._T)
-        total_inv_consumption = self._sum_terms(total_inv_consumption_terms, self._T)
-
         self._constraints.extend(
             [
                 self._pv_self - cp.multiply(self._c_pv_param, total_pv_ac_decision)
@@ -359,12 +404,7 @@ class LinearOptimizer:
 
         self._constraints.append(
             self._g_import - self._g_feedin
-            == self._load_param
-            + total_p_ch
-            + total_inv_consumption
-            - total_p_dc
-            + total_pv_ac
-            - self._pv_self
+            == self._load_param + total_p_ch - total_p_dc + total_pv_ac - self._pv_self
         )
 
         terminal_terms = [block.soc[-1] for block in blocks if block.soc is not None]
@@ -434,9 +474,13 @@ class LinearOptimizer:
 
         c_pv_arr = np.empty(prep.T, dtype=float)
         rhs_arr = np.empty(prep.T, dtype=float)
+        total_pv_arr = np.zeros(prep.T, dtype=float)
+        for arr in prep.pv_by_source.values():
+            total_pv_arr += np.asarray(arr, dtype=float)
         for t in range(prep.T):
             load0 = max(float(prep.load_wh[t]), 1e-6)
-            lc = self._sc_model.linearize(pv_0=load0, load_0=load0)
+            pv0 = max(float(total_pv_arr[t]), 0.0)
+            lc = self._sc_model.linearize(pv_0=pv0, load_0=load0)
             c_pv_arr[t] = lc.c_pv
             rhs_arr[t] = lc.rhs_fixed_load(load=load0)
         self._c_pv_param.value = c_pv_arr
@@ -550,6 +594,87 @@ class LinearOptimizer:
                     _assign_var(block.mode_dc_activity, dc_vals)
                     _assign_var(block.p_dc, pdc_vals)
 
+    def _apply_warm_start_values(
+        self,
+        prep: _PreparedInputs,
+        warm_start_plan: Mapping[str, tuple[np.ndarray, np.ndarray]] | None,
+    ) -> None:
+        if not warm_start_plan or prep.T <= 0:
+            return
+
+        for block in self._blocks:
+            inv = block.inverter
+            seed = warm_start_plan.get(inv.device_id)
+            if seed is None:
+                continue
+
+            seed_modes = np.asarray(seed[0], dtype=np.int32)
+            seed_rates = np.asarray(seed[1], dtype=np.int32)
+            if seed_modes.size == 0:
+                continue
+            if seed_modes.size < prep.T:
+                seed_modes = np.pad(seed_modes, (0, prep.T - seed_modes.size), mode="edge")
+            if seed_rates.size < prep.T:
+                seed_rates = np.pad(seed_rates, (0, prep.T - seed_rates.size), mode="edge")
+
+            if isinstance(block.mode_ch_activity, cp.Variable):
+                ch = np.zeros(prep.T, dtype=float)
+                for t in range(prep.T):
+                    mode = int(seed_modes[t])
+                    if mode in (
+                        int(InverterMode.AC_CHARGE),
+                        int(InverterMode.AC_CHARGE_ZERO_FEED_IN),
+                    ):
+                        ch[t] = 1.0
+                block.mode_ch_activity.value = ch
+
+            if isinstance(block.mode_dc_activity, cp.Variable):
+                dc = np.zeros(prep.T, dtype=float)
+                for t in range(prep.T):
+                    mode = int(seed_modes[t])
+                    if mode in (
+                        int(InverterMode.DISCHARGE),
+                        int(InverterMode.DISCHARGE_ZERO_FEED_IN),
+                    ):
+                        dc[t] = 1.0
+                block.mode_dc_activity.value = dc
+
+            if isinstance(block.p_ch, cp.Variable):
+                pch = np.zeros(prep.T, dtype=float)
+                max_ch_wh = (
+                    float(inv.battery.max_charge_power_w * prep.dt)
+                    if inv.battery is not None
+                    else 0.0
+                )
+                for t in range(prep.T):
+                    mode = int(seed_modes[t])
+                    if mode in (
+                        int(InverterMode.AC_CHARGE),
+                        int(InverterMode.AC_CHARGE_ZERO_FEED_IN),
+                    ):
+                        pch[t] = max_ch_wh * max(min(float(seed_rates[t]) / 100.0, 1.0), 0.0)
+                block.p_ch.value = pch
+
+            if isinstance(block.p_dc, cp.Variable):
+                pdc = np.zeros(prep.T, dtype=float)
+                max_dc_wh = (
+                    float(inv.battery.max_discharge_power_w * prep.dt)
+                    if inv.battery is not None
+                    else 0.0
+                )
+                for t in range(prep.T):
+                    mode = int(seed_modes[t])
+                    if mode in (
+                        int(InverterMode.DISCHARGE),
+                        int(InverterMode.DISCHARGE_ZERO_FEED_IN),
+                    ):
+                        rate = float(seed_rates[t]) / 100.0
+                        if mode == int(InverterMode.DISCHARGE_ZERO_FEED_IN):
+                            pdc[t] = min(float(prep.load_wh[t]), max_dc_wh)
+                        else:
+                            pdc[t] = max_dc_wh * max(min(rate, 1.0), 0.0)
+                block.p_dc.value = pdc
+
     def _build_inverter_block(self, inv: InverterBase) -> _InverterModelBlock:
         T = self._T
         dt = self._dt
@@ -625,11 +750,30 @@ class LinearOptimizer:
             eta_d = bat.discharging_efficiency * inv.parameters.dc_to_ac_efficiency
 
             delta = p_ch * eta_c_ac + pv_to_bat * eta_c_pv - p_dc / eta_d
+
+            _active_w_self = inv.parameters.active_inverter_consumption_w
+            _is_active_self = None
+            if _active_w_self > 0.0:
+                _act_wh_self = _active_w_self * dt
+                if mode_ch_activity is not None and mode_dc_activity is not None:
+                    _is_active_self = mode_ch_activity + mode_dc_activity
+                elif mode_ch_activity is not None:
+                    _is_active_self = mode_ch_activity
+                elif mode_dc_activity is not None:
+                    _is_active_self = mode_dc_activity
+                if _is_active_self is not None:
+                    delta = delta - _act_wh_self * _is_active_self
+
             start_soc = (
                 cp.hstack([soc_init_param, soc[:-1]]) if T > 1 else cp.hstack([soc_init_param])
             )
 
-            self._constraints.append(p_dc / eta_d <= start_soc - bat.min_soc_wh)
+            if _is_active_self is not None:
+                self._constraints.append(
+                    p_dc / eta_d + _act_wh_self * _is_active_self <= start_soc - bat.min_soc_wh
+                )
+            else:
+                self._constraints.append(p_dc / eta_d <= start_soc - bat.min_soc_wh)
             self._constraints.append(p_ch * eta_c_ac <= bat.max_soc_wh - start_soc)
             self._constraints.append(pv_to_bat * eta_c_pv <= bat.max_soc_wh - start_soc)
 
