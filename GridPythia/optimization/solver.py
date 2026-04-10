@@ -173,7 +173,7 @@ class LinearOptimizer:
     def solve(
         self,
         objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
-        solver_opts: dict = {},
+        solver_opts: Mapping[str, Any] | None = None,
         validate_with_simulation: bool = False,
         initial_modes: Mapping[str, InverterMode | int] | None = None,
         warm_start_plan: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
@@ -205,8 +205,10 @@ class LinearOptimizer:
             num_constraints=size.num_scalar_eq_constr + size.num_scalar_leq_constr,
         )
 
-        opts = _DEFAULT_HIGHS_OPTS
-        opts.update(solver_opts)
+        # Copy defaults per solve call so user overrides do not leak globally.
+        opts = dict(_DEFAULT_HIGHS_OPTS)
+        if solver_opts:
+            opts.update(dict(solver_opts))
 
         t0 = time.perf_counter()
         try:
