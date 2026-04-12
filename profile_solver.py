@@ -17,20 +17,13 @@ from GridPythia.simulation.devices.inverterbase import InverterBase
 
 # Constants for tuning candidates and run duration
 TUNING_CANDIDATES = [
-    {},
     {"mip_rel_gap": 0.02},
-    {"mip_rel_gap": 0.03, "presolve": "on"},
-    {"mip_rel_gap": 0.05, "presolve": "on"},
-    {"mip_lp_solver": "simplex"},
-    {"mip_lp_solver": "ipm", "mip_rel_gap": 0.02},
-    {"mip_heuristic_run_rens": False, "mip_heuristic_run_rins": True},
-    {"mip_heuristic_run_rens": True, "mip_heuristic_run_rins": True},
-    {"mip_heuristic_run_root_reduced_cost": True, "mip_rel_gap": 0.03},
-    {"time_limit": 45, "mip_rel_gap": 0.05},
+    {"mip_rel_gap": 0.03},
+    {"mip_rel_gap": 0.05},
 ]
 
 # Constants for default argument values
-DEFAULT_ROLLING_STEPS = 15
+DEFAULT_ROLLING_STEPS = 8
 DEFAULT_WINDOW_STEPS = 0
 DEFAULT_WARM_START = True
 DEFAULT_TUNE_ITERS = 10
