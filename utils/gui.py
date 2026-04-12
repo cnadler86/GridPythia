@@ -1510,7 +1510,12 @@ class OptimizationTab(_Tab):
         # Not used: this tab aggregates other providers
         return None
 
-    def _optimizer_signature(self, inv: InverterBase, hours: float) -> str:
+    def _optimizer_signature(
+        self,
+        inv: InverterBase,
+        hours: float,
+        prediction: PredictionData,
+    ) -> str:
         """Return a stable topology signature for optimizer cache invalidation."""
         bat = inv.battery
         p = inv.parameters
@@ -1526,6 +1531,8 @@ class OptimizationTab(_Tab):
                 str(float(getattr(p, "mode_switch_cost", 0.0))),
                 str(float(getattr(p, "active_inverter_consumption_w", 0.0))),
                 str(float(hours)),
+                str(int(prediction.steps)),
+                str(float(prediction.dt_hours)),
                 "none"
                 if bat is None
                 else "|".join(
@@ -1549,15 +1556,18 @@ class OptimizationTab(_Tab):
         prediction: PredictionData,
     ) -> LinearOptimizer:
         """Reuse LinearOptimizer if topology is unchanged; otherwise rebuild it."""
-        sig = self._optimizer_signature(inv, hours)
+        sig = self._optimizer_signature(inv, hours, prediction)
         if self._optimizer_cache is None or self._optimizer_cache_sig != sig:
-            self._optimizer_cache = LinearOptimizer(inverters=[inv], prediction=prediction)
+            self._optimizer_cache = LinearOptimizer(
+                inverters=[inv],
+                horizon=prediction.steps,
+                dt_hours=prediction.dt_hours,
+            )
             self._optimizer_cache_sig = sig
             logger.info("optimizer_instance_rebuilt", tab="optimization")
         else:
             # Keep cached inverter object in sync with current UI-driven device state.
             self._optimizer_cache.inverters = [inv]
-            self._optimizer_cache.prediction = prediction
             logger.info("optimizer_instance_reused", tab="optimization")
         return self._optimizer_cache
 
@@ -1736,8 +1746,6 @@ class OptimizationTab(_Tab):
                     else:
                         objective = OptimizationObjective.MINIMIZE_COST
                     optimizer = self._get_cached_optimizer(inv_obj, hours, pdata)
-                    # Prediction is runtime data and should be set per solve call.
-                    optimizer.prediction = pdata
                     solver_opts = self._collect_solver_opts()
                     logger.info(
                         "optimizer_build_start",
@@ -1750,6 +1758,7 @@ class OptimizationTab(_Tab):
                             objective=objective,
                             solver_opts=solver_opts,
                             validate_with_simulation=False,
+                            prediction=pdata,
                         )
                     )
                     return sol

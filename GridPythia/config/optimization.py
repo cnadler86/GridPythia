@@ -96,6 +96,8 @@ class OptimizationSolverConfig(BaseModel):
     provider: Literal["highs", "blackbox"] = "highs"
     objective: Literal["cost", "self_consumption"] = "cost"
     solver_opts: dict[str, Any] = Field(default_factory=dict)
+    horizon: int = Field(default=48, gt=0, description="Optimization horizon in time steps")
+    dt_hours: float = Field(default=0.25, gt=0.0, description="Time step duration in hours")
 
     @field_validator("solver_opts", mode="before")
     @classmethod

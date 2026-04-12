@@ -399,10 +399,12 @@ def _run_rolling_horizon(
         t_build = 0.0
         if optimizer is None:
             t0_build = time.perf_counter()
-            optimizer = LinearOptimizer(inverters, pred_current)
+            optimizer = LinearOptimizer(
+                inverters,
+                horizon=pred_current.steps,
+                dt_hours=pred_current.dt_hours,
+            )
             t_build = time.perf_counter() - t0_build
-        else:
-            optimizer.prediction = pred_current
 
         t0 = time.perf_counter()
         solution = optimizer.solve(
@@ -411,6 +413,7 @@ def _run_rolling_horizon(
             validate_with_simulation=False,
             initial_modes=initial_modes,
             warm_start_plan=warm_start_plan if use_warm_start else None,
+            prediction=pred_current,
         )
         t_solve = time.perf_counter() - t0
         total_solve_time += t_solve

@@ -21,8 +21,6 @@ if machine() in ("armv7l", "armv6l"):
     print("Detected ARM architecture, preloading libatomic for HiGHS solver...")
     os.environ["LD_PRELOAD"] = "/usr/lib/arm-linux-gnueabihf/libatomic.so.1"
 
-import math
-
 import cvxpy as cp
 import numpy as np
 from structlog import get_logger
@@ -30,23 +28,24 @@ from structlog import get_logger
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.inverterbase import InverterBase
-from GridPythia.simulation.grid_interpolator import FraunhoferSCModel
 from GridPythia.simulation.grid_simulation import GridSimulation, SimulationResult
 
 logger = get_logger(__name__)
 
 
 _DEFAULT_HIGHS_OPTS = {
-    "verbose": True,
+    "verbose": False,
     "warm_start": True,
-    "time_limit": 120,
-    "mip_rel_gap": 0.05,
+    "time_limit": 60,
+    "mip_rel_gap": 0.03,
     "presolve": "on",
     "mip_lp_solver": "ipm",
-    "mip_heuristic_run_rens": True,
-    "mip_heuristic_run_rins": False,
+    "mip_heuristic_effort": 0.05,
+    "mip_heuristic_run_rens": False,
+    "mip_heuristic_run_rins": True,
     "mip_heuristic_run_feasibility_jump": False,
     "mip_heuristic_run_root_reduced_cost": False,
+    "small_matrix_value": 1e-4,
 }
 
 
@@ -151,24 +150,35 @@ class LinearOptimizer:
     def __init__(
         self,
         inverters: list[InverterBase],
-        prediction: PredictionData,
+        prediction: PredictionData | None = None,
+        *,
+        horizon: int | None = None,
+        dt_hours: float | None = None,
     ) -> None:
         self.inverters = inverters
         self.prediction = prediction
+
+        if horizon is None or dt_hours is None:
+            if prediction is None:
+                raise ValueError(
+                    "LinearOptimizer requires either prediction or both horizon and dt_hours"
+                )
+            horizon = int(prediction.steps)
+            dt_hours = float(prediction.dt_hours)
+
+        if horizon <= 0:
+            raise ValueError(f"horizon must be > 0, got {horizon}")
+        if dt_hours <= 0:
+            raise ValueError(f"dt_hours must be > 0, got {dt_hours}")
+
         self._log = logger.bind(
             component="optimizer",
             inverter_ids=[inv.device_id for inv in inverters],
-            steps=prediction.steps,
-        )
-
-        min_load_wh = float(min(prediction.load_wh)) if prediction.steps > 0 else 1.0
-        self._sc_model = FraunhoferSCModel(
-            baseload_wh=max(min_load_wh, 1e-6),
-            dt=prediction.dt_hours,
+            steps=int(horizon),
         )
 
         self._compiled = False
-        self._compile_problem(self._prepare_inputs())
+        self._compile_problem(horizon=int(horizon), dt=float(dt_hours))
 
     def solve(
         self,
@@ -177,9 +187,15 @@ class LinearOptimizer:
         validate_with_simulation: bool = False,
         initial_modes: Mapping[str, InverterMode | int] | None = None,
         warm_start_plan: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
+        prediction: PredictionData | None = None,
     ) -> LinearSolution:
         """Solve the compiled MILP with updated runtime data."""
-        prep = self._prepare_inputs()
+        if prediction is not None:
+            self.prediction = prediction
+        if self.prediction is None:
+            raise RuntimeError("No prediction data set. Provide prediction to solve(...).")
+
+        prep = self._prepare_inputs(self.prediction)
         self._ensure_compiled_layout(prep)
 
         normalized_initial_modes: dict[str, InverterMode] = {}
@@ -328,8 +344,8 @@ class LinearOptimizer:
             out[inv_plan.device_id] = (shifted_modes, shifted_rates)
         return out
 
-    def _prepare_inputs(self) -> _PreparedInputs:
-        solver_view = self.prediction.to_solver_view(dtype=np.float64)
+    def _prepare_inputs(self, prediction: PredictionData) -> _PreparedInputs:
+        solver_view = prediction.to_solver_view(dtype=np.float64)
         return _PreparedInputs(
             T=solver_view.steps,
             dt=solver_view.dt_hours,
@@ -339,30 +355,16 @@ class LinearOptimizer:
             pv_by_source=solver_view.pv_by_inverter,
         )
 
-    @staticmethod
-    def _is_constant_series(series: np.ndarray, *, atol: float = 1e-12) -> bool:
-        if series.size <= 1:
-            return True
-        return bool(np.all(np.abs(series - float(series[0])) <= atol))
-
-    def _compile_problem(self, prep: _PreparedInputs) -> None:
-        self._T = prep.T
-        self._dt = prep.dt
-        self._feedin_is_constant = self._is_constant_series(prep.feedin_tariff)
+    def _compile_problem(self, *, horizon: int, dt: float) -> None:
+        self._T = int(horizon)
+        self._dt = float(dt)
 
         self._constraints: list[cp.Constraint] = []
         self._mode_switch_costs: list[cp.Expression] = []
 
         self._load_param = cp.Parameter(self._T, name="load_wh")
         self._price_param = cp.Parameter(self._T, name="price")
-        if self._feedin_is_constant:
-            self._feedin_scalar_param = cp.Parameter(name="feedin_tariff_scalar")
-            self._feedin_param = None
-        else:
-            self._feedin_param = cp.Parameter(self._T, name="feedin_tariff")
-            self._feedin_scalar_param = None
-        self._c_pv_param = cp.Parameter(self._T, name="c_pv")
-        self._rhs_sc_param = cp.Parameter(self._T, name="rhs_sc")
+        self._feedin_param = cp.Parameter(self._T, name="feedin_tariff")
         self._terminal_value_param = cp.Parameter(nonneg=True, name="terminal_value")
 
         self._pv_params: dict[str, cp.Parameter] = {
@@ -379,34 +381,30 @@ class LinearOptimizer:
         self._g_import = cp.Variable(self._T, nonneg=True, name="g_import")
         self._g_feedin = cp.Variable(self._T, nonneg=True, name="g_feedin")
         self._pv_self = cp.Variable(self._T, nonneg=True, name="pv_self")
+        self._pv_export = cp.Variable(self._T, nonneg=True, name="pv_export")
 
         total_p_ch_terms: list[object] = []
         total_p_dc_terms: list[object] = []
         total_pv_ac_terms: list[object] = [self._pv_external_param]
-        total_pv_ac_decision_terms: list[object] = []
         blocks = [self._build_inverter_block(inv) for inv in self.inverters]
         for _inv, block in zip(self.inverters, blocks, strict=False):
             total_p_ch_terms.append(cast(cp.Expression, block.p_ch))
             total_p_dc_terms.append(cast(cp.Expression, block.p_dc))
             total_pv_ac_terms.append(cast(cp.Expression, block.pv_ac))
-            total_pv_ac_decision_terms.append(cast(cp.Expression, block.pv_ac))
 
         total_p_ch = self._sum_terms(total_p_ch_terms, self._T)
         total_p_dc = self._sum_terms(total_p_dc_terms, self._T)
         total_pv_ac = self._sum_terms(total_pv_ac_terms, self._T)
-        total_pv_ac_decision = self._sum_terms(total_pv_ac_decision_terms, self._T)
         self._constraints.extend(
             [
-                self._pv_self - cp.multiply(self._c_pv_param, total_pv_ac_decision)
-                <= self._rhs_sc_param,
-                self._pv_self <= total_pv_ac,
-                self._pv_self <= self._load_param,
+                self._pv_self == 0,
+                self._pv_self + self._pv_export == total_pv_ac,
             ]
         )
 
         self._constraints.append(
             self._g_import - self._g_feedin
-            == self._load_param + total_p_ch - total_p_dc + total_pv_ac - self._pv_self
+            == self._load_param + total_p_ch - total_p_dc + self._pv_export - self._pv_self
         )
 
         terminal_terms = [block.soc[-1] for block in blocks if block.soc is not None]
@@ -419,10 +417,7 @@ class LinearOptimizer:
         mode_switch_costs_term = cp.sum(self._mode_switch_costs) if self._mode_switch_costs else 0.0
         terminal_reward = self._terminal_reward_expr()
 
-        if self._feedin_param is not None:
-            feedin_revenue_term = cp.multiply(self._g_feedin, self._feedin_param)
-        else:
-            feedin_revenue_term = self._feedin_scalar_param * self._g_feedin
+        feedin_revenue_term = cp.multiply(self._g_feedin, self._feedin_param)
 
         objective_cost_eur = (
             cp.sum(cp.multiply(self._g_import, self._price_param) - feedin_revenue_term)
@@ -445,22 +440,17 @@ class LinearOptimizer:
             ),
         }
 
-        idle_modes = {inv.device_id: InverterMode.IDLE for inv in self.inverters}
-        self._update_runtime_parameters(prep, idle_modes)
         self._compiled = True
 
     def _ensure_compiled_layout(self, prep: _PreparedInputs) -> None:
-        if (
-            not self._compiled
-            or prep.T != self._T
-            or prep.dt != self._dt
-            or self._is_constant_series(prep.feedin_tariff) != self._feedin_is_constant
-        ):
-            self._sc_model = FraunhoferSCModel(
-                baseload_wh=max(float(np.min(prep.load_wh)) if prep.T > 0 else 1.0, 1e-6),
-                dt=prep.dt,
+        if not self._compiled:
+            raise RuntimeError("LinearOptimizer problem is not compiled")
+        if prep.T != self._T or prep.dt != self._dt:
+            raise ValueError(
+                "Prediction shape mismatch for compiled optimizer: "
+                f"expected horizon={self._T}, dt_hours={self._dt}, "
+                f"got horizon={prep.T}, dt_hours={prep.dt}"
             )
-            self._compile_problem(prep)
 
     def _update_runtime_parameters(
         self,
@@ -469,23 +459,7 @@ class LinearOptimizer:
     ) -> None:
         self._load_param.value = prep.load_wh
         self._price_param.value = prep.price
-        if self._feedin_param is not None:
-            self._feedin_param.value = prep.feedin_tariff
-        elif self._feedin_scalar_param is not None:
-            self._feedin_scalar_param.value = float(prep.feedin_tariff[0]) if prep.T > 0 else 0.0
-
-        c_pv_arr = np.empty(prep.T, dtype=float)
-        rhs_arr = np.empty(prep.T, dtype=float)
-        total_pv_arr = np.zeros(prep.T, dtype=float)
-        for arr in prep.pv_by_source.values():
-            total_pv_arr += np.asarray(arr, dtype=float)
-        for t in range(prep.T):
-            load0 = max(float(prep.load_wh[t]), 1e-6)
-            pv0 = max(float(total_pv_arr[t]), 0.0)
-            lc = self._sc_model.linearize(pv_0=pv0, load_0=load0)
-            c_pv_arr[t] = lc.c_pv
-            rhs_arr[t] = lc.rhs_fixed_load(load=load0)
-        self._c_pv_param.value = c_pv_arr
+        self._feedin_param.value = prep.feedin_tariff
 
         for inv in self.inverters:
             inv_id = inv.device_id
@@ -512,89 +486,9 @@ class LinearOptimizer:
             if src_id not in mapped:
                 external += np.asarray(arr, dtype=float)
         self._pv_external_param.value = external
-        self._rhs_sc_param.value = rhs_arr + c_pv_arr * external
 
         terminal_value = self._estimate_terminal_value(prep, self._blocks)
         self._terminal_value_param.value = terminal_value
-
-        # Warm-start / smart initialization for AC activity and power variables.
-        # Strategy:
-        # - Split horizon into two halves.
-        # - Compute total slots required to move the battery by max AC charge per slot
-        #   then distribute slots between halves (ceil(total_slots/2)).
-        # - For each half, activate charge on the lowest-price slots and set p_ch to max.
-        # - For discharge, activate on the highest-price slots (per-half) and set p_dc to load (capped by max).
-        if prep.T > 0 and hasattr(self, "_blocks"):
-            prices = np.asarray(prep.price, dtype=float)
-            loads = np.asarray(prep.load_wh, dtype=float)
-            mid = prep.T // 2
-            for block in self._blocks:
-                inv = block.inverter
-                inv_id = inv.device_id
-                # Only for optimizable inverters with a battery
-                if inv.battery is None or not inv.is_optimizable:
-                    continue
-
-                max_ch_wh = float(inv.battery.max_charge_power_w * prep.dt) if inv.battery else 0.0
-                max_dc_wh = (
-                    float(inv.battery.max_discharge_power_w * prep.dt) if inv.battery else 0.0
-                )
-                if max_ch_wh <= 0 and max_dc_wh <= 0:
-                    continue
-
-                # compute total number of full charge slots needed to move one capacity
-                total_slots = 0
-                try:
-                    total_slots = math.ceil(float(inv.battery.capacity_wh) / max(1e-9, max_ch_wh))
-                except Exception:
-                    total_slots = 0
-                slots_per_half = math.ceil(total_slots / 2) if total_slots > 0 else 0
-
-                # helper to safe-assign cvxpy variable values
-                def _assign_var(var: cp.Variable | cp.Expression | None, arr: np.ndarray) -> None:
-                    if isinstance(var, cp.Variable):
-                        var.value = arr.copy()
-
-                # initialize p_ch and mode_ch_activity
-                if block.mode_ch_activity is not None and isinstance(
-                    block.mode_ch_activity, cp.Variable
-                ):
-                    ch_vals = np.zeros(prep.T, dtype=float)
-                    pch_vals = np.zeros(prep.T, dtype=float)
-                    for s_idx, e_idx in ((0, mid), (mid, prep.T)):
-                        if s_idx >= e_idx or slots_per_half <= 0:
-                            continue
-                        half_prices = prices[s_idx:e_idx]
-                        # indices within half with lowest prices
-                        order = np.argsort(half_prices, kind="stable")
-                        pick = order[: min(slots_per_half, len(order))]
-                        for p in pick:
-                            idx = s_idx + int(p)
-                            ch_vals[idx] = 1.0
-                            pch_vals[idx] = max_ch_wh
-                    _assign_var(block.mode_ch_activity, ch_vals)
-                    _assign_var(block.p_ch, pch_vals)
-
-                # initialize p_dc and mode_dc_activity
-                if block.mode_dc_activity is not None and isinstance(
-                    block.mode_dc_activity, cp.Variable
-                ):
-                    dc_vals = np.zeros(prep.T, dtype=float)
-                    pdc_vals = np.zeros(prep.T, dtype=float)
-                    for s_idx, e_idx in ((0, mid), (mid, prep.T)):
-                        if s_idx >= e_idx or slots_per_half <= 0:
-                            continue
-                        half_prices = prices[s_idx:e_idx]
-                        # indices within half with highest prices
-                        order_desc = np.argsort(-half_prices, kind="stable")
-                        pick = order_desc[: min(slots_per_half, len(order_desc))]
-                        for p in pick:
-                            idx = s_idx + int(p)
-                            dc_vals[idx] = 1.0
-                            # set p_dc to load at this time, but cap by inverter max discharge
-                            pdc_vals[idx] = min(loads[idx], max_dc_wh) if max_dc_wh > 0 else 0.0
-                    _assign_var(block.mode_dc_activity, dc_vals)
-                    _assign_var(block.p_dc, pdc_vals)
 
     def _apply_warm_start_values(
         self,
@@ -615,9 +509,19 @@ class LinearOptimizer:
             if seed_modes.size == 0:
                 continue
             if seed_modes.size < prep.T:
-                seed_modes = np.pad(seed_modes, (0, prep.T - seed_modes.size), mode="edge")
+                seed_modes = np.pad(
+                    seed_modes,
+                    (0, prep.T - seed_modes.size),
+                    mode="constant",
+                    constant_values=int(InverterMode.IDLE),
+                )
             if seed_rates.size < prep.T:
-                seed_rates = np.pad(seed_rates, (0, prep.T - seed_rates.size), mode="edge")
+                seed_rates = np.pad(
+                    seed_rates,
+                    (0, prep.T - seed_rates.size),
+                    mode="constant",
+                    constant_values=0,
+                )
 
             if isinstance(block.mode_ch_activity, cp.Variable):
                 ch = np.zeros(prep.T, dtype=float)
@@ -677,6 +581,10 @@ class LinearOptimizer:
                             pdc[t] = max_dc_wh * max(min(rate, 1.0), 0.0)
                 block.p_dc.value = pdc
 
+            if isinstance(block.soc, cp.Variable) and inv.device_id in self._soc_init_params:
+                soc0 = float(self._soc_init_params[inv.device_id].value or 0.0)
+                block.soc.value = np.full(prep.T, soc0, dtype=float)
+
     def _build_inverter_block(self, inv: InverterBase) -> _InverterModelBlock:
         T = self._T
         dt = self._dt
@@ -725,7 +633,8 @@ class LinearOptimizer:
             pv_ac = cp.Variable(T, nonneg=True, name=f"pv_ac_{inv_id}")
             if inv.battery is not None:
                 pv_to_bat = cp.Variable(T, nonneg=True, name=f"pv_to_bat_{inv_id}")
-                self._constraints.append(pv_ac + pv_to_bat <= pv_pred)
+                # self._constraints.append(pv_ac + pv_to_bat <= pv_pred)
+                self._constraints.append(pv_ac + pv_to_bat == pv_pred)  # No curtailment allowed
                 if mode_dc_activity is not None:
                     self._constraints.append(
                         pv_to_bat <= cp.multiply(pv_pred, 1 - mode_dc_activity)
@@ -1094,6 +1003,9 @@ class LinearOptimizer:
         solution: LinearSolution,
         prep: _PreparedInputs,
     ) -> tuple[SimulationParityReport, SimulationResult | None]:
+        if self.prediction is None:
+            raise RuntimeError("Prediction data missing for simulation validation")
+
         sim = GridSimulation(
             prediction=self.prediction, inverters=self.inverters, home_appliances=None
         )
