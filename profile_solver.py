@@ -368,26 +368,14 @@ def _run_rolling_horizon(
 ) -> dict:
     rows: list[dict] = []
     optimizer: LinearOptimizer | None = None
-    initial_modes: dict[str, InverterMode] | None = None
-    initial_soc_wh: dict[str, float] | None = None
-    warm_start_plan: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+    current_modes: dict[str, InverterMode] | None = None
+    current_soc: dict[str, float] | None = None
     total_solve_time = 0.0
 
     for roll in range(num_rolls):
         pred_current = slice_prediction_window(prediction, start_idx=roll, length=window_steps)
         if verbose:
             print(f"\n{'=' * 30} ROLLING HORIZON STEP {roll + 1} / {num_rolls} {'=' * 30}")
-
-        # Apply runtime start state to physical objects
-        if initial_soc_wh:
-            for inv in inverters:
-                if inv.battery is None:
-                    continue
-                start = initial_soc_wh.get(inv.device_id)
-                if start is not None:
-                    inv.battery.soc_wh = float(
-                        np.clip(start, inv.battery.min_soc_wh, inv.battery.max_soc_wh)
-                    )
 
         t_build = 0.0
         if optimizer is None:
@@ -396,40 +384,31 @@ def _run_rolling_horizon(
                 inverters,
                 horizon=pred_current.steps,
                 dt_hours=pred_current.dt_hours,
+                objective=objective,
+                solver_opts=solver_opts if use_warm_start else solver_opts,
             )
             t_build = time.perf_counter() - t0_build
 
         t0 = time.perf_counter()
         solution = optimizer.solve(
-            objective=objective,
-            solver_opts=solver_opts,
-            validate_with_simulation=False,
-            initial_modes=initial_modes,
-            warm_start_plan=warm_start_plan if use_warm_start else None,
-            prediction=pred_current,
+            pred_current,
+            soc=current_soc,
+            initial_modes=current_modes,
         )
         t_solve = time.perf_counter() - t0
         total_solve_time += t_solve
 
-        # next initial state is state right after first control interval
-        next_modes: dict[str, InverterMode] = {}
-        next_soc_wh: dict[str, float] = {}
-        for plan in solution.inverter_plans:
-            if plan.modes.size > 0:
-                next_modes[plan.device_id] = InverterMode(int(plan.modes[0]))
-            soc_trace = solution.result.battery_wh_per_dt.get(plan.device_id)
-            if soc_trace is not None and len(soc_trace) > 0:
-                next_soc_wh[plan.device_id] = float(soc_trace[0])
-
-        initial_modes = next_modes or None
-        initial_soc_wh = next_soc_wh or None
-
-        if use_warm_start:
-            warm_start_plan = LinearOptimizer.shift_solution_for_next_horizon(
-                solution,
-                horizon_steps=window_steps,
-                shift_steps=1,
-            )
+        current_modes = {
+            plan.device_id: InverterMode(int(plan.modes[0]))
+            for plan in solution.inverter_plans
+            if plan.modes.size > 0
+        } or None
+        current_soc = {
+            plan.device_id: float(soc_trace[0])
+            for plan in solution.inverter_plans
+            if (soc_trace := solution.result.battery_wh_per_dt.get(plan.device_id)) is not None
+            and len(soc_trace) > 0
+        } or None
 
         objective_value = (
             float(solution.result.total_cost)

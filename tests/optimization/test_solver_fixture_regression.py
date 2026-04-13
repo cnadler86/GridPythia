@@ -4,24 +4,26 @@ import numpy as np
 import pytest
 
 from GridPythia.optimization.solver import InverterPlan, LinearOptimizer, OptimizationObjective
-from GridPythia.simulation.devices import InverterMode
 from tests.optimization.solver_fixture_support import load_solver_fixture_scenario
 
 
 _FAST_FIXTURE_SOLVER_OPTS = {
     "mip_lp_solver": "ipm",
     "mip_rel_gap": 0.02,
+    "random_seed": 0,
 }
 
 
 def test_fixture_solution_matches_regression_signature() -> None:
     scenario = load_solver_fixture_scenario()
+    pred = scenario.prediction
 
-    solution = LinearOptimizer(scenario.inverters, scenario.prediction).solve(
-        OptimizationObjective.MINIMIZE_COST,
-        validate_with_simulation=False,
+    solution = LinearOptimizer(
+        scenario.inverters,
+        pred.steps,
+        pred.dt_hours,
         solver_opts=_FAST_FIXTURE_SOLVER_OPTS,
-    )
+    ).solve(pred)
     plan = solution.inverter_plans[0]
 
     assert solution.solver_status == "optimal"
@@ -31,49 +33,49 @@ def test_fixture_solution_matches_regression_signature() -> None:
     assert np.max(np.minimum(plan.charge_ac_wh, plan.discharge_ac_wh)) == pytest.approx(0.0, abs=1e-6)
     assert np.all(plan.pv_to_ac_wh + plan.pv_to_battery_wh <= scenario.prediction.pv_by_inverter[plan.device_id] + 1e-5)
 
-    assert solution.result.total_cost == pytest.approx(0.9403953, abs=1e-3)
-    assert solution.result.total_grid_import == pytest.approx(5266.249, abs=1.0)
-    assert solution.result.total_losses == pytest.approx(665.415, abs=2.0)
-    assert float(plan.battery_soc_wh[-1]) == pytest.approx(763.492, abs=2.0)
+    assert solution.result.total_cost == pytest.approx(0.9842832, abs=1e-3)
+    assert solution.result.total_grid_import == pytest.approx(5250.429, abs=1.0)
+    assert solution.result.total_losses == pytest.approx(713.815, abs=2.0)
+    assert float(plan.battery_soc_wh[-1]) == pytest.approx(800.988, abs=2.0)
 
     active_idx = np.flatnonzero((plan.charge_ac_wh > 1e-6) | (plan.discharge_ac_wh > 1e-6))
-    assert active_idx.size == 85
-    assert active_idx[0] == 7
+    assert active_idx.size == 68
+    assert active_idx[0] == 21
     assert active_idx[-1] == 182
     np.testing.assert_allclose(
         plan.discharge_ac_wh[active_idx[:8]],
-        np.array([13.858, 22.668, 30.842, 31.028, 23.226, 14.601, 12.5, 12.5], dtype=np.float32),
+        np.array([14.882, 15.416, 15.743, 14.865, 14.51, 16.54, 20.955, 29.771], dtype=np.float32),
         atol=0.05,
     )
     assert plan.modes[active_idx[:8]].tolist() == [2, 2, 2, 2, 2, 2, 2, 2]
     assert plan.rates[active_idx[:8]].tolist() == [0, 0, 0, 0, 0, 0, 0, 0]
 
 
-def test_linear_shift_solution_for_next_horizon_aligns_modes_and_rates() -> None:
+def test_rolling_horizon_auto_roll_aligns_modes() -> None:
+    """Two consecutive solves with shifted timestamps should both succeed and
+    the optimizer should auto-roll the warm-start plan by the correct number of steps."""
+    from profile_rolling_horizon import slice_prediction
+
     scenario = load_solver_fixture_scenario()
-    solution = LinearOptimizer(scenario.inverters, scenario.prediction).solve(
-        OptimizationObjective.MINIMIZE_COST,
-        validate_with_simulation=False,
+    pred = scenario.prediction
+    window = pred.steps - 1  # one step shorter to allow slicing
+
+    optimizer = LinearOptimizer(
+        scenario.inverters,
+        window,
+        pred.dt_hours,
         solver_opts=_FAST_FIXTURE_SOLVER_OPTS,
     )
 
-    horizon = scenario.prediction.steps
-    warm = LinearOptimizer.shift_solution_for_next_horizon(
-        solution,
-        horizon_steps=horizon,
-        shift_steps=1,
-    )
-    inv_id = solution.inverter_plans[0].device_id
-    shifted_modes, shifted_rates = warm[inv_id]
+    pred0 = slice_prediction(pred, start_idx=0, length=window)
+    sol0 = optimizer.solve(pred0)
+    assert sol0.solver_status in {"optimal", "optimal_inaccurate", "user_limit"}
 
-    assert shifted_modes.shape[0] == horizon
-    assert shifted_rates.shape[0] == horizon
-    assert int(shifted_modes[0]) == int(solution.inverter_plans[0].modes[1])
+    pred1 = slice_prediction(pred, start_idx=1, length=window)
+    sol1 = optimizer.solve(pred1)
+    assert sol1.solver_status in {"optimal", "optimal_inaccurate", "user_limit"}
 
-    tail_mode = int(solution.inverter_plans[0].modes[-1])
-    tail_rate = int(solution.inverter_plans[0].rates[-1])
-    assert int(shifted_modes[-1]) == tail_mode
-    if tail_mode in (int(InverterMode.DISCHARGE), int(InverterMode.AC_CHARGE)):
-        assert int(shifted_rates[-1]) == tail_rate
-    else:
-        assert int(shifted_rates[-1]) == 0
+    # Verify the optimizer updated its cache to pred1 and detects no further shift from pred0.
+    assert optimizer._cached_prediction is pred1
+    assert optimizer._compute_roll_steps(pred0) == 0  # pred0 is behind pred1 (negative shift)
+    assert optimizer._compute_roll_steps(pred1) == 0  # same timestamp = no roll

@@ -101,15 +101,6 @@ class LinearSolution:
     prediction: dict | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class RollingWarmStartPlan:
-    """Warm-start seed for one inverter over one horizon."""
-
-    device_id: str
-    modes: np.ndarray
-    rates: np.ndarray
-
-
 @dataclass
 class _PreparedInputs:
     """Numerical input series for one optimization horizon."""
@@ -150,21 +141,17 @@ class LinearOptimizer:
     def __init__(
         self,
         inverters: list[InverterBase],
-        prediction: PredictionData | None = None,
+        horizon: int,
+        dt_hours: float,
         *,
-        horizon: int | None = None,
-        dt_hours: float | None = None,
+        objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
+        solver_opts: Mapping[str, Any] | None = None,
     ) -> None:
         self.inverters = inverters
-        self.prediction = prediction
-
-        if horizon is None or dt_hours is None:
-            if prediction is None:
-                raise ValueError(
-                    "LinearOptimizer requires either prediction or both horizon and dt_hours"
-                )
-            horizon = int(prediction.steps)
-            dt_hours = float(prediction.dt_hours)
+        self._objective = objective
+        self._solver_opts: dict[str, Any] = dict(solver_opts) if solver_opts else {}
+        self._cached_prediction: PredictionData | None = None
+        self._cached_solution: LinearSolution | None = None
 
         if horizon <= 0:
             raise ValueError(f"horizon must be > 0, got {horizon}")
@@ -182,20 +169,28 @@ class LinearOptimizer:
 
     def solve(
         self,
-        objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
+        prediction: PredictionData,
+        *,
+        soc: Mapping[str, float] | None = None,
+        initial_modes: Mapping[str, InverterMode | int] | None = None,
+        objective: OptimizationObjective | None = None,
         solver_opts: Mapping[str, Any] | None = None,
         validate_with_simulation: bool = False,
-        initial_modes: Mapping[str, InverterMode | int] | None = None,
-        warm_start_plan: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
-        prediction: PredictionData | None = None,
     ) -> LinearSolution:
-        """Solve the compiled MILP with updated runtime data."""
-        if prediction is not None:
-            self.prediction = prediction
-        if self.prediction is None:
-            raise RuntimeError("No prediction data set. Provide prediction to solve(...).")
+        """Solve the compiled MILP for the given prediction horizon.
 
-        prep = self._prepare_inputs(self.prediction)
+        Args:
+            prediction: Current forecast data including timestamps.
+            soc:         Per-inverter battery state-of-charge in Wh.  Falls back to
+                         ``inv.battery.soc_wh`` when omitted.
+            initial_modes: Per-inverter active mode at the start of the horizon.
+            objective:   Override the instance-level objective for this call only.
+            solver_opts: Override or extend the instance-level HiGHS options.
+            validate_with_simulation: Run a GridSimulation replay and attach a
+                         parity report to the returned solution.
+        """
+        effective_objective = objective if objective is not None else self._objective
+        prep = self._prepare_inputs(prediction)
         self._ensure_compiled_layout(prep)
 
         normalized_initial_modes: dict[str, InverterMode] = {}
@@ -209,20 +204,22 @@ class LinearOptimizer:
                 raw_mode if isinstance(raw_mode, InverterMode) else InverterMode(int(raw_mode))
             )
 
-        self._update_runtime_parameters(prep, normalized_initial_modes)
+        warm_start_plan = self._build_warm_start_plan(self._compute_roll_steps(prediction))
+        self._update_runtime_parameters(prep, normalized_initial_modes, soc=soc)
         self._apply_warm_start_values(prep, warm_start_plan)
 
-        problem = self._problems[objective]
+        problem = self._problems[effective_objective]
         size = problem.size_metrics
         self._log.info(
             "optimizer_solve_start",
-            objective=objective.value,
+            objective=effective_objective.value,
             num_variables=size.num_scalar_variables,
             num_constraints=size.num_scalar_eq_constr + size.num_scalar_leq_constr,
         )
 
-        # Copy defaults per solve call so user overrides do not leak globally.
+        # Merge: defaults → instance opts → per-call overrides.
         opts = dict(_DEFAULT_HIGHS_OPTS)
+        opts.update(self._solver_opts)
         if solver_opts:
             opts.update(dict(solver_opts))
 
@@ -261,8 +258,10 @@ class LinearOptimizer:
             "optimizer_solve_complete",
             solver_status=status,
             solve_time_s=round(solve_time, 3),
-            objective=objective.value,
-            objective_value=round(self._objective_value_for_logging(objective, problem.value), 4)
+            objective=effective_objective.value,
+            objective_value=round(
+                self._objective_value_for_logging(effective_objective, problem.value), 4
+            )
             if problem.value is not None
             else None,
         )
@@ -272,14 +271,17 @@ class LinearOptimizer:
             blocks=self._blocks,
             g_import_val=np.asarray(self._g_import.value, dtype=float),
             g_feedin_val=np.asarray(self._g_feedin.value, dtype=float),
-            objective=objective,
+            objective=effective_objective,
             solver_status=status,
             solve_time=solve_time,
-            prediction=self.prediction.to_dict(),
+            prediction=prediction.to_dict(),
         )
 
+        self._cached_prediction = prediction
+        self._cached_solution = solution
+
         if validate_with_simulation:
-            parity, sim_res = self._validate_with_simulation(solution, prep)
+            parity, sim_res = self._validate_with_simulation(solution, prep, prediction)
             solution.parity_report = parity
             solution.simulation_result = sim_res
             if parity.ok:
@@ -295,40 +297,59 @@ class LinearOptimizer:
 
         return solution
 
-    @staticmethod
-    def shift_solution_for_next_horizon(
-        solution: LinearSolution,
-        horizon_steps: int,
-        *,
-        shift_steps: int = 1,
-    ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        """Shift a solved plan in time to seed the next rolling-horizon solve."""
-        if horizon_steps <= 0:
+    def _compute_roll_steps(self, new_prediction: PredictionData) -> int:
+        """Return how many horizon steps the new prediction has advanced vs. the cached one.
+
+        Compares the first timestamp of *new_prediction* against the first timestamp
+        of the most-recently cached prediction and converts the elapsed time to a
+        whole number of ``dt_hours`` steps (rounded to nearest).  Returns 0 when
+        there is no cached prediction or when the first timestamp has not changed.
+        """
+        if self._cached_prediction is None:
+            return 0
+        cached_ts = self._cached_prediction.timestamps
+        new_ts = new_prediction.timestamps
+        if not cached_ts or not new_ts:
+            return 0
+        delta_s = (new_ts[0] - cached_ts[0]).total_seconds()
+        if delta_s <= 0:
+            return 0
+        dt_s = self._dt * 3600.0
+        return min(max(0, round(delta_s / dt_s)), self._T)
+
+    def _build_warm_start_plan(self, shift_steps: int) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """Build a warm-start seed from the cached solution, shifted by *shift_steps*.
+
+        When the horizon is padded beyond the original solution the last solved
+        inverter mode is repeated (no extrapolation).
+        """
+        if self._cached_solution is None or shift_steps <= 0:
             return {}
 
-        shift = max(int(shift_steps), 0)
+        T = self._T
         out: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        for inv_plan in solution.inverter_plans:
+        for inv_plan in self._cached_solution.inverter_plans:
             src_modes = np.asarray(inv_plan.modes, dtype=np.int32)
             src_rates = np.asarray(inv_plan.rates, dtype=np.int32)
             if src_modes.size == 0:
                 out[inv_plan.device_id] = (
-                    np.full(horizon_steps, int(InverterMode.IDLE), dtype=np.int8),
-                    np.zeros(horizon_steps, dtype=np.int32),
+                    np.full(T, int(InverterMode.IDLE), dtype=np.int8),
+                    np.zeros(T, dtype=np.int32),
                 )
                 continue
 
-            shifted_modes = np.empty(horizon_steps, dtype=np.int8)
-            shifted_rates = np.zeros(horizon_steps, dtype=np.int32)
-            src_start = min(shift, int(src_modes.size))
-            copied = min(max(int(src_modes.size) - src_start, 0), horizon_steps)
+            shifted_modes = np.empty(T, dtype=np.int8)
+            shifted_rates = np.zeros(T, dtype=np.int32)
+            src_start = min(shift_steps, int(src_modes.size))
+            copied = min(max(int(src_modes.size) - src_start, 0), T)
             if copied > 0:
                 shifted_modes[:copied] = src_modes[src_start : src_start + copied].astype(np.int8)
                 shifted_rates[:copied] = src_rates[src_start : src_start + copied].astype(np.int32)
 
+            # Pad with last solved mode — no extrapolation.
             fill_mode = int(src_modes[-1])
             fill_rate = int(src_rates[-1])
-            if copied < horizon_steps:
+            if copied < T:
                 shifted_modes[copied:] = np.int8(fill_mode)
                 shifted_rates[copied:] = np.int32(fill_rate)
 
@@ -456,6 +477,7 @@ class LinearOptimizer:
         self,
         prep: _PreparedInputs,
         initial_modes: Mapping[str, InverterMode],
+        soc: Mapping[str, float] | None = None,
     ) -> None:
         self._load_param.value = prep.load_wh
         self._price_param.value = prep.price
@@ -470,6 +492,10 @@ class LinearOptimizer:
             if inv_id in self._soc_init_params:
                 if inv.battery is None:
                     self._soc_init_params[inv_id].value = 0.0
+                elif soc is not None and inv_id in soc:
+                    self._soc_init_params[inv_id].value = float(
+                        np.clip(soc[inv_id], inv.battery.min_soc_wh, inv.battery.max_soc_wh)
+                    )
                 else:
                     self._soc_init_params[inv_id].value = float(inv.battery.soc_wh)
 
@@ -1002,13 +1028,9 @@ class LinearOptimizer:
         self,
         solution: LinearSolution,
         prep: _PreparedInputs,
+        prediction: PredictionData,
     ) -> tuple[SimulationParityReport, SimulationResult | None]:
-        if self.prediction is None:
-            raise RuntimeError("Prediction data missing for simulation validation")
-
-        sim = GridSimulation(
-            prediction=self.prediction, inverters=self.inverters, home_appliances=None
-        )
+        sim = GridSimulation(prediction=prediction, inverters=self.inverters, home_appliances=None)
 
         modes: dict[str, np.ndarray] = {}
         rates: dict[str, np.ndarray] = {}

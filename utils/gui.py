@@ -1755,10 +1755,9 @@ class OptimizationTab(_Tab):
                     )
                     sol: LinearSolution = await asyncio.to_thread(
                         lambda: optimizer.solve(
+                            pdata,
                             objective=objective,
                             solver_opts=solver_opts,
-                            validate_with_simulation=False,
-                            prediction=pdata,
                         )
                     )
                     return sol

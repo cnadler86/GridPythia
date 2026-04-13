@@ -1,10 +1,10 @@
 """Tune follow-up rolling-horizon solver options while keeping first run unchanged.
 
 Goal:
-- First roll uses the base configuration exactly as configured.
-- Follow-up rolls use candidate overrides.
+- Each trial runs an untracked warmup roll at index 0.
+- Measured rolls start at index 1 and use candidate overrides.
 - Keep mip_rel_gap equal to first run for comparability.
-- Iterate through sensible HiGHS options (doc-based) and report latency.
+- Iterate through sensible HiGHS node/search-limit options and report latency.
 """
 
 from __future__ import annotations
@@ -16,8 +16,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 from GridPythia.config import AppConfig
 from GridPythia.optimization.solver import LinearOptimizer, OptimizationObjective
@@ -37,7 +35,7 @@ DEFAULT_LOG_DIR = Path("artifacts/followup_tune_logs")
 class TrialResult:
     name: str
     follow_opts: dict[str, Any]
-    first_wall_s: float
+    warmup_wall_s: float
     avg_follow_wall_s: float
     med_follow_wall_s: float
     best_follow_wall_s: float
@@ -116,11 +114,11 @@ def run_trial(
     inverters = _prepare_inverters(inverters_template)
 
     optimizer: LinearOptimizer | None = None
-    initial_modes: dict[str, InverterMode] | None = None
-    initial_soc_wh: dict[str, float] | None = None
-    warm_start_plan: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+    current_modes: dict[str, InverterMode] | None = None
+    current_soc: dict[str, float] | None = None
 
-    wall_times: list[float] = []
+    tracked_wall_times: list[float] = []
+    warmup_wall_s = 0.0
     statuses: list[str] = []
     nodes_arr: list[float] = []
     lp_it_arr: list[float] = []
@@ -136,79 +134,69 @@ def run_trial(
     for roll in range(rolling_steps):
         pred_window = slice_prediction(pred, start_idx=roll, length=window_steps)
 
-        if initial_soc_wh:
-            for inv in inverters:
-                if inv.battery is None:
-                    continue
-                start = initial_soc_wh.get(inv.device_id)
-                if start is not None:
-                    inv.battery.soc_wh = float(
-                        np.clip(start, inv.battery.min_soc_wh, inv.battery.max_soc_wh)
-                    )
-
         if optimizer is None:
             optimizer = LinearOptimizer(
                 inverters=inverters,
                 horizon=pred_window.steps,
                 dt_hours=pred_window.dt_hours,
+                objective=objective,
+                solver_opts=base_opts,
             )
 
-        opts = dict(base_opts) if roll == 0 else {**base_opts, **follow_opts_effective}
-        opts["output_flag"] = True
-        opts["log_to_console"] = True
+        # Roll 0 is warmup-only; subsequent rolls apply the candidate follow options.
+        per_call_opts: dict[str, Any] = {"output_flag": True, "log_to_console": True}
+        if roll > 0:
+            per_call_opts.update(follow_opts_effective)
         log_file = log_dir / f"{name}_roll_{roll + 1:03d}.log"
-        opts["log_file"] = str(log_file)
+        per_call_opts["log_file"] = str(log_file)
 
         t0 = time.perf_counter()
         solution = optimizer.solve(
-            objective=objective,
-            solver_opts=opts,
-            validate_with_simulation=False,
-            initial_modes=initial_modes,
-            warm_start_plan=warm_start_plan,
-            prediction=pred_window,
+            pred_window,
+            soc=current_soc,
+            initial_modes=current_modes,
+            solver_opts=per_call_opts,
         )
         wall = time.perf_counter() - t0
 
-        statuses.append(str(solution.solver_status))
-        wall_times.append(wall)
         metrics = parse_highs_work_metrics(log_file)
-        nodes_arr.append(metrics["nodes"])
-        lp_it_arr.append(metrics["lp_iterations"])
-        sep_arr.append(metrics["separation"])
-        heu_arr.append(metrics["heuristics"])
 
-        next_modes: dict[str, InverterMode] = {}
-        next_soc_wh: dict[str, float] = {}
-        for plan in solution.inverter_plans:
-            if plan.modes.size > 0:
-                next_modes[plan.device_id] = InverterMode(int(plan.modes[0]))
-            soc_trace = solution.result.battery_wh_per_dt.get(plan.device_id)
-            if soc_trace is not None and len(soc_trace) > 0:
-                next_soc_wh[plan.device_id] = float(soc_trace[0])
+        # Roll 0 is a warmup-only solve for reproducibility and is excluded from stats.
+        if roll == 0:
+            warmup_wall_s = wall
+        else:
+            statuses.append(str(solution.solver_status))
+            tracked_wall_times.append(wall)
+            nodes_arr.append(metrics["nodes"])
+            lp_it_arr.append(metrics["lp_iterations"])
+            sep_arr.append(metrics["separation"])
+            heu_arr.append(metrics["heuristics"])
 
-        initial_modes = next_modes or None
-        initial_soc_wh = next_soc_wh or None
-        warm_start_plan = LinearOptimizer.shift_solution_for_next_horizon(
-            solution,
-            horizon_steps=window_steps,
-            shift_steps=1,
-        )
+        current_modes = {
+            plan.device_id: InverterMode(int(plan.modes[0]))
+            for plan in solution.inverter_plans
+            if plan.modes.size > 0
+        } or None
+        current_soc = {
+            plan.device_id: float(soc_trace[0])
+            for plan in solution.inverter_plans
+            if (soc_trace := solution.result.battery_wh_per_dt.get(plan.device_id)) is not None
+            and len(soc_trace) > 0
+        } or None
 
-    if not wall_times:
-        raise RuntimeError("No rolling runs executed")
+    if not tracked_wall_times:
+        raise RuntimeError("No tracked rolling runs executed; increase rolling_steps")
 
-    follow_times = wall_times[1:] if len(wall_times) > 1 else wall_times
     return TrialResult(
         name=name,
         follow_opts=follow_opts_effective,
-        first_wall_s=wall_times[0],
-        avg_follow_wall_s=float(sum(follow_times) / len(follow_times)),
-        med_follow_wall_s=float(statistics.median(follow_times)),
-        best_follow_wall_s=float(min(follow_times)),
-        worst_follow_wall_s=float(max(follow_times)),
+        warmup_wall_s=warmup_wall_s,
+        avg_follow_wall_s=float(sum(tracked_wall_times) / len(tracked_wall_times)),
+        med_follow_wall_s=float(statistics.median(tracked_wall_times)),
+        best_follow_wall_s=float(min(tracked_wall_times)),
+        worst_follow_wall_s=float(max(tracked_wall_times)),
         status_counts=_count_statuses(statuses),
-        rolls=len(wall_times),
+        rolls=len(tracked_wall_times),
         avg_nodes=float(sum(nodes_arr) / len(nodes_arr)) if nodes_arr else 0.0,
         avg_lp_iterations=float(sum(lp_it_arr) / len(lp_it_arr)) if lp_it_arr else 0.0,
         avg_separation_work=float(sum(sep_arr) / len(sep_arr)) if sep_arr else 0.0,
@@ -217,62 +205,50 @@ def run_trial(
 
 
 def candidate_follow_opts() -> list[tuple[str, dict[str, Any]]]:
-    # Based on HiGHS docs: compare LP engine and heuristic intensity.
+    # Based on HiGHS docs: vary a small set of MIP node/search limits only.
+    # No heuristic/simplex options are changed to preserve solver defaults.
     # No time limits are used to keep comparisons fair.
     return [
         ("follow_baseline", {}),
+        ("follow_nodes_250", {"mip_max_nodes": 250}),
+        ("follow_nodes_500", {"mip_max_nodes": 500}),
+        ("follow_nodes_1000", {"mip_max_nodes": 1000}),
+        ("follow_nodes_2000", {"mip_max_nodes": 2000}),
+        ("follow_start_nodes_50", {"mip_max_start_nodes": 50}),
+        ("follow_start_nodes_100", {"mip_max_start_nodes": 100}),
+        ("follow_start_nodes_250", {"mip_max_start_nodes": 250}),
+        ("follow_start_nodes_1000", {"mip_max_start_nodes": 1000}),
+        ("follow_stall_nodes_250", {"mip_max_stall_nodes": 250}),
+        ("follow_stall_nodes_500", {"mip_max_stall_nodes": 500}),
+        ("follow_stall_nodes_1000", {"mip_max_stall_nodes": 1000}),
+        ("follow_leaves_250", {"mip_max_leaves": 250}),
+        ("follow_leaves_500", {"mip_max_leaves": 500}),
+        ("follow_leaves_1000", {"mip_max_leaves": 1000}),
+        ("follow_improving_sols_1", {"mip_max_improving_sols": 1}),
+        ("follow_improving_sols_2", {"mip_max_improving_sols": 2}),
+        ("follow_improving_sols_4", {"mip_max_improving_sols": 4}),
         (
-            "follow_light_heur",
+            "follow_budget_small",
             {
-                "mip_heuristic_effort": 0.01,
-                "mip_heuristic_run_rens": False,
-                "mip_heuristic_run_rins": False,
-                "mip_heuristic_run_feasibility_jump": False,
-                "mip_heuristic_run_root_reduced_cost": False,
-                "mip_lp_solver": "simplex",
-                "parallel": "on",
-                "threads": 0,
+                "mip_max_nodes": 500,
+                "mip_max_leaves": 250,
+                "mip_max_start_nodes": 100,
             },
         ),
         (
-            "follow_fast_root",
+            "follow_budget_balanced",
             {
-                "mip_heuristic_effort": 0.0,
-                "mip_heuristic_run_rens": False,
-                "mip_heuristic_run_rins": False,
-                "mip_heuristic_run_feasibility_jump": False,
-                "mip_heuristic_run_root_reduced_cost": False,
-                "mip_allow_restart": False,
-                "mip_detect_symmetry": True,
-                "mip_lp_solver": "simplex",
-                "parallel": "on",
-                "threads": 0,
+                "mip_max_nodes": 1000,
+                "mip_max_leaves": 500,
+                "mip_max_start_nodes": 250,
             },
         ),
         (
-            "follow_ipm_light_heur",
+            "follow_budget_aggressive",
             {
-                "mip_heuristic_effort": 0.01,
-                "mip_heuristic_run_rens": False,
-                "mip_heuristic_run_rins": False,
-                "mip_heuristic_run_feasibility_jump": False,
-                "mip_heuristic_run_root_reduced_cost": False,
-                "mip_lp_solver": "ipm",
-                "parallel": "on",
-                "threads": 0,
-            },
-        ),
-        (
-            "follow_simplex_less_parallel",
-            {
-                "mip_heuristic_effort": 0.0,
-                "mip_heuristic_run_rens": False,
-                "mip_heuristic_run_rins": False,
-                "mip_heuristic_run_feasibility_jump": False,
-                "mip_heuristic_run_root_reduced_cost": False,
-                "mip_lp_solver": "simplex",
-                "parallel": "off",
-                "threads": 0,
+                "mip_max_nodes": 250,
+                "mip_max_stall_nodes": 250,
+                "mip_max_improving_sols": 1,
             },
         ),
     ]
@@ -321,6 +297,8 @@ def main() -> None:
     print(f"Fixture: {args.fixture}")
     print(f"Steps: {pred.steps}, dt_hours: {pred.dt_hours}")
     print(f"Rolling hours: {args.rolling_hours} -> rolling_steps={rolling_steps}")
+    print("Roll index 0 is warmup only (excluded from comparison)")
+    print(f"Tracked roll indices: 1..{rolling_steps - 1}")
     print(f"Window steps: {window_steps}")
     print(f"Objective: {objective.value}")
     print(f"Base first-run opts: {base_opts}")
@@ -341,13 +319,13 @@ def main() -> None:
         )
         trials.append(trial)
         print(
-            f"{name:>22}: first={trial.first_wall_s * 1000:7.1f} ms | "
+            f"{name:>22}: warmup={trial.warmup_wall_s * 1000:7.1f} ms | "
             f"follow_avg={trial.avg_follow_wall_s * 1000:7.1f} ms | "
             f"follow_med={trial.med_follow_wall_s * 1000:7.1f} ms | "
             f"best={trial.best_follow_wall_s * 1000:7.1f} ms | "
             f"nodes={trial.avg_nodes:5.1f} | lp_it={trial.avg_lp_iterations:7.1f} | "
             f"sep={trial.avg_separation_work:6.1f} | heur={trial.avg_heuristics_work:7.1f} | "
-            f"status={trial.status_counts}"
+            f"rolls={trial.rolls} | status={trial.status_counts}"
         )
 
     print()

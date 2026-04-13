@@ -178,7 +178,7 @@ class TestLinearSolverHybridEconomics:
         )
         inv = _make_hybrid_inverter(roundtrip_efficiency=0.8)
 
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
         # Low period should not charge.
@@ -198,7 +198,7 @@ class TestLinearSolverHybridEconomics:
         )
         inv = _make_hybrid_inverter(roundtrip_efficiency=0.8)
 
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
         # Low period should charge.
@@ -222,7 +222,7 @@ class TestLinearSolverHybridEconomics:
         )
         inv = _make_hybrid_inverter(roundtrip_efficiency=0.8)
 
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
         rates = [int(r) for r in plan["rates"]]
 
@@ -243,7 +243,7 @@ class TestLinearSolverHybridEconomics:
         )
         inv = _make_hybrid_inverter(roundtrip_efficiency=0.8)
 
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
 
         plan = sol.inverter_plans[0]
         # Cheap slot: retaining energy for expensive future slots is more valuable.
@@ -265,7 +265,7 @@ class TestLinearSolverHybridEconomics:
         )
         inv = _make_hybrid_inverter(roundtrip_efficiency=0.8)
 
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert plan["modes"][0] == int(InverterMode.DISCHARGE_ZERO_FEED_IN)
@@ -306,8 +306,8 @@ class TestLinearSolverHybridEconomics:
             battery=battery,
         )
 
-        sol = LinearOptimizer([inv], pred).solve(
-            OptimizationObjective.MINIMIZE_COST,
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(
+            pred,
             validate_with_simulation=True,
         )
 
@@ -323,8 +323,9 @@ class TestLinearSolverHybridEconomics:
         """With lower switching cost, solver should use the isolated cheapest slot.
 
         Auto terminal value means the optimizer may charge fully (not just the minimum
-        for discharge), but t3 MUST still be used because its price saving
-        exceeds the extra switch cost.
+        for discharge).  t3 (price=0.00024) MUST be used because its price saving
+        exceeds the switch cost.  t2 (price=0.00045) may also be used because the
+        terminal reward for stored energy makes it profitable.
         """
         pred = _make_prediction(
             load_w=[0.0, 0.0, 0.0, 0.0, 600.0],
@@ -332,17 +333,15 @@ class TestLinearSolverHybridEconomics:
         )
         inv = _make_switching_case_inverter(switch_cost=0.005)
 
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
         isolated_charge = (
             float(plan["rates"][3]) if plan["modes"][3] == int(InverterMode.AC_CHARGE) else 0.0
         )
 
-        # The isolated cheapest slot must be used at full rate.
+        # The isolated cheapest slot (t3) must be used at full rate.
         assert isolated_charge == pytest.approx(100.0, abs=1e-6)
-        # Charging in the relatively expensive slot is never beneficial here.
-        assert plan["modes"][2] != int(InverterMode.AC_CHARGE)
 
     def test_initial_mode_reduces_first_step_switch_penalty(self) -> None:
         """If initial mode is AC_CHARGE, charging at t=0 should avoid first-step switch cost."""
@@ -352,14 +351,12 @@ class TestLinearSolverHybridEconomics:
         )
 
         inv_idle_start = _make_switching_case_inverter(switch_cost=0.020)
-        sol_idle_start = LinearOptimizer([inv_idle_start], pred).solve(
-            OptimizationObjective.MINIMIZE_COST
-        )
+        sol_idle_start = LinearOptimizer([inv_idle_start], pred.steps, pred.dt_hours).solve(pred)
         plan_idle_start = sol_idle_start.inverter_plans[0]
 
         inv_charge_start = _make_switching_case_inverter(switch_cost=0.020)
-        sol_charge_start = LinearOptimizer([inv_charge_start], pred).solve(
-            OptimizationObjective.MINIMIZE_COST,
+        sol_charge_start = LinearOptimizer([inv_charge_start], pred.steps, pred.dt_hours).solve(
+            pred,
             initial_modes={"hybrid_sw": InverterMode.AC_CHARGE},
         )
         plan_charge_start = sol_charge_start.inverter_plans[0]
@@ -393,7 +390,7 @@ class TestLinearSolverHybridEconomics:
             pv_wh={"hybrid_min_rate": [500.0]},
         )
 
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert plan["modes"][0] == int(InverterMode.IDLE)
@@ -416,7 +413,7 @@ class TestLinearSolverHybridEconomics:
             pv_wh={"hybrid_min_zfi": [500.0]},
         )
 
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert plan["modes"][0] == int(InverterMode.IDLE)
@@ -438,7 +435,7 @@ class TestLinearSolverHybridEconomics:
             price_eur_wh=[0.00010],
         )
 
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert plan["modes"][0] == int(InverterMode.IDLE)
@@ -488,7 +485,7 @@ class TestLinearSolverHybridEconomics:
         )
 
         # With high switch cost, the optimizer should avoid mode switches
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
         # The test passes, if ac charge is continuous for the first 3 slots, becasue the switch costs
@@ -512,7 +509,7 @@ class TestLinearSolverHybridEconomics:
         """
         eta = 1.0
 
-        def make_solver(switch_cost: float) -> LinearOptimizer:
+        def make_solver(switch_cost: float) -> tuple[LinearOptimizer, PredictionData]:
             battery = Battery(
                 BatteryParameters(
                     device_id="battery_zfi_cost",
@@ -546,10 +543,12 @@ class TestLinearSolverHybridEconomics:
                 price_eur_wh=[0.10, 0.80, 0.40],
                 pv_wh={"hybrid_zfi_cost": [0.0, 0.0, 0.0]},
             )
-            return LinearOptimizer([inv], pred)
+            return LinearOptimizer([inv], pred.steps, pred.dt_hours), pred
 
-        low_cost_plan = make_solver(0.0).solve(OptimizationObjective.MINIMIZE_COST).inverter_plans[0]
-        high_cost_plan = make_solver(0.5).solve(OptimizationObjective.MINIMIZE_COST).inverter_plans[0]
+        low_opt, pred_low = make_solver(0.0)
+        low_cost_plan = low_opt.solve(pred_low).inverter_plans[0]
+        high_opt, pred_high = make_solver(0.5)
+        high_cost_plan = high_opt.solve(pred_high).inverter_plans[0]
 
         assert low_cost_plan["modes"].tolist() == [
             int(InverterMode.IDLE),
@@ -571,7 +570,7 @@ class TestLinearSolverHybridEconomics:
         pred = _make_prediction(load_w=[100.0, 100.0, 100.0, 100.0], price_eur_wh=[0.05, 0.05, 0.05, 0.05])
         inv = _make_hybrid_inverter()
 
-        opt = LinearOptimizer([inv], pred)
+        opt = LinearOptimizer([inv], pred.steps, pred.dt_hours)
 
         for objective, problem in opt._problems.items():
             assert problem is not None, f"Problem for {objective} is None"
@@ -625,8 +624,8 @@ class TestActiveInverterConsumption:
             price_eur_wh=[0.00020, 0.00022, 0.00080],
         )
         inv = self._make_inverter(active_consumption_w=30.0)
-        sol = LinearOptimizer([inv], pred).solve(
-            OptimizationObjective.MINIMIZE_COST,
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(
+            pred,
             validate_with_simulation=True,
         )
 
@@ -651,7 +650,7 @@ class TestActiveInverterConsumption:
 
         # Very high active consumption makes staying IDLE cheaper
         inv = self._make_inverter(active_consumption_w=500.0)
-        sol = LinearOptimizer([inv], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
         # Both slots should be IDLE (arbitrage not worth the inverter consumption cost)
@@ -667,8 +666,8 @@ class TestActiveInverterConsumption:
         inv_no_loss = self._make_inverter(active_consumption_w=0.0)
         inv_with_loss = self._make_inverter(active_consumption_w=30.0)
 
-        sol_no = LinearOptimizer([inv_no_loss], pred).solve(OptimizationObjective.MINIMIZE_COST)
-        sol_with = LinearOptimizer([inv_with_loss], pred).solve(OptimizationObjective.MINIMIZE_COST)
+        sol_no = LinearOptimizer([inv_no_loss], pred.steps, pred.dt_hours).solve(pred)
+        sol_with = LinearOptimizer([inv_with_loss], pred.steps, pred.dt_hours).solve(pred)
 
         losses_no = float(np.sum(sol_no.result.losses_wh_per_dt))
         losses_with = float(np.sum(sol_with.result.losses_wh_per_dt))

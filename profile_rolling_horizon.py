@@ -215,9 +215,8 @@ def run_profile(
     )
 
     optimizer: LinearOptimizer | None = None
-    initial_modes: dict[str, InverterMode] | None = None
-    initial_soc_wh: dict[str, float] | None = None
-    warm_start_plan: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+    current_modes: dict[str, InverterMode] | None = None
+    current_soc: dict[str, float] | None = None
     rows: list[RollStats] = []
 
     print(f"Fixture steps: {pred.steps}, dt_hours: {pred.dt_hours}")
@@ -230,54 +229,37 @@ def run_profile(
     for roll in range(rolling_steps):
         pred_window = slice_prediction(pred, start_idx=roll, length=window_steps)
 
-        if initial_soc_wh:
-            for inv in inverters:
-                if inv.battery is None:
-                    continue
-                start = initial_soc_wh.get(inv.device_id)
-                if start is not None:
-                    inv.battery.soc_wh = float(
-                        np.clip(start, inv.battery.min_soc_wh, inv.battery.max_soc_wh)
-                    )
-
         if optimizer is None:
             optimizer = LinearOptimizer(
                 inverters=inverters,
                 horizon=pred_window.steps,
                 dt_hours=pred_window.dt_hours,
+                objective=objective,
+                solver_opts=base_opts,
             )
 
         log_file = output_dir / f"roll_{roll + 1:03d}.log"
-        opts = dict(base_opts)
-        opts["log_file"] = str(log_file)
 
         t0 = time.perf_counter()
         sol = optimizer.solve(
-            objective=objective,
-            solver_opts=opts,
-            validate_with_simulation=False,
-            initial_modes=initial_modes,
-            warm_start_plan=warm_start_plan,
-            prediction=pred_window,
+            pred_window,
+            soc=current_soc,
+            initial_modes=current_modes,
+            solver_opts={"log_file": str(log_file)},
         )
         wall_s = time.perf_counter() - t0
 
-        next_modes: dict[str, InverterMode] = {}
-        next_soc_wh: dict[str, float] = {}
-        for plan in sol.inverter_plans:
-            if plan.modes.size > 0:
-                next_modes[plan.device_id] = InverterMode(int(plan.modes[0]))
-            soc_trace = sol.result.battery_wh_per_dt.get(plan.device_id)
-            if soc_trace is not None and len(soc_trace) > 0:
-                next_soc_wh[plan.device_id] = float(soc_trace[0])
-        initial_modes = next_modes or None
-        initial_soc_wh = next_soc_wh or None
-
-        warm_start_plan = LinearOptimizer.shift_solution_for_next_horizon(
-            sol,
-            horizon_steps=window_steps,
-            shift_steps=1,
-        )
+        current_modes = {
+            plan.device_id: InverterMode(int(plan.modes[0]))
+            for plan in sol.inverter_plans
+            if plan.modes.size > 0
+        } or None
+        current_soc = {
+            plan.device_id: float(soc_trace[0])
+            for plan in sol.inverter_plans
+            if (soc_trace := sol.result.battery_wh_per_dt.get(plan.device_id)) is not None
+            and len(soc_trace) > 0
+        } or None
 
         start_mip = parse_highs_start_stats(log_file)
         objective_value = (
