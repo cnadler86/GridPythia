@@ -144,7 +144,7 @@ class LinearOptimizer:
     battery start SoC, and initial inverter mode).
     """
 
-    _MIN_ACTIVE_AC_RATE_PCT = 1.0
+    _MIN_ACTIVE_AC_RATE_PCT = 0.0
     _MONETARY_OBJECTIVE_SCALE = 100.0
 
     def __init__(
