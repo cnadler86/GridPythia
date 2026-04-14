@@ -99,20 +99,54 @@ _GUI_TIMEZONE_DEFAULT = "UTC"
 # ── utilities ─────────────────────────────────────────────────────────────
 
 
+class _AsyncTaskRunner:
+    """Execute async coroutines on one dedicated loop thread.
+
+    All completion/error callbacks are marshaled to Tk's main thread via
+    ``root.after(...)`` to keep UI access thread-safe.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def submit(
+        self,
+        root: tk.Misc,
+        coro: Coroutine[Any, Any, Any],
+        on_done: Callable[[Any], None],
+        on_error: Callable[[Exception, str], None],
+    ) -> None:
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+        def _done_callback(done_future: Any) -> None:
+            try:
+                result = done_future.result()
+            except Exception as exc:  # noqa: BLE001
+                tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                root.after(0, lambda: on_error(exc, tb))
+                return
+            root.after(0, lambda: on_done(result))
+
+        future.add_done_callback(_done_callback)
+
+
+_ASYNC_TASK_RUNNER = _AsyncTaskRunner()
+
+
 def _run_async(
+    root: tk.Misc,
     coro: Coroutine[Any, Any, Any],
     on_done: Callable[[Any], None],
     on_error: Callable[[Exception, str], None],
 ) -> None:
-    """Run *coro* in a daemon thread; deliver results via callbacks."""
-
-    def _worker() -> None:
-        try:
-            on_done(asyncio.run(coro))
-        except Exception as exc:
-            on_error(exc, traceback.format_exc())
-
-    threading.Thread(target=_worker, daemon=True).start()
+    """Schedule *coro* on the shared async runner and marshal callbacks to UI thread."""
+    _ASYNC_TASK_RUNNER.submit(root=root, coro=coro, on_done=on_done, on_error=on_error)
 
 
 async def _with_context(
@@ -511,9 +545,10 @@ class _Tab:
         ts = make_timestamps(start, hours, dt)
         self._status.set("Fetching…")
         _run_async(
+            self.app.root,
             prov.fetch(ts),
-            on_done=lambda r: self.app.root.after(0, lambda: self._done(r, ts)),
-            on_error=lambda e, tb: self.app.root.after(0, lambda: self._fail(e, tb)),
+            on_done=lambda r: self._done(r, ts),
+            on_error=lambda e, tb: self._fail(e, tb),
         )
 
     def _done(self, result: np.ndarray | dict, ts: list) -> None:
@@ -749,9 +784,10 @@ class LoadTab(_Tab):
         use_vac = vac_var.get() if vac_var is not None else False
         self._status.set("Fetching…")
         _run_async(
+            self.app.root,
             prov.fetch(ts, use_vacation_profile=use_vac),
-            on_done=lambda r: self.app.root.after(0, lambda: self._done(r, ts)),
-            on_error=lambda e, tb: self.app.root.after(0, lambda: self._fail(e, tb)),
+            on_done=lambda r: self._done(r, ts),
+            on_error=lambda e, tb: self._fail(e, tb),
         )
 
     def _do_plot(self, result: np.ndarray | dict, ts: list) -> None:
@@ -2181,6 +2217,7 @@ class OptimizationTab(_Tab):
 
                 run_id = uuid.uuid4().hex[:8]
                 _run_async(
+                    self.app.root,
                     _with_context(
                         _run_sim(),
                         run_id=run_id,
@@ -2202,6 +2239,7 @@ class OptimizationTab(_Tab):
 
         run_id = uuid.uuid4().hex[:8]
         _run_async(
+            self.app.root,
             _with_context(
                 pred.fetch(start=start, hours=hours, dt_hours=dt),
                 run_id=run_id,
@@ -2459,7 +2497,13 @@ class App:
         return dt.replace(tzinfo=tz), float(self._hours.get()), float(self._dt.get())
 
     def _fetch_all(self) -> None:
+        # Keep Fetch-All lightweight: only data-provider tabs run here.
+        # Optimization is triggered explicitly from the Optimization tab button.
         for tab in self.tabs:
+            if isinstance(tab, OptimizationTab):
+                if hasattr(tab, "_status"):
+                    tab._status.set("Skipped by Fetch All · use 'Run Optimization'")
+                continue
             tab.fetch()
 
 

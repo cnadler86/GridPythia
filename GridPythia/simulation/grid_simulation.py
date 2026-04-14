@@ -115,6 +115,7 @@ class GridSimulation:
         home_appliances: list[HomeAppliance] | None = None,
     ) -> None:
         dt = prediction.dt_hours
+        self._dt_hours: float = dt
         self.simulation_steps = prediction.steps  # number of simulation steps
 
         # Load is already in Wh (no conversion needed)
@@ -306,10 +307,11 @@ class GridSimulation:
         inverter_ac_rates: Mapping[str, Sequence[int] | np.ndarray],
         appliance_load: Sequence[float] | np.ndarray | None = None,
         start_idx: int = 0,
-        dt: float = 1.0,
+        dt: float | None = None,
         inverter_ac_energy_wh: Mapping[str, Sequence[float] | np.ndarray] | None = None,
     ) -> SimulationResult | None:
         """Simulate energy flows and costs for a contiguous time window."""
+        dt = dt if dt is not None else self._dt_hours
         if start_idx < 0 or start_idx > self.simulation_steps:
             raise ValueError(f"start_idx must be in [0, {self.simulation_steps}], got {start_idx}")
 

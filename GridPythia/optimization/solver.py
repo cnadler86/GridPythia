@@ -714,7 +714,9 @@ class LinearOptimizer:
             if inv.battery is not None:
                 pv_to_bat = cp.Variable(T, nonneg=True, name=f"pv_to_bat_{inv_id}")
                 # self._constraints.append(pv_ac + pv_to_bat <= pv_pred)
-                self._constraints.append(pv_ac + pv_to_bat == pv_pred)  # No curtailment allowed
+                self._constraints.append(
+                    pv_ac + pv_to_bat <= pv_pred
+                )  # Curtailment allowed when AC and battery are saturated
                 if mode_dc_activity is not None:
                     self._constraints.append(
                         pv_to_bat <= cp.multiply(pv_pred, 1 - mode_dc_activity)
