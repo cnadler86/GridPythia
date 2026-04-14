@@ -27,7 +27,7 @@ class TestElecPriceFixed:
         assert all(v == pytest.approx(result[0]) for v in result)
 
     async def test_flat_price_with_charges_and_vat(self):
-        provider = ElecPriceFixed(price_kwh=0.25, charges_kwh=0.05, vat_rate=1.19)
+        provider = ElecPriceFixed(price_kwh=0.25, charges_kwh=0.05, vat_rate=0.19)
         result = await provider.fetch(_ts())
         expected_wh = (0.25 / 1000.0 + 0.05 / 1000.0) * 1.19
         assert result[0] == pytest.approx(expected_wh)

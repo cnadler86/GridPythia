@@ -47,14 +47,8 @@ class Battery:
         self.charging_efficiency = self.parameters.charging_efficiency
         self.discharging_efficiency = self.parameters.discharging_efficiency
 
-        if self.parameters.max_charge_power_w is not None:
-            self.max_charge_power_w = self.parameters.max_charge_power_w
-        else:
-            self.max_charge_power_w = self.capacity_wh
-        if self.parameters.max_discharge_power_w is not None:
-            self.max_discharge_power_w = self.parameters.max_discharge_power_w
-        else:
-            self.max_discharge_power_w = self.capacity_wh
+        self.max_charge_power_w = self.parameters.max_charge_power_w
+        self.max_discharge_power_w = self.parameters.max_discharge_power_w
 
         if not (self.capacity_wh > 0):
             raise ValueError("capacity_wh must be > 0")
