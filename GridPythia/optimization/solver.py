@@ -28,6 +28,7 @@ from structlog import get_logger
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.inverterbase import InverterBase
+from GridPythia.simulation.grid_interpolator import FraunhoferSCModel
 from GridPythia.simulation.grid_simulation import GridSimulation, SimulationResult
 
 logger = get_logger(__name__)
@@ -402,30 +403,48 @@ class LinearOptimizer:
         self._g_import = cp.Variable(self._T, nonneg=True, name="g_import")
         self._g_feedin = cp.Variable(self._T, nonneg=True, name="g_feedin")
         self._pv_self = cp.Variable(self._T, nonneg=True, name="pv_self")
-        self._pv_export = cp.Variable(self._T, nonneg=True, name="pv_export")
+        # pv_export is computed implicitly as (total_pv_ac - pv_self) to reduce variables
+
+        # Fraunhofer SC model parameters (updated per solve with linearization coefficients)
+        # Keep DPP compliance by avoiding parameter*parameter terms in constraints.
+        self._sc_rhs_base = cp.Parameter(self._T, name="sc_rhs_base")
+        self._sc_c_pv = cp.Parameter(self._T, name="sc_c_pv")
 
         total_p_ch_terms: list[object] = []
         total_p_dc_terms: list[object] = []
-        total_pv_ac_terms: list[object] = [self._pv_external_param]
+        total_pv_ac_var_terms: list[object] = []
         blocks = [self._build_inverter_block(inv) for inv in self.inverters]
         for _inv, block in zip(self.inverters, blocks, strict=False):
             total_p_ch_terms.append(cast(cp.Expression, block.p_ch))
             total_p_dc_terms.append(cast(cp.Expression, block.p_dc))
-            total_pv_ac_terms.append(cast(cp.Expression, block.pv_ac))
+            total_pv_ac_var_terms.append(cast(cp.Expression, block.pv_ac))
 
         total_p_ch = self._sum_terms(total_p_ch_terms, self._T)
         total_p_dc = self._sum_terms(total_p_dc_terms, self._T)
-        total_pv_ac = self._sum_terms(total_pv_ac_terms, self._T)
+        total_pv_ac_var = self._sum_terms(total_pv_ac_var_terms, self._T)
+        total_pv_ac = total_pv_ac_var + self._pv_external_param
+
+        # Store total_pv_ac for use in constraints
+        self._total_pv_ac_expr = total_pv_ac
+
+        # Fraunhofer self-consumption model constraint (vectorized)
+        # pv_self <= rhs_base + c_pv * pv_ac, where rhs_base already includes c_const + c_load * load.
+        self._constraints.append(
+            self._pv_self <= self._sc_rhs_base + cp.multiply(self._sc_c_pv, total_pv_ac_var)
+        )
+        # Physical bounds
         self._constraints.extend(
             [
-                self._pv_self == 0,
-                self._pv_self + self._pv_export == total_pv_ac,
+                self._pv_self <= total_pv_ac,  # Can't self-consume more than available PV
+                self._pv_self <= self._load_param,  # Can't self-consume more than load
             ]
         )
 
+        # Grid balance: g_import - g_feedin == load + p_ch - p_dc + (pv_ac - pv_self) - pv_self
+        # Simplifies to: g_import - g_feedin == load + p_ch - p_dc + pv_ac - 2*pv_self
         self._constraints.append(
             self._g_import - self._g_feedin
-            == self._load_param + total_p_ch - total_p_dc + self._pv_export - self._pv_self
+            == self._load_param + total_p_ch - total_p_dc + total_pv_ac - 2 * self._pv_self
         )
 
         terminal_terms = [block.soc[-1] for block in blocks if block.soc is not None]
@@ -512,6 +531,25 @@ class LinearOptimizer:
             if src_id not in mapped:
                 external += np.asarray(arr, dtype=float)
         self._pv_external_param.value = external
+
+        # Fraunhofer SC model linearization (vectorized)
+        # Compute total PV AC estimate as operating point for linearization
+        total_pv_ac_estimate = external.copy()
+        for inv_id in self._pv_params:
+            pv_arr = prep.pv_by_source.get(inv_id, np.zeros(prep.T, dtype=float))
+            total_pv_ac_estimate += pv_arr
+
+        # Use a strictly positive baseload to satisfy FraunhoferSCModel input contract.
+        min_load = float(np.min(prep.load_wh)) if prep.load_wh.size > 0 else 0.0
+        sc_model = FraunhoferSCModel(baseload_wh=max(min_load, 10.0), dt=prep.dt)
+
+        # Linearize around (pv_estimate, load) to get tight constraints.
+        c_const, c_pv, c_load = sc_model.linearize_batch(
+            pv_0=total_pv_ac_estimate, load_0=prep.load_wh
+        )
+        # Fold all parameter-only parts into one runtime parameter to keep the CVXPY model DPP.
+        self._sc_rhs_base.value = c_const + c_load * prep.load_wh + c_pv * external
+        self._sc_c_pv.value = c_pv
 
         terminal_value = self._estimate_terminal_value(prep, self._blocks)
         self._terminal_value_param.value = terminal_value
@@ -610,6 +648,22 @@ class LinearOptimizer:
             if isinstance(block.soc, cp.Variable) and inv.device_id in self._soc_init_params:
                 soc0 = float(self._soc_init_params[inv.device_id].value or 0.0)
                 block.soc.value = np.full(prep.T, soc0, dtype=float)
+
+        # Warm-start pv_self with Fraunhofer model estimate
+        if isinstance(self._pv_self, cp.Variable):
+            # Compute total PV AC estimate
+            total_pv_ac_est = np.zeros(prep.T, dtype=float)
+            for block in self._blocks:
+                inv_id = block.inverter.device_id
+                if inv_id in prep.pv_by_source:
+                    total_pv_ac_est += prep.pv_by_source[inv_id]
+
+            # Use Fraunhofer model for warm-start (vectorized).
+            mean_load = float(np.mean(prep.load_wh)) if prep.load_wh.size > 0 else 0.0
+            sc_model = FraunhoferSCModel(baseload_wh=max(mean_load, 1.0), dt=prep.dt)
+            pv_self_est = sc_model.self_consumed_wh(total_pv_ac_est, prep.load_wh)
+
+            self._pv_self.value = np.asarray(pv_self_est, dtype=float)
 
     def _build_inverter_block(self, inv: InverterBase) -> _InverterModelBlock:
         T = self._T

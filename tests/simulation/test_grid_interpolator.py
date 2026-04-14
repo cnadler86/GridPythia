@@ -1,6 +1,7 @@
 """Tests for Fraunhofer self-consumption interpolation/model behavior."""
 
 from datetime import datetime, timedelta
+import warnings
 
 import numpy as np
 import pytest
@@ -98,3 +99,71 @@ def test_grid_simulation_uses_prediction_dt_and_min_load_for_fraunhofer_init() -
     # The initialized model should deliver bounded SCR values.
     scr = sim._fraunhofer_sc_model.sc_ratio(pv_wh=100.0, load_wh=400.0)
     assert 0.0 <= scr <= 1.0
+
+
+def test_linearize_batch_handles_zero_load_without_runtime_warning() -> None:
+    """Batch linearization must not emit invalid-divide warnings for zero-load steps."""
+    model = FraunhoferSCModel(baseload_wh=500.0, dt=0.25)
+    pv_0 = np.array([0.0, 50.0, 300.0, 900.0], dtype=np.float64)
+    load_0 = np.array([0.0, 0.0, 400.0, 800.0], dtype=np.float64)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        c_const, c_pv, c_load = model.linearize_batch(pv_0=pv_0, load_0=load_0)
+
+    assert c_const.shape == pv_0.shape
+    assert c_pv.shape == pv_0.shape
+    assert c_load.shape == pv_0.shape
+    assert np.all(np.isfinite(c_const))
+    assert np.all(np.isfinite(c_pv))
+    assert np.all(np.isfinite(c_load))
+
+
+def test_linearize_batch_matches_scalar_linearize_coefficients() -> None:
+    """Vectorized linearization coefficients should match per-step scalar linearization."""
+    model = FraunhoferSCModel(baseload_wh=500.0, dt=0.25)
+    pv_0 = np.array([0.0, 20.0, 150.0, 500.0, 1200.0], dtype=np.float64)
+    load_0 = np.array([0.0, 50.0, 200.0, 800.0, 1500.0], dtype=np.float64)
+
+    c_const_b, c_pv_b, c_load_b = model.linearize_batch(pv_0=pv_0, load_0=load_0)
+
+    c_const_s = []
+    c_pv_s = []
+    c_load_s = []
+    for pv, load in zip(pv_0, load_0, strict=False):
+        lc = model.linearize(pv_0=float(pv), load_0=float(load))
+        c_const_s.append(lc.c_const)
+        c_pv_s.append(lc.c_pv)
+        c_load_s.append(lc.c_load)
+
+    np.testing.assert_allclose(c_const_b, np.array(c_const_s), rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(c_pv_b, np.array(c_pv_s), rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(c_load_b, np.array(c_load_s), rtol=0.0, atol=1e-12)
+
+
+def test_linearization_envelope_is_tight_at_operating_point_and_upper_bounds_locally() -> None:
+    """The LP envelope (linearized row + physical bounds) should conservatively bound exact model."""
+    model = FraunhoferSCModel(baseload_wh=500.0, dt=0.25)
+    # Choose interior operating points where SC clipping is inactive.
+    pv_0 = np.array([300.0, 500.0, 1200.0, 2000.0], dtype=np.float64)
+    load_0 = np.array([200.0, 500.0, 900.0, 1200.0], dtype=np.float64)
+
+    c_const, c_pv, c_load = model.linearize_batch(pv_0=pv_0, load_0=load_0)
+    e_exact_0 = np.asarray(model.self_consumed_wh(pv_0, load_0), dtype=np.float64)
+    e_lin_0 = c_const + c_pv * pv_0 + c_load * load_0
+
+    # Tangency at operating point.
+    np.testing.assert_allclose(e_lin_0, e_exact_0, rtol=0.0, atol=1e-9)
+
+    pv_factors = np.array([0.5, 0.8, 1.0, 1.2, 1.5], dtype=np.float64)
+    load_factors = np.array([0.6, 0.9, 1.0, 1.1, 1.4], dtype=np.float64)
+
+    for i in range(pv_0.size):
+        pv_test = np.maximum(0.0, pv_0[i] * pv_factors)
+        load_test = np.maximum(1e-6, load_0[i] * load_factors)
+        exact = np.asarray(model.self_consumed_wh(pv_test, load_test), dtype=np.float64)
+        lin = c_const[i] + c_pv[i] * pv_test + c_load[i] * load_test
+
+        # The optimization model applies all three constraints simultaneously.
+        envelope = np.minimum(np.minimum(lin, pv_test), load_test)
+        assert np.all(envelope + 1e-8 >= exact)

@@ -272,6 +272,41 @@ class TestLinearSolverHybridEconomics:
         assert plan["rates"][0] == pytest.approx(0.0, abs=1e-6)
         assert float(sol.result.grid_import_wh_per_dt[0]) == pytest.approx(0.0, abs=1e-3)
 
+    def test_pv_surplus_charges_battery_before_later_discharge(self) -> None:
+        """With PV surplus and battery headroom, SoC should increase before a later expensive discharge."""
+        pred = _make_prediction(
+            load_w=[200.0, 700.0],
+            price_eur_wh=[0.00090, 0.00200],
+            pv_wh={"hybrid_h1": [700.0, 100.0]},
+        )
+        inv = _make_hybrid_inverter(roundtrip_efficiency=0.8)
+
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        plan = sol.inverter_plans[0]
+        soc = np.asarray(sol.result.battery_wh_per_dt["hybrid_h1"], dtype=float)
+
+        # Step 0: load < PV, battery has headroom, so it should be charged from PV.
+        assert soc[0] > 500.0
+
+        # Step 1: PV < load, expensive slot -> battery should discharge and reduce imports.
+        assert plan["modes"][1] == int(InverterMode.DISCHARGE_ZERO_FEED_IN)
+        assert float(sol.result.grid_import_wh_per_dt[1]) < 400.0
+
+    def test_when_pv_is_below_load_battery_discharges(self) -> None:
+        """If PV is below load in an expensive slot, the battery should discharge."""
+        pred = _make_prediction(
+            load_w=[600.0, 600.0],
+            price_eur_wh=[0.00200, 0.00010],
+            pv_wh={"hybrid_h1": [200.0, 200.0]},
+        )
+        inv = _make_hybrid_inverter(roundtrip_efficiency=0.8)
+
+        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        plan = sol.inverter_plans[0]
+
+        assert any(m == int(InverterMode.DISCHARGE_ZERO_FEED_IN) for m in plan["modes"])
+        assert np.min(np.asarray(sol.result.grid_import_wh_per_dt, dtype=float)) < 400.0
+
     def test_simulation_parity_report_for_no_pv_case(self) -> None:
         """With no PV signal, LP replay should match simulation very closely."""
         pred = _make_prediction(
