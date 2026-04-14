@@ -1,8 +1,13 @@
-"""Profile rolling-horizon behavior on fixture prediction data.
+"""Profile rolling-horizon warm-start behavior on fixture prediction data.
 
 This script is focused on diagnosing warm-start quality for repeated MILP solves.
 It uses the project config for topology, fixture JSON as prediction input, and
 prints per-roll timing and initial MIP bound/gap diagnostics parsed from HiGHS logs.
+
+The roll setting is interpreted as a total shift span over the full prediction.
+For example, with a 48 h prediction and a 4 h roll span, each solve uses a
+44 h window and the window start index advances by exactly one step per roll
+across that final 4 h span.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ from GridPythia.simulation.devices.inverterbase import InverterBase
 
 DEFAULT_CONFIG = Path("config.yaml")
 DEFAULT_FIXTURE = Path("tests/optimization/fixtures/prediction_2026_04_06_48h_15m.json")
-DEFAULT_ROLLING_HOURS = 4.0
+DEFAULT_ROLL_SHIFT_HOURS = 4.0
 
 
 @dataclass
@@ -182,7 +187,7 @@ def parse_highs_start_stats(log_path: Path) -> StartMipStats:
 
 
 def run_profile(
-    config_path: Path, fixture_path: Path, rolling_hours: float, output_dir: Path
+    config_path: Path, fixture_path: Path, roll_shift_hours: float, output_dir: Path
 ) -> None:
     app_cfg = AppConfig.from_yaml_file(config_path)
     pred = load_fixture_prediction(fixture_path)
@@ -195,11 +200,13 @@ def run_profile(
     )
 
     dt = float(pred.dt_hours)
-    rolling_steps = max(1, int(round(rolling_hours / dt)))
-    if pred.steps <= rolling_steps + 1:
-        raise RuntimeError(f"Prediction too short ({pred.steps}) for rolling_steps={rolling_steps}")
+    roll_shift_steps = max(1, int(round(roll_shift_hours / dt)))
+    if pred.steps <= roll_shift_steps + 1:
+        raise RuntimeError(
+            f"Prediction too short ({pred.steps}) for roll_shift_steps={roll_shift_steps}"
+        )
 
-    window_steps = pred.steps - rolling_steps
+    window_steps = pred.steps - roll_shift_steps
     output_dir.mkdir(parents=True, exist_ok=True)
 
     base_opts = dict(app_cfg.optimization.solver.solver_opts)
@@ -220,13 +227,16 @@ def run_profile(
     rows: list[RollStats] = []
 
     print(f"Fixture steps: {pred.steps}, dt_hours: {pred.dt_hours}")
-    print(f"Rolling horizon time: {rolling_hours} h -> {rolling_steps} steps")
-    print(f"Window length per solve: {window_steps} steps")
+    print(f"Total roll span: {roll_shift_hours} h -> {roll_shift_steps} steps")
+    print(f"Window length per solve: {window_steps} steps ({window_steps * dt:.2f} h)")
+    print(
+        f"Window start index per roll: 0..{roll_shift_steps - 1} (increments by 1 step each roll)"
+    )
     print(f"Objective: {objective.value}")
     print("Solver verbose enabled: yes")
     print()
 
-    for roll in range(rolling_steps):
+    for roll in range(roll_shift_steps):
         pred_window = slice_prediction(pred, start_idx=roll, length=window_steps)
 
         if optimizer is None:
@@ -348,8 +358,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--rolling-hours",
         type=float,
-        default=DEFAULT_ROLLING_HOURS,
-        help="Rolling horizon shift in hours (default: 4h)",
+        default=DEFAULT_ROLL_SHIFT_HOURS,
+        help=(
+            "Total roll span in hours over the full prediction; "
+            "each solve uses prediction_length - roll_span and advances the "
+            "window start by 1 step per roll (default: 4h)"
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -362,6 +376,6 @@ if __name__ == "__main__":
     run_profile(
         config_path=args.config,
         fixture_path=args.fixture,
-        rolling_hours=args.rolling_hours,
+        roll_shift_hours=args.rolling_hours,
         output_dir=args.output_dir,
     )
