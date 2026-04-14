@@ -1,7 +1,6 @@
 """Basic economic behavior tests for the linear MILP solver."""
 
 from __future__ import annotations
-from pygments.unistring import No
 
 from datetime import datetime, timedelta
 
