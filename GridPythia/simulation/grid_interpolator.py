@@ -324,6 +324,49 @@ class FraunhoferSCModel:
             e_self_0=float(e0),
         )
 
+    def linearize_batch(
+        self,
+        pv_0: np.ndarray,
+        load_0: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Vectorized linearization of e_self(e_pv, e_load) for multiple time steps.
+
+        Computes first-order Taylor coefficients for the constraint:
+            e_self <= c_const + c_pv * e_pv + c_load * e_load
+
+        This is a valid upper bound due to concavity of SS(r).
+
+        Args:
+            pv_0: Array of PV operating points [Wh] - shape (T,)
+            load_0: Array of load operating points [Wh] - shape (T,), or None for baseload
+
+        Returns:
+            (c_const, c_pv, c_load): Tuple of coefficient arrays, each shape (T,)
+        """
+        pv_0 = np.asarray(pv_0, dtype=np.float64)
+        if load_0 is None:
+            load_0 = np.full_like(pv_0, self.baseload_wh, dtype=np.float64)
+        else:
+            load_0 = np.asarray(load_0, dtype=np.float64)
+
+        a, b = self.params.a, self.params.b
+
+        # Compute r = pv / load, with floor for numerical stability
+        r0 = np.where(load_0 > 1e-9, pv_0 / load_0, 1e9)
+        r0 = np.maximum(r0, 1e-6)  # Floor to avoid instability when b < 1
+
+        # Compute derivatives
+        with np.errstate(over="ignore"):
+            exp0 = np.exp(-a * r0**b)
+        ss0 = 1.0 - exp0
+
+        c_pv = a * b * r0 ** (b - 1) * exp0
+        c_load = ss0 - a * b * r0**b * exp0
+        e0 = ss0 * load_0
+        c_const = e0 - c_pv * pv_0 - c_load * load_0
+
+        return c_const, c_pv, c_load
+
     # ── grid helpers ──────────────────────────────────────────────────────────
 
     def grid(
