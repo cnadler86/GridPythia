@@ -675,7 +675,10 @@ class LinearOptimizer:
         mode_dc_activity: cp.Expression | None = None
 
         if inv.battery is not None and inv.is_optimizable and has_charge_mode:
-            max_ch_wh = float(inv.battery.max_charge_power_w * dt)
+            max_ch_power_w = float(inv.battery.max_charge_power_w)
+            if inv.parameters.max_ac_charge_power_w > 0:
+                max_ch_power_w = min(max_ch_power_w, float(inv.parameters.max_ac_charge_power_w))
+            max_ch_wh = max_ch_power_w * dt
             if max_ch_wh > 0:
                 mode_ch_activity = cp.Variable(T, boolean=True, name=f"mode_ch_{inv_id}")
                 p_ch = cp.Variable(T, nonneg=True, name=f"p_ch_{inv_id}")
@@ -688,7 +691,10 @@ class LinearOptimizer:
             p_ch = cp.Constant(np.zeros(T, dtype=float))
 
         if inv.battery is not None and inv.is_optimizable and has_discharge_mode:
-            max_dc_wh = float(inv.battery.max_discharge_power_w * dt)
+            max_dc_power_w = float(inv.battery.max_discharge_power_w)
+            if inv.parameters.max_ac_output_power_w > 0:
+                max_dc_power_w = min(max_dc_power_w, float(inv.parameters.max_ac_output_power_w))
+            max_dc_wh = max_dc_power_w * dt
             if max_dc_wh > 0:
                 mode_dc_activity = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
                 p_dc = cp.Variable(T, nonneg=True, name=f"p_dc_{inv_id}")
@@ -768,6 +774,14 @@ class LinearOptimizer:
                 )
             else:
                 self._constraints.append(p_dc / eta_d <= start_soc - bat.min_soc_wh)
+
+            # Combined battery charge-rate limit in raw battery input energy [Wh/dt]:
+            # AC charging contributes after AC->DC conversion, PV->battery is already
+            # on the DC side before battery charging losses.
+            self._constraints.append(
+                p_ch * inv.parameters.ac_to_dc_efficiency + pv_to_bat <= bat.max_charge_power_w * dt
+            )
+
             self._constraints.append(
                 p_ch * eta_c_ac + pv_to_bat * eta_c_pv <= bat.max_soc_wh - start_soc
             )
