@@ -33,13 +33,13 @@ def test_fixture_solution_matches_regression_signature() -> None:
     assert np.max(np.minimum(plan.charge_ac_wh, plan.discharge_ac_wh)) == pytest.approx(0.0, abs=1e-6)
     assert np.all(plan.pv_to_ac_wh + plan.pv_to_battery_wh <= scenario.prediction.pv_by_inverter[plan.device_id] + 1e-5)
 
-    assert solution.result.total_cost == pytest.approx(0.821221, abs=1e-3)
-    assert solution.result.total_grid_import == pytest.approx(4765.9, abs=1.0)
-    assert solution.result.total_losses == pytest.approx(709.4, abs=2.0)
-    assert float(plan.battery_soc_wh[-1]) == pytest.approx(763.3, abs=2.0)
+    assert solution.result.total_cost == pytest.approx(0.798987, abs=1e-3)
+    assert solution.result.total_grid_import == pytest.approx(4740.3, abs=1.0)
+    assert solution.result.total_losses == pytest.approx(758.6, abs=2.0)
+    assert float(plan.battery_soc_wh[-1]) == pytest.approx(673.0, abs=2.0)
 
     active_idx = np.flatnonzero((plan.charge_ac_wh > 1e-6) | (plan.discharge_ac_wh > 1e-6))
-    assert active_idx.size == 86
+    assert active_idx.size == 93
     assert active_idx[0] == 20
     assert active_idx[-1] == 182
     np.testing.assert_allclose(

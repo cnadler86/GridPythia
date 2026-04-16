@@ -319,25 +319,27 @@ class LinearOptimizer:
 
     def _build_warm_start_plan(
         self, shift_steps: int
-    ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         """Build a warm-start seed from the cached solution, shifted by *shift_steps*.
 
-        Returns a dict mapping device_id → (modes, charge_ac_wh, discharge_ac_wh, pv_to_bat_wh).
+        Returns a dict mapping device_id → (modes, charge_ac_wh, discharge_ac_wh, pv_to_bat_wh, pv_ac_wh).
         """
         if self._cached_solution is None or shift_steps <= 0:
             return {}
 
         T = self._T
-        out: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+        out: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
         for inv_plan in self._cached_solution.inverter_plans:
             src_modes = np.asarray(inv_plan.modes, dtype=np.int8)
             src_ch = np.asarray(inv_plan.charge_ac_wh, dtype=np.float32)
             src_dc = np.asarray(inv_plan.discharge_ac_wh, dtype=np.float32)
             src_pvb = np.asarray(inv_plan.pv_to_battery_wh, dtype=np.float32)
+            src_pva = np.asarray(inv_plan.pv_to_ac_wh, dtype=np.float32)
 
             if src_modes.size == 0:
                 out[inv_plan.device_id] = (
                     np.full(T, int(InverterMode.IDLE), dtype=np.int8),
+                    np.zeros(T, dtype=np.float32),
                     np.zeros(T, dtype=np.float32),
                     np.zeros(T, dtype=np.float32),
                     np.zeros(T, dtype=np.float32),
@@ -351,6 +353,7 @@ class LinearOptimizer:
             shifted_ch = np.zeros(T, dtype=np.float32)
             shifted_dc = np.zeros(T, dtype=np.float32)
             shifted_pvb = np.zeros(T, dtype=np.float32)
+            shifted_pva = np.zeros(T, dtype=np.float32)
 
             if copied > 0:
                 sl = slice(src_start, src_start + copied)
@@ -358,12 +361,14 @@ class LinearOptimizer:
                 shifted_ch[:copied] = src_ch[sl]
                 shifted_dc[:copied] = src_dc[sl]
                 shifted_pvb[:copied] = src_pvb[sl]
+                shifted_pva[:copied] = src_pva[sl]
 
             if copied < T:
                 shifted_modes[copied:] = src_modes[-1]
                 shifted_ch[copied:] = src_ch[-1]
                 shifted_dc[copied:] = src_dc[-1]
                 shifted_pvb[copied:] = src_pvb[-1]
+                shifted_pva[copied:] = src_pva[-1]
 
             # ZFI/IDLE modes carry no explicit AC power target
             zfi_mask = np.isin(
@@ -377,8 +382,16 @@ class LinearOptimizer:
             shifted_ch[zfi_mask] = 0.0
             shifted_dc[zfi_mask] = 0.0
             # pv_to_bat may still be nonzero in IDLE (PV → battery passively)
+            # pv_ac is 0 in IDLE (gated by mode_dc)
+            shifted_pva[shifted_modes == int(InverterMode.IDLE)] = 0.0
 
-            out[inv_plan.device_id] = (shifted_modes, shifted_ch, shifted_dc, shifted_pvb)
+            out[inv_plan.device_id] = (
+                shifted_modes,
+                shifted_ch,
+                shifted_dc,
+                shifted_pvb,
+                shifted_pva,
+            )
         return out
 
     def _prepare_inputs(self, prediction: PredictionData) -> _PreparedInputs:
@@ -572,7 +585,10 @@ class LinearOptimizer:
     def _apply_warm_start_values(
         self,
         prep: _PreparedInputs,
-        warm_start_plan: Mapping[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] | None,
+        warm_start_plan: Mapping[
+            str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        ]
+        | None,
     ) -> None:
         if not warm_start_plan or prep.T <= 0:
             return
@@ -588,7 +604,7 @@ class LinearOptimizer:
             if seed is None:
                 continue
 
-            seed_modes, seed_ch_wh, seed_dc_wh, seed_pvb_wh = seed
+            seed_modes, seed_ch_wh, seed_dc_wh, seed_pvb_wh, seed_pva_wh = seed
             if seed_modes.size == 0:
                 continue
 
@@ -596,6 +612,7 @@ class LinearOptimizer:
             seed_ch_wh = _pad(seed_ch_wh, 0.0)
             seed_dc_wh = _pad(seed_dc_wh, 0.0)
             seed_pvb_wh = _pad(seed_pvb_wh, 0.0)
+            seed_pva_wh = _pad(seed_pva_wh, 0.0)
 
             if isinstance(block.mode_ch_activity, cp.Variable):
                 ch = np.isin(
@@ -619,6 +636,9 @@ class LinearOptimizer:
 
             if isinstance(block.pv_to_bat, cp.Variable):
                 block.pv_to_bat.value = seed_pvb_wh[: prep.T].astype(float)
+
+            if isinstance(block.pv_ac, cp.Variable):
+                block.pv_ac.value = seed_pva_wh[: prep.T].astype(float)
 
             if isinstance(block.soc, cp.Variable) and inv.device_id in self._soc_init_params:
                 soc0 = float(self._soc_init_params[inv.device_id].value or 0.0)
@@ -691,11 +711,17 @@ class LinearOptimizer:
                 self._constraints.append(
                     pv_ac + pv_to_bat <= pv_pred
                 )  # Curtailment allowed when AC and battery are saturated
-                # No mode gate on pv_to_bat: physical inverters with a battery
-                # always route PV to the battery in IDLE (passive DC-bus coupling).
-                # The headroom constraint below prevents overfilling in all modes.
-                # When the battery is full (headroom = 0) pv_to_bat is forced to 0
-                # and PV naturally flows to the AC bus via pv_ac.
+                if mode_dc_activity is not None:
+                    # Gate PV→AC on the discharge binary ("bypass mode"):
+                    # the DC→AC path is only open when the inverter is active (mode_dc=1).
+                    # In IDLE (mode_dc=0) all PV flows to the battery via passive DC-bus
+                    # coupling (pv_to_bat).  When the battery is full the headroom constraint
+                    # forces pv_to_bat=0; the solver then activates mode_dc=1 with p_dc=0
+                    # (zero-discharge bypass) so that excess PV can reach the AC bus.
+                    # No new binary variable is needed.
+                    self._constraints.append(pv_ac <= cp.multiply(pv_pred, mode_dc_activity))
+                # No mode gate on pv_to_bat: battery absorbs PV passively in any mode;
+                # the combined headroom constraint prevents overfilling.
             else:
                 pv_to_bat = cp.Constant(np.zeros(T, dtype=float))
                 self._constraints.append(pv_ac <= pv_pred)
@@ -747,10 +773,10 @@ class LinearOptimizer:
             )
 
             # Physical model: PV is passively coupled to the battery DC bus.
-            # pv_to_bat is ungated by mode — in IDLE the inverter routes PV to the
-            # battery automatically; when the battery is full (headroom = 0) the
-            # headroom constraint forces pv_to_bat = 0 and PV spills to the AC bus.
-            # The combined headroom constraint ensures AC + PV charging never overfills.
+            # pv_to_bat is ungated — the battery absorbs PV automatically in any mode.
+            # pv_ac is gated by mode_dc (bypass gate above): PV only reaches the AC bus
+            # when the inverter DC→AC path is active.  The headroom constraint ensures
+            # AC + PV charging never overfills the battery.
 
             self._constraints.append(soc == start_soc + delta)
             self._constraints.extend([soc >= bat.min_soc_wh, soc <= bat.max_soc_wh])
@@ -912,10 +938,15 @@ class LinearOptimizer:
         )
 
         # Set modes from active AC power flows only.
-        # pv_to_bat is passive DC-bus routing and does not change the reported mode:
-        # PV→battery happens in IDLE too (no active AC charge/discharge needed).
+        # pv_to_bat is passive DC-bus routing and does not change the reported mode.
         modes[p_ch > eps] = int(ch_mode)
         modes[p_dc > eps] = int(dc_mode)
+
+        # Battery inverters: pv_ac > 0 requires mode_dc=1 by the bypass-gate constraint,
+        # so the inverter IS actively running its DC→AC path — report as discharge mode.
+        if inv.battery is not None and block.mode_dc_activity is not None:
+            pv_ac_vec = self._expr_to_vec(block.pv_ac, T)
+            modes[pv_ac_vec > eps] = int(dc_mode)
 
         # For switch-cost models: binary=1 with zero power means "parking in mode"
         # to avoid incurring a future switch penalty.
