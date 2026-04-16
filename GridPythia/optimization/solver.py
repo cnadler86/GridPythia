@@ -924,7 +924,6 @@ class LinearOptimizer:
 
         p_ch = self._expr_to_vec(block.p_ch, T)
         p_dc = self._expr_to_vec(block.p_dc, T)
-        pv_to_bat = self._expr_to_vec(block.pv_to_bat, T)
 
         ch_mode = (
             InverterMode.AC_CHARGE
@@ -939,6 +938,8 @@ class LinearOptimizer:
 
         # Set modes from active AC power flows only.
         # pv_to_bat is passive DC-bus routing and does not change the reported mode.
+        # pv_to_bat = self._expr_to_vec(block.pv_to_bat, T)
+
         modes[p_ch > eps] = int(ch_mode)
         modes[p_dc > eps] = int(dc_mode)
 

@@ -129,7 +129,7 @@ class _AsyncTaskRunner:
                 result = done_future.result()
             except Exception as exc:  # noqa: BLE001
                 tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-                root.after(0, lambda: on_error(exc, tb))
+                root.after(0, lambda e=exc, t=tb: on_error(e, t))
                 return
             root.after(0, lambda: on_done(result))
 
@@ -1794,6 +1794,7 @@ class OptimizationTab(_Tab):
                             pdata,
                             objective=objective,
                             solver_opts=solver_opts,
+                            validate_with_simulation=True,
                         )
                     )
                     return sol
