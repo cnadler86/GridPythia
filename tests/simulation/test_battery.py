@@ -90,13 +90,39 @@ def test_battery_reset_function(setup_pv_battery):
 def test_soc_limits(setup_pv_battery):
     battery = setup_pv_battery
 
-    battery.soc_wh = battery.max_soc_wh + 1000
-    battery.soc_wh = min(battery.soc_wh, battery.max_soc_wh)
-    assert battery.current_soc_percentage() <= 80
+    with pytest.raises(ValueError, match="soc_wh"):
+        battery.soc_wh = battery.max_soc_wh + 1000
 
-    battery.soc_wh = battery.min_soc_wh - 1000
-    battery.soc_wh = max(battery.soc_wh, battery.min_soc_wh)
-    assert battery.current_soc_percentage() >= 20
+    with pytest.raises(ValueError, match="soc_wh"):
+        battery.soc_wh = battery.min_soc_wh - 1000
+
+
+def test_soc_percentage_setter_updates_soc_wh(setup_pv_battery):
+    battery = setup_pv_battery
+
+    battery.soc_percentage = 75.0
+
+    assert battery.soc_wh == pytest.approx(7500.0)
+    assert battery.current_soc_percentage() == pytest.approx(75.0)
+
+
+def test_soc_wh_setter_updates_soc_percentage(setup_pv_battery):
+    battery = setup_pv_battery
+
+    battery.soc_wh = 6000.0
+
+    assert battery.soc_percentage == pytest.approx(60.0)
+    assert battery.current_soc_percentage() == pytest.approx(60.0)
+
+
+def test_soc_percentage_limits(setup_pv_battery):
+    battery = setup_pv_battery
+
+    with pytest.raises(ValueError, match="soc_percentage"):
+        battery.soc_percentage = 85.0
+
+    with pytest.raises(ValueError, match="soc_percentage"):
+        battery.soc_percentage = 10.0
 
 
 def test_charge_energy_within_limits(setup_pv_battery):

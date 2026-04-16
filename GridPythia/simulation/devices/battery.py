@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from math import isfinite
 from typing import Any
 
 from structlog import get_logger
@@ -18,14 +19,15 @@ class Battery:
         "parameters",
         "prediction_hours",
         "capacity_wh",
-        "initial_soc_percentage",
+        "_initial_soc_percentage",
         "min_soc_percentage",
         "max_soc_percentage",
         "charging_efficiency",
         "discharging_efficiency",
         "max_charge_power_w",
         "max_discharge_power_w",
-        "soc_wh",
+        "_soc_wh",
+        "_soc_percentage",
         "min_soc_wh",
         "max_soc_wh",
         "_initial_soc_wh",
@@ -41,7 +43,6 @@ class Battery:
     def _setup(self) -> None:
         """Sets up the battery parameters based on provided parameters."""
         self.capacity_wh = self.parameters.capacity_wh
-        self.initial_soc_percentage = self.parameters.initial_soc_percentage
         self.min_soc_percentage = self.parameters.min_soc_percentage
         self.max_soc_percentage = self.parameters.max_soc_percentage
         self.charging_efficiency = self.parameters.charging_efficiency
@@ -63,7 +64,7 @@ class Battery:
         for perc, name in (
             (self.min_soc_percentage, "min_soc_percentage"),
             (self.max_soc_percentage, "max_soc_percentage"),
-            (self.initial_soc_percentage, "initial_soc_percentage"),
+            (self.parameters.initial_soc_percentage, "initial_soc_percentage"),
         ):
             if not (0.0 <= perc <= 100.0):
                 raise ValueError(f"{name} must be within [0, 100], got {perc}")
@@ -72,17 +73,17 @@ class Battery:
             raise ValueError("Min_soc_percentage cannot be greater than max_soc_percentage")
 
         # Clamp initial SoC percentage into [min, max]
-        self.initial_soc_percentage = min(
-            max(self.initial_soc_percentage, self.min_soc_percentage),
+        self._initial_soc_percentage = min(
+            max(float(self.parameters.initial_soc_percentage), self.min_soc_percentage),
             self.max_soc_percentage,
         )
 
-        self.soc_wh = (self.initial_soc_percentage / 100) * self.capacity_wh
         self.min_soc_wh = (self.min_soc_percentage / 100) * self.capacity_wh
         self.max_soc_wh = (self.max_soc_percentage / 100) * self.capacity_wh
 
-        self._initial_soc_wh: float = self.soc_wh
+        self._initial_soc_wh = (self._initial_soc_percentage / 100.0) * self.capacity_wh
         self._soc_pct_factor: float = 100.0 / self.capacity_wh
+        self._set_soc_wh_unchecked(self._initial_soc_wh)
 
         self._log.info(
             "battery_setup_complete",
@@ -105,13 +106,66 @@ class Battery:
             "max_discharge_power_w": self.max_discharge_power_w,
         }
 
+    @property
+    def initial_soc_percentage(self) -> float:
+        """Configured reset SoC in percent."""
+        return self._initial_soc_percentage
+
+    @property
+    def soc_wh(self) -> float:
+        """Current state of charge in Wh."""
+        return self._soc_wh
+
+    @soc_wh.setter
+    def soc_wh(self, value: float) -> None:
+        self._set_soc_wh(value)
+
+    @property
+    def soc_percentage(self) -> float:
+        """Current state of charge in percent."""
+        return self._soc_percentage
+
+    @soc_percentage.setter
+    def soc_percentage(self, value: float) -> None:
+        self._set_soc_percentage(value)
+
     def reset(self) -> None:
         """Resets the battery state to its initial values."""
-        self.soc_wh = self._initial_soc_wh
+        self._set_soc_wh(self._initial_soc_wh)
 
     def current_soc_percentage(self) -> float:
         """Calculates the current state of charge in percentage."""
-        return self.soc_wh * self._soc_pct_factor
+        return self._soc_percentage
+
+    def _validate_soc_wh(self, soc_wh: float) -> float:
+        if not isfinite(soc_wh):
+            raise ValueError(f"soc_wh must be finite, got {soc_wh}")
+        if not (self.min_soc_wh <= soc_wh <= self.max_soc_wh):
+            raise ValueError(
+                f"soc_wh must be within [{self.min_soc_wh}, {self.max_soc_wh}], got {soc_wh}"
+            )
+        return float(soc_wh)
+
+    def _validate_soc_percentage(self, soc_percentage: float) -> float:
+        if not isfinite(soc_percentage):
+            raise ValueError(f"soc_percentage must be finite, got {soc_percentage}")
+        if not (self.min_soc_percentage <= soc_percentage <= self.max_soc_percentage):
+            raise ValueError(
+                "soc_percentage must be within "
+                f"[{self.min_soc_percentage}, {self.max_soc_percentage}], got {soc_percentage}"
+            )
+        return float(soc_percentage)
+
+    def _set_soc_wh_unchecked(self, soc_wh: float) -> None:
+        self._soc_wh = soc_wh
+        self._soc_percentage = soc_wh * self._soc_pct_factor
+
+    def _set_soc_wh(self, soc_wh: float) -> None:
+        self._set_soc_wh_unchecked(self._validate_soc_wh(soc_wh))
+
+    def _set_soc_percentage(self, soc_percentage: float) -> None:
+        validated_percentage = self._validate_soc_percentage(soc_percentage)
+        self._set_soc_wh_unchecked((validated_percentage / 100.0) * self.capacity_wh)
 
     def discharge_energy(self, wh: float, dt: float = 1.0) -> tuple[float, float]:
         """Discharge energy from the battery.
@@ -119,7 +173,7 @@ class Battery:
         Returns:
             tuple[float, float]: (delivered_wh, losses_wh)
         """
-        s = self.soc_wh
+        s = self._soc_wh
         min_s = self.min_soc_wh
         eff = self.discharging_efficiency
         max_power = self.max_discharge_power_w * dt
@@ -139,7 +193,7 @@ class Battery:
         s -= raw_used
         if s < min_s:
             s = min_s
-        self.soc_wh = s
+        self._set_soc_wh_unchecked(s)
 
         return delivered, losses
 
@@ -149,7 +203,7 @@ class Battery:
         Returns:
             tuple[float, float]: (stored_wh, losses_wh)
         """
-        s = self.soc_wh
+        s = self._soc_wh
         max_s = self.max_soc_wh
         eff = self.charging_efficiency
         max_power = self.max_charge_power_w * dt
@@ -166,16 +220,16 @@ class Battery:
         s += stored
         if s > max_s:
             s = max_s
-        self.soc_wh = s
+        self._set_soc_wh_unchecked(s)
 
         losses = raw - stored
         return stored, losses
 
     def current_raw_deliverable_energy_content(self) -> float:
         """Returns the current raw deliverable energy in the battery (pre-efficiency)."""
-        return max(self.soc_wh - self.min_soc_wh, 0.0)
+        return max(self._soc_wh - self.min_soc_wh, 0.0)
 
     def current_deliverable_energy_content(self) -> float:
         """Returns the current deliverable energy in the battery."""
-        usable_energy = (self.soc_wh - self.min_soc_wh) * self.discharging_efficiency
+        usable_energy = (self._soc_wh - self.min_soc_wh) * self.discharging_efficiency
         return max(usable_energy, 0.0)
