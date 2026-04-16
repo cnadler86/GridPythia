@@ -182,11 +182,10 @@ class TestLinearSolverHybridEconomics:
 
         # Low period should not charge.
         assert plan["modes"][1] != int(InverterMode.AC_CHARGE)
-        assert plan["rates"][1] == pytest.approx(0.0, abs=1e-6)
+        assert plan["charge_ac_wh"][1] == pytest.approx(0.0, abs=1e-6)
 
         # High-price period should discharge in zero-feed-in mode.
         assert plan["modes"][2] == int(InverterMode.DISCHARGE_ZERO_FEED_IN)
-        assert plan["rates"][2] == pytest.approx(0.0, abs=1e-6)
 
     def test_charge_when_low_period_is_profitable_after_roundtrip(self) -> None:
         """If high > low/roundtrip, solver should charge in low period before discharging at high."""
@@ -202,19 +201,19 @@ class TestLinearSolverHybridEconomics:
 
         # Low period should charge.
         assert plan["modes"][1] == int(InverterMode.AC_CHARGE)
-        assert plan["rates"][1] > 0.0
+        assert plan["charge_ac_wh"][1] > 0.0
 
-        # SoC increase must match returned integer rate approximately.
+        # SoC increase must match returned charge_ac_wh approximately.
         soc = list(sol.result.battery_wh_per_dt["hybrid_h1"])
         eta = 0.8**0.5
-        charged_wh = 500.0 * (int(plan["rates"][1]) / 100.0)
+        charged_wh = float(plan["charge_ac_wh"][1])
         assert soc[1] - soc[0] == pytest.approx(charged_wh * eta, abs=12.0)
 
         # High-price period should discharge in zero-feed-in mode.
         assert plan["modes"][2] == int(InverterMode.DISCHARGE_ZERO_FEED_IN)
 
-    def test_rates_are_integer_percent_for_rate_modes(self) -> None:
-        """Returned rates should be integer percentages in [0, 100]."""
+    def test_charge_ac_wh_within_battery_bounds(self) -> None:
+        """charge_ac_wh and discharge_ac_wh should respect battery power limits."""
         pred = _make_prediction(
             load_w=[0.0, 0.0, 2000.0],
             price_eur_wh=[0.00044, 0.00031, 0.00052],
@@ -223,10 +222,13 @@ class TestLinearSolverHybridEconomics:
 
         sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
-        rates = [int(r) for r in plan["rates"]]
+        max_ch_wh = inv.battery.max_charge_power_w * pred.dt_hours
+        max_dc_wh = inv.battery.max_discharge_power_w * pred.dt_hours
 
-        assert all(0 <= r <= 100 for r in rates)
-        assert all(float(r).is_integer() for r in rates)
+        assert np.all(plan.charge_ac_wh >= -1e-6)
+        assert np.all(plan.discharge_ac_wh >= -1e-6)
+        assert np.all(plan.charge_ac_wh <= max_ch_wh + 1e-6)
+        assert np.all(plan.discharge_ac_wh <= max_dc_wh + 1e-6)
 
     def test_auto_terminal_value_suppresses_cheap_slot_discharge(self) -> None:
         """Auto terminal value based on high tail prices should prevent discharge in cheap slots.
@@ -268,7 +270,6 @@ class TestLinearSolverHybridEconomics:
         plan = sol.inverter_plans[0]
 
         assert plan["modes"][0] == int(InverterMode.DISCHARGE_ZERO_FEED_IN)
-        assert plan["rates"][0] == pytest.approx(0.0, abs=1e-6)
         assert float(sol.result.grid_import_wh_per_dt[0]) == pytest.approx(0.0, abs=1e-3)
 
     def test_pv_surplus_charges_battery_before_later_discharge(self) -> None:
@@ -370,12 +371,13 @@ class TestLinearSolverHybridEconomics:
         sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
-        isolated_charge = (
-            float(plan["rates"][3]) if plan["modes"][3] == int(InverterMode.AC_CHARGE) else 0.0
+        max_ch_wh = inv.battery.max_charge_power_w * pred.dt_hours
+        isolated_charge_wh = (
+            float(plan["charge_ac_wh"][3]) if plan["modes"][3] == int(InverterMode.AC_CHARGE) else 0.0
         )
 
-        # The isolated cheapest slot (t3) must be used at full rate.
-        assert isolated_charge == pytest.approx(100.0, abs=1e-6)
+        # The isolated cheapest slot (t3) must be used at full charge power.
+        assert isolated_charge_wh == pytest.approx(max_ch_wh, rel=0.05)
 
     def test_initial_mode_reduces_first_step_switch_penalty(self) -> None:
         """If initial mode is AC_CHARGE, charging at t=0 should avoid first-step switch cost."""
@@ -396,17 +398,17 @@ class TestLinearSolverHybridEconomics:
         plan_charge_start = sol_charge_start.inverter_plans[0]
 
         # Starting in AC_CHARGE should never make t=0 charging less attractive than idle start.
-        charge_rate_idle_start = (
-            float(plan_idle_start["rates"][0])
+        charge_wh_idle_start = (
+            float(plan_idle_start["charge_ac_wh"][0])
             if plan_idle_start["modes"][0] == int(InverterMode.AC_CHARGE)
             else 0.0
         )
-        charge_rate_charge_start = (
-            float(plan_charge_start["rates"][0])
+        charge_wh_charge_start = (
+            float(plan_charge_start["charge_ac_wh"][0])
             if plan_charge_start["modes"][0] == int(InverterMode.AC_CHARGE)
             else 0.0
         )
-        assert charge_rate_charge_start >= charge_rate_idle_start - 1e-9
+        assert charge_wh_charge_start >= charge_wh_idle_start - 1e-9
 
     def test_rate_discharge_mode_is_blocked_at_min_soc_even_with_pv(self) -> None:
         """Discrete discharge must stay idle when the battery starts at min SoC."""
@@ -427,9 +429,12 @@ class TestLinearSolverHybridEconomics:
         sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
+        # In IDLE, PV flows passively to the battery (DC-bus coupling).
+        # start_soc = 20% of 1000 Wh = 200 Wh; 500 Wh PV * eta_c_pv ≈ 1.0 = 500 Wh stored
+        # -> final SoC ≈ 700 Wh. Mode stays IDLE (no AC charge/discharge power flow).
         assert plan["modes"][0] == int(InverterMode.IDLE)
-        assert plan["rates"][0] == pytest.approx(0.0, abs=1e-6)
-        assert float(sol.result.battery_wh_per_dt["hybrid_min_rate"][0]) == pytest.approx(700.0)
+        assert plan["discharge_ac_wh"][0] == pytest.approx(0.0, abs=1e-6)
+        assert float(sol.result.battery_wh_per_dt["hybrid_min_rate"][0]) == pytest.approx(700.0, abs=1.0)
 
     def test_zero_feed_discharge_mode_is_blocked_at_min_soc_even_with_pv(self) -> None:
         """Zero-feed discharge must stay idle when the battery starts at min SoC."""
@@ -450,9 +455,11 @@ class TestLinearSolverHybridEconomics:
         sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
         plan = sol.inverter_plans[0]
 
+        # In IDLE, PV flows passively to the battery (DC-bus coupling).
+        # start_soc = 20% of 1000 Wh = 200 Wh; 500 Wh PV stored -> final SoC ≈ 700 Wh.
         assert plan["modes"][0] == int(InverterMode.IDLE)
-        assert plan["rates"][0] == pytest.approx(0.0, abs=1e-6)
-        assert float(sol.result.battery_wh_per_dt["hybrid_min_zfi"][0]) == pytest.approx(700.0)
+        assert plan["discharge_ac_wh"][0] == pytest.approx(0.0, abs=1e-6)
+        assert float(sol.result.battery_wh_per_dt["hybrid_min_zfi"][0]) == pytest.approx(700.0, abs=1.0)
 
     def test_ac_charge_mode_is_blocked_at_max_soc(self) -> None:
         """AC charge must stay idle when the battery starts at max SoC."""
@@ -473,7 +480,7 @@ class TestLinearSolverHybridEconomics:
         plan = sol.inverter_plans[0]
 
         assert plan["modes"][0] == int(InverterMode.IDLE)
-        assert plan["rates"][0] == pytest.approx(0.0, abs=1e-6)
+        assert plan["charge_ac_wh"][0] == pytest.approx(0.0, abs=1e-6)
         assert float(sol.result.battery_wh_per_dt["hybrid_max_charge"][0]) == pytest.approx(800.0)
 
     def test_ac_charge_respects_mode_switch_cost(self) -> None:
@@ -529,7 +536,7 @@ class TestLinearSolverHybridEconomics:
         AC = InverterMode.AC_CHARGE
         ZFI = InverterMode.DISCHARGE_ZERO_FEED_IN
         assert plan["modes"][0:-1].tolist() == [int(AC), int(AC), int(AC), int(ZFI)]
-        assert plan["rates"][1] < plan["rates"][2] < plan["rates"][0]
+        assert plan["charge_ac_wh"][1] < plan["charge_ac_wh"][2] < plan["charge_ac_wh"][0]
 
 
     def test_zero_feed_discharge_continuous_respects_mode_switch_cost(self) -> None:

@@ -373,7 +373,8 @@ def test_simulation_appliance_output_matches_window(grid_simulation: GridSimulat
     assert np.all(result.home_appliance_load_per_dt[2:] == 0.0)
 
 
-def test_simulation_uses_rate_for_non_zero_feed_modes_even_if_energy_is_present() -> None:
+def test_simulation_energy_wh_takes_priority_over_rate() -> None:
+    """When inverter_ac_energy_wh is provided, it takes priority over inverter_ac_rates."""
     prediction = PredictionData(
         timestamps=[datetime(2025, 1, 1), datetime(2025, 1, 1, 1)],
         dt_hours=1.0,
@@ -412,15 +413,24 @@ def test_simulation_uses_rate_for_non_zero_feed_modes_even_if_energy_is_present(
     modes = {
         inverter.device_id: np.array([int(InverterMode.AC_CHARGE), int(InverterMode.IDLE)], dtype=np.int32)
     }
-    rates = {inverter.device_id: np.array([50, 0], dtype=np.int32)}
-    energies = {inverter.device_id: np.array([0.0, np.nan], dtype=np.float32)}
+    min_soc = battery.min_soc_wh
 
-    result = sim.simulate(
+    # energy_wh = 0.0 takes priority: no charging happens despite rate = 50
+    result_no_charge = sim.simulate(
         inverter_modes=modes,
-        inverter_ac_rates=rates,
-        inverter_ac_energy_wh=energies,
+        inverter_ac_rates={inverter.device_id: np.array([50, 0], dtype=np.int32)},
+        inverter_ac_energy_wh={inverter.device_id: np.array([0.0, np.nan], dtype=np.float32)},
         dt=prediction.dt_hours,
     )
+    assert result_no_charge is not None
+    assert result_no_charge.battery_wh_per_dt[inverter.device_id][0] == pytest.approx(min_soc, abs=1e-4)
 
-    assert result is not None
-    assert result.battery_wh_per_dt[inverter.device_id][0] > battery.min_soc_wh
+    # energy_wh = 500.0 causes charging regardless of rate
+    result_charge = sim.simulate(
+        inverter_modes=modes,
+        inverter_ac_rates={inverter.device_id: np.array([0, 0], dtype=np.int32)},
+        inverter_ac_energy_wh={inverter.device_id: np.array([500.0, np.nan], dtype=np.float32)},
+        dt=prediction.dt_hours,
+    )
+    assert result_charge is not None
+    assert result_charge.battery_wh_per_dt[inverter.device_id][0] > min_soc

@@ -1803,6 +1803,8 @@ class OptimizationTab(_Tab):
                     # res_tuple may be a LinearSolution or legacy tuple
                     inv_modes_arrs: Optional[list[np.ndarray]] = None
                     inv_ac_rates_arrs: Optional[list[np.ndarray]] = None
+                    inv_charge_wh_arrs: Optional[list[np.ndarray]] = None
+                    inv_discharge_wh_arrs: Optional[list[np.ndarray]] = None
                     pv_to_ac_arr: Optional[np.ndarray] = None
                     pv_to_bat_arr: Optional[np.ndarray] = None
                     bat_discharge_arr: Optional[np.ndarray] = None
@@ -1828,10 +1830,18 @@ class OptimizationTab(_Tab):
                             plan = sol.inverter_plans[0]
                             try:
                                 inv_modes_arrs = [np.asarray(plan.modes, dtype=np.int32)]
-                                inv_ac_rates_arrs = [np.asarray(plan.rates, dtype=np.int32)]
+                                inv_ac_rates_arrs = None  # rates removed; derived from Wh below
+                                inv_charge_wh_arrs = [
+                                    np.asarray(plan.charge_ac_wh, dtype=np.float32)
+                                ]
+                                inv_discharge_wh_arrs = [
+                                    np.asarray(plan.discharge_ac_wh, dtype=np.float32)
+                                ]
                             except Exception:
                                 inv_modes_arrs = None
                                 inv_ac_rates_arrs = None
+                                inv_charge_wh_arrs = None
+                                inv_discharge_wh_arrs = None
 
                             # Aggregate per-inverter plan flows for clearer plotting.
                             steps = len(res.costs_per_dt)
@@ -1841,7 +1851,9 @@ class OptimizationTab(_Tab):
                             for p in sol.inverter_plans:
                                 pv_to_ac_sum += np.asarray(p.pv_to_ac_wh[:steps], dtype=float)
                                 pv_to_bat_sum += np.asarray(p.pv_to_battery_wh[:steps], dtype=float)
-                                bat_discharge_sum += np.asarray(p.discharge_ac_wh[:steps], dtype=float)
+                                bat_discharge_sum += np.asarray(
+                                    p.discharge_ac_wh[:steps], dtype=float
+                                )
                             pv_to_ac_arr = pv_to_ac_sum
                             pv_to_bat_arr = pv_to_bat_sum
                             bat_discharge_arr = bat_discharge_sum
@@ -2138,35 +2150,57 @@ class OptimizationTab(_Tab):
                                 labels.append(f"SoC {_k} (%)")
                                 plotted = True
 
-                        # Plot inverter modes on right axis (signed rate: discharge=+, charge=-, idle=0)
+                        # Plot inverter modes on right axis (signed power fraction: discharge=+, charge=-, idle=0)
                         if inv_modes_arrs and len(inv_modes_arrs) > 0:
                             modes_arr = inv_modes_arrs[0]
-                            rates_arr = (
-                                inv_ac_rates_arrs[0]
-                                if inv_ac_rates_arrs and len(inv_ac_rates_arrs) > 0
+                            ch_arr = (
+                                inv_charge_wh_arrs[0]
+                                if inv_charge_wh_arrs and len(inv_charge_wh_arrs) > 0
                                 else None
                             )
+                            dc_arr = (
+                                inv_discharge_wh_arrs[0]
+                                if inv_discharge_wh_arrs and len(inv_discharge_wh_arrs) > 0
+                                else None
+                            )
+                            max_ch = (
+                                float(np.max(ch_arr))
+                                if ch_arr is not None and len(ch_arr) > 0
+                                else 1.0
+                            )
+                            max_dc = (
+                                float(np.max(dc_arr))
+                                if dc_arr is not None and len(dc_arr) > 0
+                                else 1.0
+                            )
+                            max_ch = max(max_ch, 1e-6)
+                            max_dc = max(max_dc, 1e-6)
                             mode_vals = []
                             for i, m in enumerate(modes_arr):
                                 try:
                                     mode_int = int(m)
                                 except Exception:
                                     mode_int = int(InverterMode.IDLE)
-                                rate = (
-                                    float(rates_arr[i]) / 100.0
-                                    if rates_arr is not None and i < len(rates_arr)
-                                    else 1.0
-                                )
                                 if mode_int == int(InverterMode.DISCHARGE_ZERO_FEED_IN):
-                                    # Zero-feed discharge is energy-target based; visualize as full discharge state.
+                                    # Zero-feed discharge: visualize as full discharge state.
                                     mode_vals.append(+1.0)
                                 elif mode_int == int(InverterMode.DISCHARGE):
-                                    mode_vals.append(+rate)
+                                    dc_wh = (
+                                        float(dc_arr[i])
+                                        if dc_arr is not None and i < len(dc_arr)
+                                        else 0.0
+                                    )
+                                    mode_vals.append(dc_wh / max_dc)
                                 elif mode_int in (
                                     int(InverterMode.AC_CHARGE),
                                     int(InverterMode.AC_CHARGE_ZERO_FEED_IN),
                                 ):
-                                    mode_vals.append(-rate)
+                                    ch_wh = (
+                                        float(ch_arr[i])
+                                        if ch_arr is not None and i < len(ch_arr)
+                                        else 0.0
+                                    )
+                                    mode_vals.append(-ch_wh / max_ch)
                                 else:
                                     mode_vals.append(0.0)
                             h2 = ax4r.step(
@@ -2174,19 +2208,19 @@ class OptimizationTab(_Tab):
                                 mode_vals,
                                 where="post",
                                 color="#555555",
-                                label="Inv mode (signed rate)",
+                                label="Inv mode (power fraction)",
                             )
                             # ax4r.step returns a list of Line2D objects; pick first for legend handle
                             if isinstance(h2, (list, tuple)) and h2:
                                 handles.append(h2[0])
                             else:
                                 handles.append(h2)
-                            labels.append("Inv mode (signed rate)")
+                            labels.append("Inv mode (power fraction)")
                             plotted = True
 
                         if plotted:
                             ax4.set_ylabel("SoC %")
-                            ax4r.set_ylabel("Inv mode (signed rate)")
+                            ax4r.set_ylabel("Inv mode (power fraction)")
                             ax4.legend(
                                 handles=handles, labels=labels, loc="upper right", fontsize=8
                             )

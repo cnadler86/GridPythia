@@ -33,22 +33,21 @@ def test_fixture_solution_matches_regression_signature() -> None:
     assert np.max(np.minimum(plan.charge_ac_wh, plan.discharge_ac_wh)) == pytest.approx(0.0, abs=1e-6)
     assert np.all(plan.pv_to_ac_wh + plan.pv_to_battery_wh <= scenario.prediction.pv_by_inverter[plan.device_id] + 1e-5)
 
-    assert solution.result.total_cost == pytest.approx(0.8504844, abs=1e-3)
-    assert solution.result.total_grid_import == pytest.approx(4643.639, abs=1.0)
-    assert solution.result.total_losses == pytest.approx(538.110, abs=2.0)
-    assert float(plan.battery_soc_wh[-1]) == pytest.approx(769.131, abs=2.0)
+    assert solution.result.total_cost == pytest.approx(0.821221, abs=1e-3)
+    assert solution.result.total_grid_import == pytest.approx(4765.9, abs=1.0)
+    assert solution.result.total_losses == pytest.approx(709.4, abs=2.0)
+    assert float(plan.battery_soc_wh[-1]) == pytest.approx(763.3, abs=2.0)
 
     active_idx = np.flatnonzero((plan.charge_ac_wh > 1e-6) | (plan.discharge_ac_wh > 1e-6))
-    assert active_idx.size == 68
-    assert active_idx[0] == 7
+    assert active_idx.size == 86
+    assert active_idx[0] == 20
     assert active_idx[-1] == 182
     np.testing.assert_allclose(
         plan.discharge_ac_wh[active_idx[:8]],
-        np.array([34.236, 22.668, 30.842, 31.028, 23.226, 14.601, 11.694, 10.606], dtype=np.float32),
+        np.array([14.140, 14.882, 15.416, 15.743, 14.865, 14.510, 16.540, 20.955], dtype=np.float32),
         atol=0.05,
     )
     assert plan.modes[active_idx[:8]].tolist() == [2, 2, 2, 2, 2, 2, 2, 2]
-    assert plan.rates[active_idx[:8]].tolist() == [0, 0, 0, 0, 0, 0, 0, 0]
 
 
 def test_rolling_horizon_auto_roll_aligns_modes() -> None:
