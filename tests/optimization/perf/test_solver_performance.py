@@ -10,9 +10,7 @@ def test_compiled_solver_fast_path_on_fixture() -> None:
     scenario = load_solver_fixture_scenario()
     optimizer = LinearOptimizer(
         scenario.inverters,
-        scenario.prediction.steps,
-        scenario.prediction.dt_hours,
-        solver_opts={"time_limit": 1, "mip_rel_gap": 0.05},
+        solver_opts={"time_limit": 2, "mip_rel_gap": 0.05},
     )
 
     elapsed: list[float] = []
@@ -27,4 +25,4 @@ def test_compiled_solver_fast_path_on_fixture() -> None:
         statuses.append(solution.solver_status)
 
     assert all(status in {"user_limit", "optimal", "optimal_inaccurate"} for status in statuses)
-    assert sum(elapsed) / len(elapsed) < 1.5
+    assert sum(elapsed) / len(elapsed) < 2

@@ -427,6 +427,7 @@ class TestPVRouting:
         # With PV bypass active, mode may be reported as DISCHARGE while p_dc stays zero.
         assert plan["discharge_ac_wh"][0] == pytest.approx(0.0, abs=1e-6)
         # SoC rises but cannot exceed battery charge-power cap for one slot.
+        assert inv.battery is not None
         soc0 = float(inv.battery.min_soc_wh)
         soc1 = float(sol.result.battery_wh_per_dt["hybrid_min_rate"][0])
         assert soc1 > soc0
@@ -453,6 +454,7 @@ class TestPVRouting:
 
         # With PV bypass active, mode may be reported as DISCHARGE while p_dc stays zero.
         assert plan["discharge_ac_wh"][0] == pytest.approx(0.0, abs=1e-6)
+        assert inv.battery is not None
         soc0 = float(inv.battery.min_soc_wh)
         soc1 = float(sol.result.battery_wh_per_dt["hybrid_min_zfi"][0])
         assert soc1 > soc0
