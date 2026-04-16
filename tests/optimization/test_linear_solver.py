@@ -1151,6 +1151,19 @@ class TestModelInfrastructure:
             assert problem is not None, f"Problem for {objective} is None"
             assert problem.is_dpp(), f"Compiled problem for {objective} is not DPP-compliant"
 
+    def test_compiled_problems_are_dcp(self) -> None:
+        """All prebuilt CVXPY problems must satisfy the DCP condition."""
+        pred = _make_prediction(
+            load_w=[100.0, 100.0, 100.0, 100.0],
+            price_eur_wh=[0.05, 0.05, 0.05, 0.05],
+        )
+        inv = _make_hybrid_inverter()
+        opt = LinearOptimizer([inv], pred.steps, pred.dt_hours)
+
+        for objective, problem in opt._problems.items():
+            assert problem is not None, f"Problem for {objective} is None"
+            assert problem.is_dcp(), f"Compiled problem for {objective} is not DCP-compliant"
+
     def test_simulation_parity_no_pv(self) -> None:
         """LP solution replayed through GridSimulation should match closely (no PV case)."""
         pred = _make_prediction(
