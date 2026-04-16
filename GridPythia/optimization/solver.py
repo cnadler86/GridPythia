@@ -73,13 +73,12 @@ class InverterPlan:
     """Typed inverter schedule exported by :class:`LinearOptimizer`."""
 
     device_id: str
-    modes: np.ndarray
-    rates: np.ndarray
-    charge_ac_wh: np.ndarray
-    discharge_ac_wh: np.ndarray
-    pv_to_ac_wh: np.ndarray
-    pv_to_battery_wh: np.ndarray
-    battery_soc_wh: np.ndarray | None = None
+    modes: np.ndarray            # InverterMode int per timestep (np.int8)
+    charge_ac_wh: np.ndarray     # AC energy drawn from grid for charging [Wh/dt]
+    discharge_ac_wh: np.ndarray  # AC energy delivered to home from battery [Wh/dt]
+    pv_to_ac_wh: np.ndarray      # PV energy routed directly to AC [Wh/dt]
+    pv_to_battery_wh: np.ndarray # PV energy routed into battery [Wh/dt]
+    battery_soc_wh: np.ndarray | None = None  # SoC at end of each slot [Wh]
 
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
@@ -318,42 +317,50 @@ class LinearOptimizer:
         dt_s = self._dt * 3600.0
         return min(max(0, round(delta_s / dt_s)), self._T)
 
-    def _build_warm_start_plan(self, shift_steps: int) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    def _build_warm_start_plan(
+        self, shift_steps: int
+    ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """Build a warm-start seed from the cached solution, shifted by *shift_steps*.
 
-        When the horizon is padded beyond the original solution the last solved
-        inverter mode is repeated (no extrapolation).
+        Returns a dict mapping device_id → (modes, charge_ac_wh, discharge_ac_wh).
         """
         if self._cached_solution is None or shift_steps <= 0:
             return {}
 
         T = self._T
-        out: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        out: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
         for inv_plan in self._cached_solution.inverter_plans:
-            src_modes = np.asarray(inv_plan.modes, dtype=np.int32)
-            src_rates = np.asarray(inv_plan.rates, dtype=np.int32)
+            src_modes = np.asarray(inv_plan.modes, dtype=np.int8)
+            src_ch = np.asarray(inv_plan.charge_ac_wh, dtype=np.float32)
+            src_dc = np.asarray(inv_plan.discharge_ac_wh, dtype=np.float32)
+
             if src_modes.size == 0:
                 out[inv_plan.device_id] = (
                     np.full(T, int(InverterMode.IDLE), dtype=np.int8),
-                    np.zeros(T, dtype=np.int32),
+                    np.zeros(T, dtype=np.float32),
+                    np.zeros(T, dtype=np.float32),
                 )
                 continue
 
-            shifted_modes = np.empty(T, dtype=np.int8)
-            shifted_rates = np.zeros(T, dtype=np.int32)
             src_start = min(shift_steps, int(src_modes.size))
             copied = min(max(int(src_modes.size) - src_start, 0), T)
+
+            shifted_modes = np.full(T, int(InverterMode.IDLE), dtype=np.int8)
+            shifted_ch = np.zeros(T, dtype=np.float32)
+            shifted_dc = np.zeros(T, dtype=np.float32)
+
             if copied > 0:
-                shifted_modes[:copied] = src_modes[src_start : src_start + copied].astype(np.int8)
-                shifted_rates[:copied] = src_rates[src_start : src_start + copied].astype(np.int32)
+                sl = slice(src_start, src_start + copied)
+                shifted_modes[:copied] = src_modes[sl]
+                shifted_ch[:copied] = src_ch[sl]
+                shifted_dc[:copied] = src_dc[sl]
 
-            # Pad with last solved mode — no extrapolation.
-            fill_mode = int(src_modes[-1])
-            fill_rate = int(src_rates[-1])
             if copied < T:
-                shifted_modes[copied:] = np.int8(fill_mode)
-                shifted_rates[copied:] = np.int32(fill_rate)
+                shifted_modes[copied:] = src_modes[-1]
+                shifted_ch[copied:] = src_ch[-1]
+                shifted_dc[copied:] = src_dc[-1]
 
+            # ZFI/IDLE modes carry no explicit power target
             zfi_mask = np.isin(
                 shifted_modes,
                 [
@@ -362,8 +369,10 @@ class LinearOptimizer:
                     int(InverterMode.AC_CHARGE_ZERO_FEED_IN),
                 ],
             )
-            shifted_rates[zfi_mask] = 0
-            out[inv_plan.device_id] = (shifted_modes, shifted_rates)
+            shifted_ch[zfi_mask] = 0.0
+            shifted_dc[zfi_mask] = 0.0
+
+            out[inv_plan.device_id] = (shifted_modes, shifted_ch, shifted_dc)
         return out
 
     def _prepare_inputs(self, prediction: PredictionData) -> _PreparedInputs:
@@ -557,10 +566,15 @@ class LinearOptimizer:
     def _apply_warm_start_values(
         self,
         prep: _PreparedInputs,
-        warm_start_plan: Mapping[str, tuple[np.ndarray, np.ndarray]] | None,
+        warm_start_plan: Mapping[str, tuple[np.ndarray, np.ndarray, np.ndarray]] | None,
     ) -> None:
         if not warm_start_plan or prep.T <= 0:
             return
+
+        def _pad(arr: np.ndarray, fill: float | int) -> np.ndarray:
+            if arr.size < prep.T:
+                return np.pad(arr, (0, prep.T - arr.size), constant_values=fill)
+            return arr
 
         for block in self._blocks:
             inv = block.inverter
@@ -568,82 +582,33 @@ class LinearOptimizer:
             if seed is None:
                 continue
 
-            seed_modes = np.asarray(seed[0], dtype=np.int32)
-            seed_rates = np.asarray(seed[1], dtype=np.int32)
+            seed_modes, seed_ch_wh, seed_dc_wh = seed
             if seed_modes.size == 0:
                 continue
-            if seed_modes.size < prep.T:
-                seed_modes = np.pad(
-                    seed_modes,
-                    (0, prep.T - seed_modes.size),
-                    mode="constant",
-                    constant_values=int(InverterMode.IDLE),
-                )
-            if seed_rates.size < prep.T:
-                seed_rates = np.pad(
-                    seed_rates,
-                    (0, prep.T - seed_rates.size),
-                    mode="constant",
-                    constant_values=0,
-                )
+
+            seed_modes = _pad(seed_modes, int(InverterMode.IDLE))
+            seed_ch_wh = _pad(seed_ch_wh, 0.0)
+            seed_dc_wh = _pad(seed_dc_wh, 0.0)
 
             if isinstance(block.mode_ch_activity, cp.Variable):
-                ch = np.zeros(prep.T, dtype=float)
-                for t in range(prep.T):
-                    mode = int(seed_modes[t])
-                    if mode in (
-                        int(InverterMode.AC_CHARGE),
-                        int(InverterMode.AC_CHARGE_ZERO_FEED_IN),
-                    ):
-                        ch[t] = 1.0
+                ch = np.isin(
+                    seed_modes,
+                    [int(InverterMode.AC_CHARGE), int(InverterMode.AC_CHARGE_ZERO_FEED_IN)],
+                ).astype(float)
                 block.mode_ch_activity.value = ch
 
             if isinstance(block.mode_dc_activity, cp.Variable):
-                dc = np.zeros(prep.T, dtype=float)
-                for t in range(prep.T):
-                    mode = int(seed_modes[t])
-                    if mode in (
-                        int(InverterMode.DISCHARGE),
-                        int(InverterMode.DISCHARGE_ZERO_FEED_IN),
-                    ):
-                        dc[t] = 1.0
+                dc = np.isin(
+                    seed_modes,
+                    [int(InverterMode.DISCHARGE), int(InverterMode.DISCHARGE_ZERO_FEED_IN)],
+                ).astype(float)
                 block.mode_dc_activity.value = dc
 
             if isinstance(block.p_ch, cp.Variable):
-                pch = np.zeros(prep.T, dtype=float)
-                max_ch_wh = (
-                    float(inv.battery.max_charge_power_w * prep.dt)
-                    if inv.battery is not None
-                    else 0.0
-                )
-                for t in range(prep.T):
-                    mode = int(seed_modes[t])
-                    if mode in (
-                        int(InverterMode.AC_CHARGE),
-                        int(InverterMode.AC_CHARGE_ZERO_FEED_IN),
-                    ):
-                        pch[t] = max_ch_wh * max(min(float(seed_rates[t]) / 100.0, 1.0), 0.0)
-                block.p_ch.value = pch
+                block.p_ch.value = seed_ch_wh[:prep.T].astype(float)
 
             if isinstance(block.p_dc, cp.Variable):
-                pdc = np.zeros(prep.T, dtype=float)
-                max_dc_wh = (
-                    float(inv.battery.max_discharge_power_w * prep.dt)
-                    if inv.battery is not None
-                    else 0.0
-                )
-                for t in range(prep.T):
-                    mode = int(seed_modes[t])
-                    if mode in (
-                        int(InverterMode.DISCHARGE),
-                        int(InverterMode.DISCHARGE_ZERO_FEED_IN),
-                    ):
-                        rate = float(seed_rates[t]) / 100.0
-                        if mode == int(InverterMode.DISCHARGE_ZERO_FEED_IN):
-                            pdc[t] = min(float(prep.load_wh[t]), max_dc_wh)
-                        else:
-                            pdc[t] = max_dc_wh * max(min(rate, 1.0), 0.0)
-                block.p_dc.value = pdc
+                block.p_dc.value = seed_dc_wh[:prep.T].astype(float)
 
             if isinstance(block.soc, cp.Variable) and inv.device_id in self._soc_init_params:
                 soc0 = float(self._soc_init_params[inv.device_id].value or 0.0)
@@ -903,9 +868,30 @@ class LinearOptimizer:
             return np.full(T, float(arr), dtype=float)
         return np.maximum(arr, 0.0)
 
-    @staticmethod
-    def _sanitize_rate_percent(rate_pct: float) -> int:
-        return int(max(0, min(100, round(float(rate_pct)))))
+    def _extract_modes(self, block: _InverterModelBlock, T: int) -> np.ndarray:
+        """Map solver binary variables directly to InverterMode per timestep."""
+        inv = block.inverter
+        modes = np.full(T, int(InverterMode.IDLE), dtype=np.int8)
+
+        if block.mode_ch_activity is not None:
+            ch_active = np.round(self._expr_to_vec(block.mode_ch_activity, T)).astype(bool)
+            charge_mode = (
+                InverterMode.AC_CHARGE
+                if InverterMode.AC_CHARGE in inv.available_modes
+                else InverterMode.AC_CHARGE_ZERO_FEED_IN
+            )
+            modes[ch_active] = int(charge_mode)
+
+        if block.mode_dc_activity is not None:
+            dc_active = np.round(self._expr_to_vec(block.mode_dc_activity, T)).astype(bool)
+            discharge_mode = (
+                InverterMode.DISCHARGE
+                if InverterMode.DISCHARGE in inv.available_modes
+                else InverterMode.DISCHARGE_ZERO_FEED_IN
+            )
+            modes[dc_active] = int(discharge_mode)
+
+        return modes
 
     def _build_solution(
         self,
@@ -933,7 +919,6 @@ class LinearOptimizer:
         battery_wh_per_dt: dict[str, np.ndarray] = {}
         battery_soc_pct: dict[str, np.ndarray] = {}
         inv_modes_per_dt: dict[str, np.ndarray] = {}
-        inv_rates_per_dt: dict[str, np.ndarray] = {}
         inverter_plans: list[InverterPlan] = []
 
         for block in blocks:
@@ -961,14 +946,12 @@ class LinearOptimizer:
                 losses_arr += pv_to_bat * (1.0 - eta_c_pv)
                 losses_arr += p_dc * (1.0 / eta_d - 1.0)
 
-            modes, rates = self._extract_modes_and_rates(block, p_ch, p_dc, dt)
-            inv_modes_per_dt[inv_id] = np.asarray(modes, dtype=np.int8)
-            inv_rates_per_dt[inv_id] = np.asarray(rates, dtype=np.int32)
+            modes = self._extract_modes(block, T)
+            inv_modes_per_dt[inv_id] = modes
             inverter_plans.append(
                 InverterPlan(
                     device_id=inv_id,
-                    modes=np.asarray(modes, dtype=np.int8),
-                    rates=np.asarray(rates, dtype=np.int32),
+                    modes=modes,
                     charge_ac_wh=np.asarray(p_ch, dtype=np.float32),
                     discharge_ac_wh=np.asarray(p_dc, dtype=np.float32),
                     pv_to_ac_wh=np.asarray(self._expr_to_vec(block.pv_ac, T), dtype=np.float32),
@@ -980,7 +963,7 @@ class LinearOptimizer:
             active_w = inv.parameters.active_inverter_consumption_w
             if active_w > 0.0:
                 active_wh = active_w * dt
-                is_active = np.array([m != int(InverterMode.IDLE) for m in modes], dtype=float)
+                is_active = (modes != int(InverterMode.IDLE)).astype(float)
                 losses_arr += active_wh * is_active
 
         result = SimulationResult(
@@ -991,7 +974,6 @@ class LinearOptimizer:
             feedin_wh_per_dt=np.asarray(gf, dtype=np.float32),
             losses_wh_per_dt=np.asarray(losses_arr, dtype=np.float32),
             inverter_modes_per_dt=inv_modes_per_dt,
-            inverter_ac_rate_per_dt=inv_rates_per_dt,
             battery_wh_per_dt=battery_wh_per_dt,
             battery_soc_percentage_per_dt=battery_soc_pct,
         )
@@ -1004,81 +986,6 @@ class LinearOptimizer:
             inverter_plans=inverter_plans,
             prediction=prediction,
         )
-
-    def _extract_modes_and_rates(
-        self,
-        block: _InverterModelBlock,
-        p_ch: np.ndarray,
-        p_dc: np.ndarray,
-        dt: float,
-    ) -> tuple[list[int], list[int]]:
-        inv = block.inverter
-        T = len(p_ch)
-        eps = 1e-4
-        modes: list[int] = []
-        rates: list[int] = []
-
-        bat = inv.battery
-        max_ch_wh = bat.max_charge_power_w * dt if bat is not None else 0.0
-        max_dc_wh = bat.max_discharge_power_w * dt if bat is not None else 0.0
-        mode_switch_cost_active = inv.parameters.mode_switch_cost > 0.0
-        mode_ch_active: np.ndarray | None = None
-        mode_dc_active: np.ndarray | None = None
-        if mode_switch_cost_active and block.mode_ch_activity is not None:
-            mode_ch_active = self._expr_to_vec(block.mode_ch_activity, T)
-        if mode_switch_cost_active and block.mode_dc_activity is not None:
-            mode_dc_active = self._expr_to_vec(block.mode_dc_activity, T)
-
-        for t in range(T):
-            ch = float(p_ch[t])
-            dc = float(p_dc[t])
-
-            if ch > eps:
-                mode = (
-                    int(InverterMode.AC_CHARGE)
-                    if InverterMode.AC_CHARGE in inv.available_modes
-                    else int(InverterMode.AC_CHARGE_ZERO_FEED_IN)
-                )
-                rate = int(round((min(ch / max_ch_wh, 1.0) if max_ch_wh > eps else 1.0) * 100.0))
-                rate = self._sanitize_rate_percent(rate)
-            elif dc > eps:
-                if InverterMode.DISCHARGE in inv.available_modes:
-                    mode = int(InverterMode.DISCHARGE)
-                else:
-                    mode = (
-                        int(InverterMode.DISCHARGE_ZERO_FEED_IN)
-                        if inv.parameters.zero_feed_in
-                        else int(InverterMode.DISCHARGE)
-                    )
-                if mode == int(InverterMode.DISCHARGE_ZERO_FEED_IN):
-                    rate = 0
-                else:
-                    rate = int(
-                        round((min(dc / max_dc_wh, 1.0) if max_dc_wh > eps else 1.0) * 100.0)
-                    )
-                    rate = self._sanitize_rate_percent(rate)
-            elif mode_switch_cost_active and mode_ch_active is not None and mode_ch_active[t] > 0.5:
-                mode = (
-                    int(InverterMode.AC_CHARGE)
-                    if InverterMode.AC_CHARGE in inv.available_modes
-                    else int(InverterMode.AC_CHARGE_ZERO_FEED_IN)
-                )
-                rate = 0
-            elif mode_switch_cost_active and mode_dc_active is not None and mode_dc_active[t] > 0.5:
-                mode = (
-                    int(InverterMode.DISCHARGE_ZERO_FEED_IN)
-                    if inv.parameters.zero_feed_in
-                    else int(InverterMode.DISCHARGE)
-                )
-                rate = 0
-            else:
-                mode = int(InverterMode.IDLE)
-                rate = 0
-
-            modes.append(mode)
-            rates.append(rate)
-
-        return modes, rates
 
     def _validate_with_simulation(
         self,
@@ -1101,7 +1008,7 @@ class LinearOptimizer:
                 energy_wh[inv_id] = np.zeros(prep.T, dtype=np.float32)
             else:
                 modes[inv_id] = np.asarray(plan.modes, dtype=np.int32)
-                rates[inv_id] = np.asarray(plan.rates, dtype=np.int32)
+                rates[inv_id] = np.zeros(prep.T, dtype=np.int32)  # rates no longer in plan
                 energy_wh[inv_id] = np.asarray(
                     np.maximum(plan.charge_ac_wh, plan.discharge_ac_wh),
                     dtype=np.float32,

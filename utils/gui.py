@@ -1803,6 +1803,9 @@ class OptimizationTab(_Tab):
                     # res_tuple may be a LinearSolution or legacy tuple
                     inv_modes_arrs: Optional[list[np.ndarray]] = None
                     inv_ac_rates_arrs: Optional[list[np.ndarray]] = None
+                    pv_to_ac_arr: Optional[np.ndarray] = None
+                    pv_to_bat_arr: Optional[np.ndarray] = None
+                    bat_discharge_arr: Optional[np.ndarray] = None
                     solve_meta: str | None = None
                     simulation_error: dict[str, Any] | None = None
 
@@ -1829,6 +1832,19 @@ class OptimizationTab(_Tab):
                             except Exception:
                                 inv_modes_arrs = None
                                 inv_ac_rates_arrs = None
+
+                            # Aggregate per-inverter plan flows for clearer plotting.
+                            steps = len(res.costs_per_dt)
+                            pv_to_ac_sum = np.zeros(steps, dtype=float)
+                            pv_to_bat_sum = np.zeros(steps, dtype=float)
+                            bat_discharge_sum = np.zeros(steps, dtype=float)
+                            for p in sol.inverter_plans:
+                                pv_to_ac_sum += np.asarray(p.pv_to_ac_wh[:steps], dtype=float)
+                                pv_to_bat_sum += np.asarray(p.pv_to_battery_wh[:steps], dtype=float)
+                                bat_discharge_sum += np.asarray(p.discharge_ac_wh[:steps], dtype=float)
+                            pv_to_ac_arr = pv_to_ac_sum
+                            pv_to_bat_arr = pv_to_bat_sum
+                            bat_discharge_arr = bat_discharge_sum
                     else:
                         # legacy tuple (res, modes, rates)
                         if isinstance(res_tuple, tuple):
@@ -1944,8 +1960,22 @@ class OptimizationTab(_Tab):
                         ax.plot(
                             x_vals,
                             list(res.self_consumption_wh_per_dt),
-                            label="Self-consumption (Wh)",
+                            label="Local supply (= Load - Grid import) (Wh)",
                         )
+                        if pv_to_ac_arr is not None:
+                            ax.plot(
+                                x_vals,
+                                list(pv_to_ac_arr),
+                                label="PV -> AC (direct) (Wh)",
+                                linewidth=1.0,
+                            )
+                        if bat_discharge_arr is not None:
+                            ax.plot(
+                                x_vals,
+                                list(bat_discharge_arr),
+                                label="Battery -> AC (Wh)",
+                                linewidth=1.0,
+                            )
                         ax.plot(x_vals, list(res.feedin_wh_per_dt), label="Feed-in (Wh)")
                         ax.plot(x_vals, list(res.losses_wh_per_dt), label="Losses (Wh)")
                         ax.legend(loc="upper right", fontsize=8)
@@ -1983,6 +2013,16 @@ class OptimizationTab(_Tab):
                         (h_load,) = ax2.plot(
                             x_vals, load_wh, color="#1565C0", linewidth=1.4, label="Load (Wh)"
                         )
+
+                        if pv_to_bat_arr is not None:
+                            ax2.plot(
+                                x_vals,
+                                list(pv_to_bat_arr),
+                                color="#6A1B9A",
+                                linewidth=1.1,
+                                linestyle="--",
+                                label="PV -> Battery (not direct self-consumption)",
+                            )
 
                         # Plot PV sources: prefer prediction PV if available, otherwise simulation result
                         pv_handles = []
