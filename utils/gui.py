@@ -1596,8 +1596,6 @@ class OptimizationTab(_Tab):
         if self._optimizer_cache is None or self._optimizer_cache_sig != sig:
             self._optimizer_cache = LinearOptimizer(
                 inverters=[inv],
-                horizon=prediction.steps,
-                dt_hours=prediction.dt_hours,
             )
             self._optimizer_cache_sig = sig
             logger.info("optimizer_instance_rebuilt", tab="optimization")

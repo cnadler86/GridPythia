@@ -37,7 +37,7 @@ logger = get_logger(__name__)
 _DEFAULT_HIGHS_OPTS = {
     "verbose": False,
     "warm_start": True,
-    "time_limit": 60,
+    "time_limit": 30,
     "mip_rel_gap": 0.03,
     "presolve": "on",
     "mip_lp_solver": "ipm",
@@ -141,8 +141,6 @@ class LinearOptimizer:
     def __init__(
         self,
         inverters: list[InverterBase],
-        horizon: int,
-        dt_hours: float,
         *,
         objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
         solver_opts: Mapping[str, Any] | None = None,
@@ -152,20 +150,15 @@ class LinearOptimizer:
         self._solver_opts: dict[str, Any] = dict(solver_opts) if solver_opts else {}
         self._cached_prediction: PredictionData | None = None
         self._cached_solution: LinearSolution | None = None
-
-        if horizon <= 0:
-            raise ValueError(f"horizon must be > 0, got {horizon}")
-        if dt_hours <= 0:
-            raise ValueError(f"dt_hours must be > 0, got {dt_hours}")
+        self._T = 0
+        self._dt = 0.0
 
         self._log = logger.bind(
             component="optimizer",
             inverter_ids=[inv.device_id for inv in inverters],
-            steps=int(horizon),
         )
 
         self._compiled = False
-        self._compile_problem(horizon=int(horizon), dt=float(dt_hours))
 
     def solve(
         self,
@@ -512,13 +505,19 @@ class LinearOptimizer:
 
     def _ensure_compiled_layout(self, prep: _PreparedInputs) -> None:
         if not self._compiled:
-            raise RuntimeError("LinearOptimizer problem is not compiled")
+            self._compile_problem(horizon=prep.T, dt=prep.dt)
+            return
         if prep.T != self._T or prep.dt != self._dt:
-            raise ValueError(
-                "Prediction shape mismatch for compiled optimizer: "
-                f"expected horizon={self._T}, dt_hours={self._dt}, "
-                f"got horizon={prep.T}, dt_hours={prep.dt}"
+            self._log.warning(
+                "optimizer_recompile",
+                old_T=self._T,
+                new_T=prep.T,
+                old_dt=self._dt,
+                new_dt=prep.dt,
             )
+            self._cached_prediction = None
+            self._cached_solution = None
+            self._compile_problem(horizon=prep.T, dt=prep.dt)
 
     def _update_runtime_parameters(
         self,
