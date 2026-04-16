@@ -239,7 +239,9 @@ class FraunhoferSCModel:
             load = self.baseload_wh
         pv = np.asarray(pv, float)
         load = np.asarray(load, float)
-        return np.where(load > 1e-9, pv / load, np.inf)
+        r = np.full(np.broadcast_shapes(pv.shape, load.shape), np.inf, dtype=float)
+        np.divide(pv, load, out=r, where=load > 1e-9)
+        return r
 
     def _sc(self, r):
         r = np.asarray(r, float)
@@ -351,8 +353,9 @@ class FraunhoferSCModel:
 
         a, b = self.params.a, self.params.b
 
-        # Compute r = pv / load, with floor for numerical stability
-        r0 = np.where(load_0 > 1e-9, pv_0 / load_0, 1e9)
+        # Compute r = pv / load without invalid-divide warnings on zero load.
+        r0 = np.full_like(pv_0, 1e9, dtype=np.float64)
+        np.divide(pv_0, load_0, out=r0, where=load_0 > 1e-9)
         r0 = np.maximum(r0, 1e-6)  # Floor to avoid instability when b < 1
 
         # Compute derivatives

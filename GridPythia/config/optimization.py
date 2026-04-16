@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-from itertools import count
+import uuid
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
-
-# Auto-incrementing device IDs
-_INVERTER_COUNTER = count(1)
-_BATTERY_COUNTER = count(1)
 
 
 class BatteryParameters(BaseModel):
@@ -18,7 +14,7 @@ class BatteryParameters(BaseModel):
     model_config = {"frozen": True}
 
     device_id: str = Field(
-        default_factory=lambda: f"battery{next(_BATTERY_COUNTER)}",
+        default_factory=lambda: f"battery_{uuid.uuid4().hex[:8]}",
         description="Unique battery identifier",
     )
     capacity_wh: int = Field(default=8000, gt=0, description="Battery capacity in Wh")
@@ -60,7 +56,7 @@ class InverterParameters(BaseModel):
     model_config = {"frozen": True}
 
     device_id: str = Field(
-        default_factory=lambda: f"inverter{next(_INVERTER_COUNTER)}",
+        default_factory=lambda: f"inverter_{uuid.uuid4().hex[:8]}",
         description="Unique inverter identifier",
     )
     battery_id: Optional[str] = Field(

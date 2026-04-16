@@ -115,6 +115,7 @@ class GridSimulation:
         home_appliances: list[HomeAppliance] | None = None,
     ) -> None:
         dt = prediction.dt_hours
+        self._dt_hours: float = dt
         self.simulation_steps = prediction.steps  # number of simulation steps
 
         # Load is already in Wh (no conversion needed)
@@ -253,12 +254,20 @@ class GridSimulation:
             elif m == _ZFI_C:
                 zfi_c = (idx, sb)
             else:
-                res = sb.inverter.process_energy(
-                    generation=sb.generation,
-                    mode=m,
-                    dt=dt,
-                    ac_rate_pct=sb.ac_rate_pct,
-                )
+                if sb.ac_energy_wh is not None:
+                    res = sb.inverter.process_energy(
+                        generation=sb.generation,
+                        mode=m,
+                        dt=dt,
+                        energy_wh=sb.ac_energy_wh,
+                    )
+                else:
+                    res = sb.inverter.process_energy(
+                        generation=sb.generation,
+                        mode=m,
+                        dt=dt,
+                        ac_rate_pct=sb.ac_rate_pct,
+                    )
                 static_ie += res.ac_output_wh - res.ac_input_wh
                 static_pv += res.pv_ac_wh
                 losses += res.losses_wh
@@ -303,13 +312,18 @@ class GridSimulation:
     def simulate(
         self,
         inverter_modes: Mapping[str, Sequence[InverterMode | int] | np.ndarray],
-        inverter_ac_rates: Mapping[str, Sequence[int] | np.ndarray],
+        inverter_ac_rates: Mapping[str, Sequence[int] | np.ndarray] | None = None,
         appliance_load: Sequence[float] | np.ndarray | None = None,
         start_idx: int = 0,
-        dt: float = 1.0,
+        dt: float | None = None,
         inverter_ac_energy_wh: Mapping[str, Sequence[float] | np.ndarray] | None = None,
     ) -> SimulationResult | None:
-        """Simulate energy flows and costs for a contiguous time window."""
+        """Simulate energy flows and costs for a contiguous time window.
+
+        ``inverter_ac_rates`` is optional.  When ``inverter_ac_energy_wh`` is
+        provided for an inverter, it takes priority over any rate value.
+        """
+        dt = dt if dt is not None else self._dt_hours
         if start_idx < 0 or start_idx > self.simulation_steps:
             raise ValueError(f"start_idx must be in [0, {self.simulation_steps}], got {start_idx}")
 
@@ -346,9 +360,10 @@ class GridSimulation:
                     f"{self.simulation_steps} entries, got {len(arr)}"
                 )
 
+        _rates_map = inverter_ac_rates if inverter_ac_rates is not None else {}
         rates_arrs = [
             np.asarray(
-                inverter_ac_rates.get(inv.device_id, np.zeros(self.simulation_steps)),
+                _rates_map.get(inv.device_id, np.zeros(self.simulation_steps)),
                 dtype=np.int32,
             )
             for inv in inv_list
@@ -364,7 +379,11 @@ class GridSimulation:
         ]
 
         for inv, arr in zip(inv_list, rates_arrs, strict=False):
-            if inv.device_id in inverter_ac_rates and len(arr) < self.simulation_steps:
+            if (
+                inverter_ac_rates is not None
+                and inv.device_id in inverter_ac_rates
+                and len(arr) < self.simulation_steps
+            ):
                 raise ValueError(
                     f"inverter_ac_rates[{inv.device_id!r}] must have at least "
                     f"{self.simulation_steps} entries, got {len(arr)}"
@@ -465,11 +484,11 @@ class GridSimulation:
         }
         inverter_ac_rate_per_dt: dict[str, np.ndarray] = {
             inv.device_id: np.asarray(
-                inverter_ac_rates[inv.device_id][start_idx : start_idx + total_idx],
+                _rates_map[inv.device_id][start_idx : start_idx + total_idx],
                 dtype=np.int32,
             )
             for inv in inv_list
-            if inv.device_id in inverter_ac_rates
+            if inv.device_id in _rates_map
         }
 
         appliance_load_series: np.ndarray | None = None

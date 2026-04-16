@@ -47,7 +47,7 @@ class EnergyChartsConfig(BaseModel):
 
     bidding_zone: str = Field("DE-LU", min_length=1)
     charges_kwh: float = Field(0.0, ge=0.0)
-    vat_rate: float = Field(0.19, ge=0.0, lt=1.0)
+    vat_rate: float = Field(0.19, ge=0.0)
     horizon_buffer: timedelta = Field(default=_HORIZON_BUFFER_DEFAULT)
 
     @field_validator("horizon_buffer", mode="before")

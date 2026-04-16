@@ -99,20 +99,54 @@ _GUI_TIMEZONE_DEFAULT = "UTC"
 # ── utilities ─────────────────────────────────────────────────────────────
 
 
+class _AsyncTaskRunner:
+    """Execute async coroutines on one dedicated loop thread.
+
+    All completion/error callbacks are marshaled to Tk's main thread via
+    ``root.after(...)`` to keep UI access thread-safe.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def submit(
+        self,
+        root: tk.Misc,
+        coro: Coroutine[Any, Any, Any],
+        on_done: Callable[[Any], None],
+        on_error: Callable[[Exception, str], None],
+    ) -> None:
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+        def _done_callback(done_future: Any) -> None:
+            try:
+                result = done_future.result()
+            except Exception as exc:  # noqa: BLE001
+                tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                root.after(0, lambda e=exc, t=tb: on_error(e, t))
+                return
+            root.after(0, lambda: on_done(result))
+
+        future.add_done_callback(_done_callback)
+
+
+_ASYNC_TASK_RUNNER = _AsyncTaskRunner()
+
+
 def _run_async(
+    root: tk.Misc,
     coro: Coroutine[Any, Any, Any],
     on_done: Callable[[Any], None],
     on_error: Callable[[Exception, str], None],
 ) -> None:
-    """Run *coro* in a daemon thread; deliver results via callbacks."""
-
-    def _worker() -> None:
-        try:
-            on_done(asyncio.run(coro))
-        except Exception as exc:
-            on_error(exc, traceback.format_exc())
-
-    threading.Thread(target=_worker, daemon=True).start()
+    """Schedule *coro* on the shared async runner and marshal callbacks to UI thread."""
+    _ASYNC_TASK_RUNNER.submit(root=root, coro=coro, on_done=on_done, on_error=on_error)
 
 
 async def _with_context(
@@ -511,9 +545,10 @@ class _Tab:
         ts = make_timestamps(start, hours, dt)
         self._status.set("Fetching…")
         _run_async(
+            self.app.root,
             prov.fetch(ts),
-            on_done=lambda r: self.app.root.after(0, lambda: self._done(r, ts)),
-            on_error=lambda e, tb: self.app.root.after(0, lambda: self._fail(e, tb)),
+            on_done=lambda r: self._done(r, ts),
+            on_error=lambda e, tb: self._fail(e, tb),
         )
 
     def _done(self, result: np.ndarray | dict, ts: list) -> None:
@@ -749,9 +784,10 @@ class LoadTab(_Tab):
         use_vac = vac_var.get() if vac_var is not None else False
         self._status.set("Fetching…")
         _run_async(
+            self.app.root,
             prov.fetch(ts, use_vacation_profile=use_vac),
-            on_done=lambda r: self.app.root.after(0, lambda: self._done(r, ts)),
-            on_error=lambda e, tb: self.app.root.after(0, lambda: self._fail(e, tb)),
+            on_done=lambda r: self._done(r, ts),
+            on_error=lambda e, tb: self._fail(e, tb),
         )
 
     def _do_plot(self, result: np.ndarray | dict, ts: list) -> None:
@@ -1758,6 +1794,7 @@ class OptimizationTab(_Tab):
                             pdata,
                             objective=objective,
                             solver_opts=solver_opts,
+                            validate_with_simulation=True,
                         )
                     )
                     return sol
@@ -1767,6 +1804,11 @@ class OptimizationTab(_Tab):
                     # res_tuple may be a LinearSolution or legacy tuple
                     inv_modes_arrs: Optional[list[np.ndarray]] = None
                     inv_ac_rates_arrs: Optional[list[np.ndarray]] = None
+                    inv_charge_wh_arrs: Optional[list[np.ndarray]] = None
+                    inv_discharge_wh_arrs: Optional[list[np.ndarray]] = None
+                    pv_to_ac_arr: Optional[np.ndarray] = None
+                    pv_to_bat_arr: Optional[np.ndarray] = None
+                    bat_discharge_arr: Optional[np.ndarray] = None
                     solve_meta: str | None = None
                     simulation_error: dict[str, Any] | None = None
 
@@ -1789,10 +1831,33 @@ class OptimizationTab(_Tab):
                             plan = sol.inverter_plans[0]
                             try:
                                 inv_modes_arrs = [np.asarray(plan.modes, dtype=np.int32)]
-                                inv_ac_rates_arrs = [np.asarray(plan.rates, dtype=np.int32)]
+                                inv_ac_rates_arrs = None  # rates removed; derived from Wh below
+                                inv_charge_wh_arrs = [
+                                    np.asarray(plan.charge_ac_wh, dtype=np.float32)
+                                ]
+                                inv_discharge_wh_arrs = [
+                                    np.asarray(plan.discharge_ac_wh, dtype=np.float32)
+                                ]
                             except Exception:
                                 inv_modes_arrs = None
                                 inv_ac_rates_arrs = None
+                                inv_charge_wh_arrs = None
+                                inv_discharge_wh_arrs = None
+
+                            # Aggregate per-inverter plan flows for clearer plotting.
+                            steps = len(res.costs_per_dt)
+                            pv_to_ac_sum = np.zeros(steps, dtype=float)
+                            pv_to_bat_sum = np.zeros(steps, dtype=float)
+                            bat_discharge_sum = np.zeros(steps, dtype=float)
+                            for p in sol.inverter_plans:
+                                pv_to_ac_sum += np.asarray(p.pv_to_ac_wh[:steps], dtype=float)
+                                pv_to_bat_sum += np.asarray(p.pv_to_battery_wh[:steps], dtype=float)
+                                bat_discharge_sum += np.asarray(
+                                    p.discharge_ac_wh[:steps], dtype=float
+                                )
+                            pv_to_ac_arr = pv_to_ac_sum
+                            pv_to_bat_arr = pv_to_bat_sum
+                            bat_discharge_arr = bat_discharge_sum
                     else:
                         # legacy tuple (res, modes, rates)
                         if isinstance(res_tuple, tuple):
@@ -1908,8 +1973,22 @@ class OptimizationTab(_Tab):
                         ax.plot(
                             x_vals,
                             list(res.self_consumption_wh_per_dt),
-                            label="Self-consumption (Wh)",
+                            label="Local supply (= Load - Grid import) (Wh)",
                         )
+                        if pv_to_ac_arr is not None:
+                            ax.plot(
+                                x_vals,
+                                list(pv_to_ac_arr),
+                                label="PV -> AC (direct) (Wh)",
+                                linewidth=1.0,
+                            )
+                        if bat_discharge_arr is not None:
+                            ax.plot(
+                                x_vals,
+                                list(bat_discharge_arr),
+                                label="Battery -> AC (Wh)",
+                                linewidth=1.0,
+                            )
                         ax.plot(x_vals, list(res.feedin_wh_per_dt), label="Feed-in (Wh)")
                         ax.plot(x_vals, list(res.losses_wh_per_dt), label="Losses (Wh)")
                         ax.legend(loc="upper right", fontsize=8)
@@ -1947,6 +2026,16 @@ class OptimizationTab(_Tab):
                         (h_load,) = ax2.plot(
                             x_vals, load_wh, color="#1565C0", linewidth=1.4, label="Load (Wh)"
                         )
+
+                        if pv_to_bat_arr is not None:
+                            ax2.plot(
+                                x_vals,
+                                list(pv_to_bat_arr),
+                                color="#6A1B9A",
+                                linewidth=1.1,
+                                linestyle="--",
+                                label="PV -> Battery (not direct self-consumption)",
+                            )
 
                         # Plot PV sources: prefer prediction PV if available, otherwise simulation result
                         pv_handles = []
@@ -2062,35 +2151,57 @@ class OptimizationTab(_Tab):
                                 labels.append(f"SoC {_k} (%)")
                                 plotted = True
 
-                        # Plot inverter modes on right axis (signed rate: discharge=+, charge=-, idle=0)
+                        # Plot inverter modes on right axis (signed power fraction: discharge=+, charge=-, idle=0)
                         if inv_modes_arrs and len(inv_modes_arrs) > 0:
                             modes_arr = inv_modes_arrs[0]
-                            rates_arr = (
-                                inv_ac_rates_arrs[0]
-                                if inv_ac_rates_arrs and len(inv_ac_rates_arrs) > 0
+                            ch_arr = (
+                                inv_charge_wh_arrs[0]
+                                if inv_charge_wh_arrs and len(inv_charge_wh_arrs) > 0
                                 else None
                             )
+                            dc_arr = (
+                                inv_discharge_wh_arrs[0]
+                                if inv_discharge_wh_arrs and len(inv_discharge_wh_arrs) > 0
+                                else None
+                            )
+                            max_ch = (
+                                float(np.max(ch_arr))
+                                if ch_arr is not None and len(ch_arr) > 0
+                                else 1.0
+                            )
+                            max_dc = (
+                                float(np.max(dc_arr))
+                                if dc_arr is not None and len(dc_arr) > 0
+                                else 1.0
+                            )
+                            max_ch = max(max_ch, 1e-6)
+                            max_dc = max(max_dc, 1e-6)
                             mode_vals = []
                             for i, m in enumerate(modes_arr):
                                 try:
                                     mode_int = int(m)
                                 except Exception:
                                     mode_int = int(InverterMode.IDLE)
-                                rate = (
-                                    float(rates_arr[i]) / 100.0
-                                    if rates_arr is not None and i < len(rates_arr)
-                                    else 1.0
-                                )
                                 if mode_int == int(InverterMode.DISCHARGE_ZERO_FEED_IN):
-                                    # Zero-feed discharge is energy-target based; visualize as full discharge state.
+                                    # Zero-feed discharge: visualize as full discharge state.
                                     mode_vals.append(+1.0)
                                 elif mode_int == int(InverterMode.DISCHARGE):
-                                    mode_vals.append(+rate)
+                                    dc_wh = (
+                                        float(dc_arr[i])
+                                        if dc_arr is not None and i < len(dc_arr)
+                                        else 0.0
+                                    )
+                                    mode_vals.append(dc_wh / max_dc)
                                 elif mode_int in (
                                     int(InverterMode.AC_CHARGE),
                                     int(InverterMode.AC_CHARGE_ZERO_FEED_IN),
                                 ):
-                                    mode_vals.append(-rate)
+                                    ch_wh = (
+                                        float(ch_arr[i])
+                                        if ch_arr is not None and i < len(ch_arr)
+                                        else 0.0
+                                    )
+                                    mode_vals.append(-ch_wh / max_ch)
                                 else:
                                     mode_vals.append(0.0)
                             h2 = ax4r.step(
@@ -2098,19 +2209,19 @@ class OptimizationTab(_Tab):
                                 mode_vals,
                                 where="post",
                                 color="#555555",
-                                label="Inv mode (signed rate)",
+                                label="Inv mode (power fraction)",
                             )
                             # ax4r.step returns a list of Line2D objects; pick first for legend handle
                             if isinstance(h2, (list, tuple)) and h2:
                                 handles.append(h2[0])
                             else:
                                 handles.append(h2)
-                            labels.append("Inv mode (signed rate)")
+                            labels.append("Inv mode (power fraction)")
                             plotted = True
 
                         if plotted:
                             ax4.set_ylabel("SoC %")
-                            ax4r.set_ylabel("Inv mode (signed rate)")
+                            ax4r.set_ylabel("Inv mode (power fraction)")
                             ax4.legend(
                                 handles=handles, labels=labels, loc="upper right", fontsize=8
                             )
@@ -2181,6 +2292,7 @@ class OptimizationTab(_Tab):
 
                 run_id = uuid.uuid4().hex[:8]
                 _run_async(
+                    self.app.root,
                     _with_context(
                         _run_sim(),
                         run_id=run_id,
@@ -2202,6 +2314,7 @@ class OptimizationTab(_Tab):
 
         run_id = uuid.uuid4().hex[:8]
         _run_async(
+            self.app.root,
             _with_context(
                 pred.fetch(start=start, hours=hours, dt_hours=dt),
                 run_id=run_id,
@@ -2459,7 +2572,13 @@ class App:
         return dt.replace(tzinfo=tz), float(self._hours.get()), float(self._dt.get())
 
     def _fetch_all(self) -> None:
+        # Keep Fetch-All lightweight: only data-provider tabs run here.
+        # Optimization is triggered explicitly from the Optimization tab button.
         for tab in self.tabs:
+            if isinstance(tab, OptimizationTab):
+                if hasattr(tab, "_status"):
+                    tab._status.set("Skipped by Fetch All · use 'Run Optimization'")
+                continue
             tab.fetch()
 
 

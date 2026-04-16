@@ -61,25 +61,33 @@ def resample_to_timestamps(
     start_ts = timestamps[0]
     src_dt_s: float = source_dt_hours * 3_600.0
 
-    result: list[float] = []
-    for ts in timestamps:
-        delta_s = (ts - start_ts).total_seconds()
-        t = delta_s / src_dt_s
-        lo = int(t)
-        frac = t - lo
-        if lo < 0:
-            result.append(float(values[0]))
-        elif lo >= n_src - 1:
-            # At or beyond last source point
-            if lo >= n_src and pad_value is not None:
-                result.append(pad_value)
-            else:
-                result.append(float(values[n_src - 1]))
-        else:
-            v = float(values[lo]) * (1.0 - frac) + float(values[lo + 1]) * frac
-            result.append(v)
+    delta_s = np.array([(ts - start_ts).total_seconds() for ts in timestamps], dtype=np.float64)
+    t = delta_s / src_dt_s
+    lo = np.floor(t).astype(np.int64)
+    frac = t - lo
 
-    return np.array(result, dtype=np.float32)
+    src_arr = np.asarray(values, dtype=np.float64)
+    result = np.empty(n_tgt, dtype=np.float64)
+
+    mask_before = lo < 0
+    mask_end = lo >= n_src - 1
+    mask_interp = ~mask_before & ~mask_end
+
+    result[mask_before] = src_arr[0]
+
+    if pad_value is not None:
+        mask_pad = lo >= n_src
+        result[mask_end & ~mask_pad] = src_arr[-1]
+        result[mask_pad] = pad_value
+    else:
+        result[mask_end] = src_arr[-1]
+
+    if mask_interp.any():
+        lo_i = lo[mask_interp]
+        fi = frac[mask_interp]
+        result[mask_interp] = src_arr[lo_i] * (1.0 - fi) + src_arr[lo_i + 1] * fi
+
+    return np.asarray(result, dtype=np.float32)
 
 
 class PredictionProvider(ABC):

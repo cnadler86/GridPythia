@@ -31,7 +31,7 @@ class ElecPriceFixed(ElecPriceProvider):
         self,
         price_kwh: float = 0.30,
         charges_kwh: float = 0.0,
-        vat_rate: float = 1.0,
+        vat_rate: float = 0.0,
         schedule: list[TimeWindow] | None = None,
     ) -> None:
         self._price_kwh = price_kwh
@@ -45,11 +45,12 @@ class ElecPriceFixed(ElecPriceProvider):
 
     def _price_at(self, hour_of_day: float) -> float:
         """EUR/Wh at a given fractional hour of day."""
+        multiplier = 1.0 + self._vat_rate
         if self._schedule:
             for w in self._schedule:
                 if w.start_hour <= hour_of_day < w.end_hour:
-                    return (w.value / 1000.0 + self._charges_kwh / 1000.0) * self._vat_rate
-        return (self._price_kwh / 1000.0 + self._charges_kwh / 1000.0) * self._vat_rate
+                    return (w.value / 1000.0 + self._charges_kwh / 1000.0) * multiplier
+        return (self._price_kwh / 1000.0 + self._charges_kwh / 1000.0) * multiplier
 
     async def fetch(self, timestamps: list) -> np.ndarray:
         values = [self._price_at(t.hour + t.minute / 60.0) for t in timestamps]
