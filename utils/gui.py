@@ -1950,22 +1950,39 @@ class OptimizationTab(_Tab):
                         self._fig.clear()
                         n = len(res.costs_per_dt)
 
-                        # Convert timestamps to matplotlib-compatible numeric x values.
-                        # Keep a copy of original datetimes in `x_dt` for hover tooltips.
+                        # --- Zeitachsen: immer echte Timestamps aus Prediction nutzen ---
                         x_dt: Optional[List[datetime]] = None
+                        # 1. Aus solution.prediction['timestamps'] (sol_pred_ts)
                         if sol_pred_ts and len(sol_pred_ts) >= n:
                             x_dt = list(sol_pred_ts[:n])
+                        # 2. Fallback: aus PredictionData (self._last_ts)
+                        elif self._last_ts and len(self._last_ts) >= n:
+                            x_dt = list(self._last_ts[:n])
+                        # 3. Fallback: aus res (SimulationResult) falls vorhanden
+                        elif (
+                            hasattr(res, "timestamps")
+                            and res.timestamps
+                            and len(res.timestamps) >= n
+                        ):
+                            x_dt = list(res.timestamps[:n])
+                        # 4. Notfalls: Index
                         else:
-                            ts = getattr(self, "_last_ts", None)
-                            if ts and len(ts) >= n:
-                                x_dt = list(ts[:n])
+                            x_dt = None
 
                         if x_dt is not None:
                             x_vals = mdates.date2num(x_dt)
                         else:
                             x_vals = list(range(n))
 
+                        # --- X-Achse: Uhrzeit-Format für Zeitstempel ---
+                        def set_time_axis(ax):
+                            if x_dt is not None:
+                                ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                                ax.xaxis.set_minor_formatter(mdates.DateFormatter("%H:%M"))
+                                ax.figure.autofmt_xdate(rotation=25)
+
                         # Top: energy flows
+
                         ax = self._fig.add_subplot(311)
                         ax.plot(x_vals, list(res.grid_import_wh_per_dt), label="Grid import (Wh)")
                         ax.plot(
@@ -1992,10 +2009,8 @@ class OptimizationTab(_Tab):
                         ax.legend(loc="upper right", fontsize=8)
                         ax.set_ylabel("Wh")
                         ax.grid(alpha=0.3)
-                        if x_dt is None:
-                            # numeric x: don't format dates
-                            pass
-                        else:
+                        set_time_axis(ax)
+                        if x_dt is not None:
                             # Add hover to energy flows
                             try:
                                 grid_import_data = list(res.grid_import_wh_per_dt)
@@ -2012,6 +2027,7 @@ class OptimizationTab(_Tab):
 
                         # Middle: PV generation and Load (left axis), electric price (right axis)
                         ax2 = self._fig.add_subplot(312)
+                        set_time_axis(ax2)
                         # compute total load (grid import + self-consumption)
                         load_wh = [
                             g + s
@@ -2124,6 +2140,7 @@ class OptimizationTab(_Tab):
 
                         # Bottom: battery SoC (%) (left axis) and inverter modes (right axis)
                         ax4 = self._fig.add_subplot(313)
+                        set_time_axis(ax4)
                         ax4r = ax4.twinx()
                         plotted = False
                         handles = []
