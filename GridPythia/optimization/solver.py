@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import dataclass, replace
 from platform import machine
 from typing import Any, cast
 
@@ -25,6 +24,13 @@ import cvxpy as cp
 import numpy as np
 from structlog import get_logger
 
+from GridPythia.optimization.plan import InverterPlan, PlanWindow  # noqa: F401 – re-exported
+from GridPythia.optimization.solution import (
+    EnergySolution,
+    LinearSolution,
+    OptimizationObjective,
+    SimulationParityReport,
+)
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.inverterbase import InverterBase
@@ -50,55 +56,9 @@ _DEFAULT_HIGHS_OPTS = {
 }
 
 
-class OptimizationObjective(str, Enum):
-    """Supported objective functions for :class:`LinearOptimizer`."""
-
-    MINIMIZE_COST = "cost"
-    MAXIMIZE_SELF_CONSUMPTION = "self_consumption"
-
-
-@dataclass
-class SimulationParityReport:
-    """Difference report between LP result and GridSimulation replay."""
-
-    ok: bool
-    max_abs_soc_error_wh: float
-    max_abs_grid_import_error_wh: float
-    max_abs_feedin_error_wh: float
-    max_abs_cost_error_eur: float
-
-
-@dataclass(frozen=True, slots=True)
-class InverterPlan:
-    """Typed inverter schedule exported by :class:`LinearOptimizer`."""
-
-    device_id: str
-    modes: np.ndarray  # InverterMode int per timestep (np.int8)
-    charge_ac_wh: np.ndarray  # AC energy drawn from grid for charging [Wh/dt]
-    discharge_ac_wh: np.ndarray  # AC energy delivered to home from battery [Wh/dt]
-    pv_to_ac_wh: np.ndarray  # PV energy routed directly to AC [Wh/dt]
-    pv_to_battery_wh: np.ndarray  # PV energy routed into battery [Wh/dt]
-    battery_soc_wh: np.ndarray | None = None  # SoC at end of each slot [Wh]
-
-    def __getitem__(self, key: str) -> Any:
-        return getattr(self, key)
-
-    def get(self, key: str, default: Any | None = None) -> Any | None:
-        return getattr(self, key, default)
-
-
-@dataclass
-class LinearSolution:
-    """Solution produced by :class:`LinearOptimizer`."""
-
-    result: SimulationResult
-    objective: OptimizationObjective
-    solver_status: str
-    solve_time_s: float
-    inverter_plans: list[InverterPlan]
-    parity_report: SimulationParityReport | None = None
-    simulation_result: SimulationResult | None = None
-    prediction: dict | None = None
+# OptimizationObjective, SimulationParityReport, InverterPlan, PlanWindow,
+# EnergySolution and LinearSolution are defined in plan.py / solution.py and
+# imported above.  They are the public API for optimizer consumers.
 
 
 @dataclass
@@ -267,7 +227,7 @@ class LinearOptimizer:
             objective=effective_objective,
             solver_status=status,
             solve_time=solve_time,
-            prediction=prediction.to_dict(),
+            prediction=prediction,
         )
 
         self._cached_prediction = prediction
@@ -275,8 +235,8 @@ class LinearOptimizer:
 
         if validate_with_simulation:
             parity, sim_res = self._validate_with_simulation(solution, prep, prediction)
-            solution.parity_report = parity
-            solution.simulation_result = sim_res
+            solution = replace(solution, parity_report=parity, simulation_result=sim_res)
+            self._cached_solution = solution
             if parity.ok:
                 self._log.debug("optimizer_parity_ok")
             else:
@@ -987,7 +947,7 @@ class LinearOptimizer:
         objective: OptimizationObjective,
         solver_status: str,
         solve_time: float,
-        prediction: dict | None = None,
+        prediction: PredictionData,
     ) -> LinearSolution:
         T = prep.T
         dt = prep.dt
@@ -1063,12 +1023,12 @@ class LinearOptimizer:
         )
 
         return LinearSolution(
-            result=result,
+            prediction=prediction,
+            inverter_plans=tuple(inverter_plans),
             objective=objective,
             solver_status=solver_status,
             solve_time_s=solve_time,
-            inverter_plans=inverter_plans,
-            prediction=prediction,
+            result=result,
         )
 
     def _validate_with_simulation(
