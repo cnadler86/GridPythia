@@ -1,12 +1,14 @@
 cache/
 output/
-EOS.config.json
 uv.lock
 *.csv
 *.log
 *.pdf
 *.xlsx
 *.yaml
+
+.agents
+skills-lock.json
 
 # Default ignore folders and files for VS Code, Python
 
