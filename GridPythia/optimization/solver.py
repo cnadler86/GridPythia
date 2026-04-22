@@ -265,16 +265,22 @@ class LinearOptimizer:
 
     def _build_warm_start_plan(
         self, shift_steps: int
-    ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    ) -> dict[
+        str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]
+    ]:
         """Build a warm-start seed from the cached solution, shifted by *shift_steps*.
 
-        Returns a dict mapping device_id → (modes, charge_ac_wh, discharge_ac_wh, pv_to_bat_wh, pv_ac_wh).
+        Returns a dict mapping device_id → (modes, charge_ac_wh, discharge_ac_wh,
+        pv_to_bat_wh, pv_ac_wh, soc_wh | None).
         """
         if self._cached_solution is None or shift_steps <= 0:
             return {}
 
         T = self._T
-        out: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+        out: dict[
+            str,
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None],
+        ] = {}
         for inv_plan in self._cached_solution.inverter_plans:
             src_modes = np.asarray(inv_plan.modes, dtype=np.int8)
             src_ch = np.asarray(inv_plan.charge_ac_wh, dtype=np.float32)
@@ -289,6 +295,7 @@ class LinearOptimizer:
                     np.zeros(T, dtype=np.float32),
                     np.zeros(T, dtype=np.float32),
                     np.zeros(T, dtype=np.float32),
+                    None,
                 )
                 continue
 
@@ -331,12 +338,25 @@ class LinearOptimizer:
             # pv_ac is 0 in IDLE (gated by mode_dc)
             shifted_pva[shifted_modes == int(InverterMode.IDLE)] = 0.0
 
+            # Shift the SoC trace: new_soc[t] = old_soc[t + shift_steps]
+            shifted_soc: np.ndarray | None = None
+            if inv_plan.battery_soc_wh is not None and len(inv_plan.battery_soc_wh) > 0:
+                src_soc = np.asarray(inv_plan.battery_soc_wh, dtype=np.float32)
+                shifted_soc = np.empty(T, dtype=np.float32)
+                soc_src_start = min(shift_steps, int(src_soc.size))
+                soc_copied = min(max(int(src_soc.size) - soc_src_start, 0), T)
+                if soc_copied > 0:
+                    shifted_soc[:soc_copied] = src_soc[soc_src_start : soc_src_start + soc_copied]
+                if soc_copied < T:
+                    shifted_soc[soc_copied:] = src_soc[-1]
+
             out[inv_plan.device_id] = (
                 shifted_modes,
                 shifted_ch,
                 shifted_dc,
                 shifted_pvb,
                 shifted_pva,
+                shifted_soc,
             )
         return out
 
@@ -538,7 +558,8 @@ class LinearOptimizer:
         self,
         prep: _PreparedInputs,
         warm_start_plan: Mapping[
-            str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            str,
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None],
         ]
         | None,
     ) -> None:
@@ -556,7 +577,7 @@ class LinearOptimizer:
             if seed is None:
                 continue
 
-            seed_modes, seed_ch_wh, seed_dc_wh, seed_pvb_wh, seed_pva_wh = seed
+            seed_modes, seed_ch_wh, seed_dc_wh, seed_pvb_wh, seed_pva_wh, seed_soc_wh = seed
             if seed_modes.size == 0:
                 continue
 
@@ -581,10 +602,38 @@ class LinearOptimizer:
                 block.mode_dc_activity.value = dc
 
             if isinstance(block.p_ch, cp.Variable):
-                block.p_ch.value = seed_ch_wh[: prep.T].astype(float)
+                p_ch_val = seed_ch_wh[: prep.T].astype(float)
+                # Project to semi-continuous domain: when mode_ch=1, p_ch >= min.
+                # This ensures the warm start satisfies the min-power constraint so
+                # HiGHS can accept it directly without an LP repair step.
+                _min_p_w = inv.parameters.min_ac_output_power_w
+                if _min_p_w > 0.0 and isinstance(block.mode_ch_activity, cp.Variable):
+                    _ch_on = (
+                        block.mode_ch_activity.value > 0.5
+                        if block.mode_ch_activity.value is not None
+                        else np.zeros(prep.T, dtype=bool)
+                    )
+                    _min_ch_wh = _min_p_w * prep.dt
+                    p_ch_val = p_ch_val.copy()
+                    p_ch_val[~_ch_on] = 0.0
+                    p_ch_val[_ch_on] = np.maximum(p_ch_val[_ch_on], _min_ch_wh)
+                block.p_ch.value = p_ch_val
 
             if isinstance(block.p_dc, cp.Variable):
-                block.p_dc.value = seed_dc_wh[: prep.T].astype(float)
+                p_dc_val = seed_dc_wh[: prep.T].astype(float)
+                # Project to semi-continuous domain: when mode_dc=1, p_dc >= min.
+                _min_p_w = inv.parameters.min_ac_output_power_w
+                if _min_p_w > 0.0 and isinstance(block.mode_dc_activity, cp.Variable):
+                    _dc_on = (
+                        block.mode_dc_activity.value > 0.5
+                        if block.mode_dc_activity.value is not None
+                        else np.zeros(prep.T, dtype=bool)
+                    )
+                    _min_dc_wh = _min_p_w * prep.dt
+                    p_dc_val = p_dc_val.copy()
+                    p_dc_val[~_dc_on] = 0.0
+                    p_dc_val[_dc_on] = np.maximum(p_dc_val[_dc_on], _min_dc_wh)
+                block.p_dc.value = p_dc_val
 
             if isinstance(block.pv_to_bat, cp.Variable):
                 block.pv_to_bat.value = seed_pvb_wh[: prep.T].astype(float)
@@ -593,8 +642,11 @@ class LinearOptimizer:
                 block.pv_ac.value = seed_pva_wh[: prep.T].astype(float)
 
             if isinstance(block.soc, cp.Variable) and inv.device_id in self._soc_init_params:
-                soc0 = float(self._soc_init_params[inv.device_id].value or 0.0)
-                block.soc.value = np.full(prep.T, soc0, dtype=float)
+                if seed_soc_wh is not None and seed_soc_wh.size >= prep.T:
+                    block.soc.value = seed_soc_wh[: prep.T].astype(float)
+                else:
+                    soc0 = float(self._soc_init_params[inv.device_id].value or 0.0)
+                    block.soc.value = np.full(prep.T, soc0, dtype=float)
 
         # Warm-start pv_self with Fraunhofer model estimate
         if isinstance(self._pv_self, cp.Variable):
@@ -728,6 +780,40 @@ class LinearOptimizer:
                 )
             else:
                 self._constraints.append(p_dc / eta_d <= start_soc - bat.min_soc_wh)
+
+            # RLT strengthening cuts for semi-continuous min-power constraints.
+            # Derived by substituting p_dc >= min_dc * mode_dc into the SoC discharge
+            # constraint above.  This creates a direct binary→SoC link that tightens
+            # the LP relaxation at each B&B node, reducing tree size.
+            _min_p_w = inv.parameters.min_ac_output_power_w
+            if _min_p_w > 0.0 and mode_dc_activity is not None:
+                _min_dc_wh_rlt = _min_p_w * dt
+                if _is_active_self is not None:
+                    # Strongest valid cut: combine min discharge + active consumption.
+                    # mode_dc*(min_dc/eta_d + act) + act*mode_ch (if present) <= SoC headroom
+                    if mode_ch_activity is not None:
+                        self._constraints.append(
+                            mode_dc_activity * (_min_dc_wh_rlt / eta_d + _act_wh_self)
+                            + _act_wh_self * mode_ch_activity
+                            <= start_soc - bat.min_soc_wh
+                        )
+                    else:
+                        self._constraints.append(
+                            mode_dc_activity * (_min_dc_wh_rlt / eta_d + _act_wh_self)
+                            <= start_soc - bat.min_soc_wh
+                        )
+                else:
+                    self._constraints.append(
+                        mode_dc_activity * _min_dc_wh_rlt / eta_d <= start_soc - bat.min_soc_wh
+                    )
+            # RLT cut for min charge: mode_ch * min_ch * eta_c_ac <= SoC headroom
+            # (Commented out: in practice this cut interacts poorly with presolve
+            #  on specific prediction windows and can be slower overall.)
+            # if _min_p_w > 0.0 and mode_ch_activity is not None:
+            #     _min_ch_wh_rlt = _min_p_w * dt
+            #     self._constraints.append(
+            #         mode_ch_activity * _min_ch_wh_rlt * eta_c_ac <= bat.max_soc_wh - start_soc
+            #     )
 
             # Combined battery charge-rate limit in raw battery input energy [Wh/dt]:
             # AC charging contributes after AC->DC conversion, PV->battery is already
