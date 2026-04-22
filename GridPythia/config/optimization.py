@@ -65,6 +65,9 @@ class InverterParameters(BaseModel):
     has_pv: bool = Field(
         default=True, description="Whether a PV plane is attached to this inverter"
     )
+    min_ac_output_power_w: float = Field(
+        default=0.0, ge=0.0, description="Min AC output (to grid) in W"
+    )
     max_ac_output_power_w: float = Field(
         default=5000, ge=0.0, description="Max AC output (to grid) in W"
     )

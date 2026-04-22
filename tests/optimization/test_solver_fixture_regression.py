@@ -3,7 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from GridPythia.optimization.solver import InverterPlan, LinearOptimizer, OptimizationObjective
+from GridPythia.optimization.solver import LinearOptimizer
+from GridPythia.optimization.solution import InverterPlan, OptimizationObjective
 from tests.optimization.solver_fixture_support import load_solver_fixture_scenario
 
 
@@ -31,18 +32,18 @@ def test_fixture_solution_matches_regression_signature() -> None:
     assert np.max(np.minimum(plan.charge_ac_wh, plan.discharge_ac_wh)) == pytest.approx(0.0, abs=1e-6)
     assert np.all(plan.pv_to_ac_wh + plan.pv_to_battery_wh <= scenario.prediction.pv_by_inverter[plan.device_id] + 1e-5)
 
-    assert solution.result.total_cost == pytest.approx(0.812938, abs=1e-3)
-    assert solution.result.total_grid_import == pytest.approx(4716.5, abs=1.0)
-    assert solution.result.total_losses == pytest.approx(750.2, abs=2.0)
-    assert float(plan.battery_soc_wh[-1]) == pytest.approx(673.1, abs=2.0)
+    assert solution.result.total_cost == pytest.approx(0.814117, abs=1e-3)
+    assert solution.result.total_grid_import == pytest.approx(4738.7, abs=1.0)
+    assert solution.result.total_losses == pytest.approx(772.6, abs=2.0)
+    assert float(plan.battery_soc_wh[-1]) == pytest.approx(672.8, abs=2.0)
 
     active_idx = np.flatnonzero((plan.charge_ac_wh > 1e-6) | (plan.discharge_ac_wh > 1e-6))
     assert active_idx.size == 98
-    assert active_idx[0] == 19
+    assert active_idx[0] == 21
     assert active_idx[-1] == 182
     np.testing.assert_allclose(
         plan.discharge_ac_wh[active_idx[:8]],
-        np.array([13.257, 14.140, 14.882, 15.416, 15.743, 14.865, 14.510, 16.540], dtype=np.float32),
+        np.array([14.882, 15.416, 15.743, 14.865, 14.510, 16.540, 20.955, 29.771], dtype=np.float32),
         atol=0.05,
     )
     assert plan.modes[active_idx[:8]].tolist() == [2, 2, 2, 2, 2, 2, 2, 2]

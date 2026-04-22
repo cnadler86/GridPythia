@@ -17,6 +17,9 @@ dependencies = [
     "holidays>=0.93",
     "pyyaml>=6.0.3",
     "structlog>=25.5.0",
+    "plotly>=5.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
 ]
 
 [dependency-groups]

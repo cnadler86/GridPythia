@@ -24,9 +24,8 @@ import cvxpy as cp
 import numpy as np
 from structlog import get_logger
 
-from GridPythia.optimization.plan import InverterPlan, PlanWindow  # noqa: F401 – re-exported
 from GridPythia.optimization.solution import (
-    EnergySolution,
+    InverterPlan,
     LinearSolution,
     OptimizationObjective,
     SimulationParityReport,
@@ -54,11 +53,6 @@ _DEFAULT_HIGHS_OPTS = {
     "mip_heuristic_run_root_reduced_cost": False,
     "small_matrix_value": 1e-4,
 }
-
-
-# OptimizationObjective, SimulationParityReport, InverterPlan, PlanWindow,
-# EnergySolution and LinearSolution are defined in plan.py / solution.py and
-# imported above.  They are the public API for optimizer consumers.
 
 
 @dataclass
@@ -95,7 +89,6 @@ class LinearOptimizer:
     battery start SoC, and initial inverter mode).
     """
 
-    _MIN_ACTIVE_AC_RATE_PCT = 0.0
     _MONETARY_OBJECTIVE_SCALE = 100.0
 
     def __init__(
@@ -396,9 +389,9 @@ class LinearOptimizer:
         total_pv_ac_var_terms: list[object] = []
         blocks = [self._build_inverter_block(inv) for inv in self.inverters]
         for _inv, block in zip(self.inverters, blocks, strict=False):
-            total_p_ch_terms.append(cast(cp.Expression, block.p_ch))
-            total_p_dc_terms.append(cast(cp.Expression, block.p_dc))
-            total_pv_ac_var_terms.append(cast(cp.Expression, block.pv_ac))
+            total_p_ch_terms.append(block.p_ch)
+            total_p_dc_terms.append(block.p_dc)
+            total_pv_ac_var_terms.append(block.pv_ac)
 
         total_p_ch = self._sum_terms(total_p_ch_terms, self._T)
         total_p_dc = self._sum_terms(total_p_dc_terms, self._T)
@@ -638,14 +631,15 @@ class LinearOptimizer:
             if inv.parameters.max_ac_charge_power_w > 0:
                 max_ch_power_w = min(max_ch_power_w, float(inv.parameters.max_ac_charge_power_w))
             max_ch_wh = max_ch_power_w * dt
+            mode_ch_activity = cp.Variable(T, boolean=True, name=f"mode_ch_{inv_id}")
             if max_ch_wh > 0:
-                mode_ch_activity = cp.Variable(T, boolean=True, name=f"mode_ch_{inv_id}")
                 p_ch = cp.Variable(T, nonneg=True, name=f"p_ch_{inv_id}")
-                min_ch_wh = max_ch_wh * (self._MIN_ACTIVE_AC_RATE_PCT / 100.0)
-                self._constraints.append(p_ch >= min_ch_wh * mode_ch_activity)
                 self._constraints.append(p_ch <= max_ch_wh * mode_ch_activity)
             else:
                 p_ch = cp.Constant(np.zeros(T, dtype=float))
+            if inv.parameters.min_ac_output_power_w > 0 and max_ch_wh > 0:
+                min_ch_wh = inv.parameters.min_ac_output_power_w * dt
+                self._constraints.append(p_ch >= min_ch_wh * mode_ch_activity)
         else:
             p_ch = cp.Constant(np.zeros(T, dtype=float))
 
@@ -654,14 +648,15 @@ class LinearOptimizer:
             if inv.parameters.max_ac_output_power_w > 0:
                 max_dc_power_w = min(max_dc_power_w, float(inv.parameters.max_ac_output_power_w))
             max_dc_wh = max_dc_power_w * dt
+            mode_dc_activity = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
             if max_dc_wh > 0:
-                mode_dc_activity = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
                 p_dc = cp.Variable(T, nonneg=True, name=f"p_dc_{inv_id}")
-                min_dc_wh = max_dc_wh * (self._MIN_ACTIVE_AC_RATE_PCT / 100.0)
-                self._constraints.append(p_dc >= min_dc_wh * mode_dc_activity)
                 self._constraints.append(p_dc <= max_dc_wh * mode_dc_activity)
             else:
                 p_dc = cp.Constant(np.zeros(T, dtype=float))
+            if inv.parameters.min_ac_output_power_w > 0 and max_dc_wh > 0:
+                min_dc_wh = inv.parameters.min_ac_output_power_w * dt
+                self._constraints.append(p_dc >= min_dc_wh * mode_dc_activity)
         else:
             p_dc = cp.Constant(np.zeros(T, dtype=float))
 

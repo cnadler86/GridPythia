@@ -1,5 +1,4 @@
 """Tests for topology-aware InverterBase."""
-from contourpy.util.data import simple
 
 import pytest
 
