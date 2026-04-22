@@ -72,12 +72,21 @@ class _InverterModelBlock:
     """Decision and helper expressions for one inverter block."""
 
     inverter: InverterBase
+    # AC-side charging energy per timestep [Wh] (variable when inverter+bat present)
     p_ch: cp.Expression
+    # AC-side discharging energy per timestep [Wh] (variable when inverter+bat present)
     p_dc: cp.Expression
+    # AC power from PV routed to the AC bus per timestep [Wh]
     pv_ac: cp.Expression
+    # PV energy routed into the battery (DC side) per timestep [Wh]
     pv_to_bat: cp.Expression
+    # State-of-charge time series for the connected battery [Wh] or None
     soc: cp.Variable | None
+    # Net battery energy flow [Wh/dt]: positive=charge, negative=discharge
+    battery_net_flow_wh: cp.Expression | None
+    # Binary/indicator for AC-charge mode activity (1 when AC charging active)
     mode_ch_activity: cp.Expression | None
+    # Binary/indicator for DC-discharge mode activity (1 when discharge/bypass active)
     mode_dc_activity: cp.Expression | None
 
 
@@ -677,6 +686,7 @@ class LinearOptimizer:
 
         mode_ch_activity: cp.Expression | None = None
         mode_dc_activity: cp.Expression | None = None
+        battery_net_flow_wh: cp.Expression | None = None
 
         if inv.battery is not None and inv.is_optimizable and has_charge_mode:
             max_ch_power_w = float(inv.battery.max_charge_power_w)
@@ -755,7 +765,8 @@ class LinearOptimizer:
             eta_c_pv = bat.charging_efficiency
             eta_d = bat.discharging_efficiency * inv.parameters.dc_to_ac_efficiency
 
-            delta = p_ch * eta_c_ac + pv_to_bat * eta_c_pv - p_dc / eta_d
+            # Net battery flow in stored-energy units [Wh/dt].
+            battery_net_flow_wh = p_ch * eta_c_ac + pv_to_bat * eta_c_pv - p_dc / eta_d
 
             _active_w_self = inv.parameters.active_inverter_consumption_w
             _is_active_self = None
@@ -768,7 +779,7 @@ class LinearOptimizer:
                 elif mode_dc_activity is not None:
                     _is_active_self = mode_dc_activity
                 if _is_active_self is not None:
-                    delta = delta - _act_wh_self * _is_active_self
+                    battery_net_flow_wh = battery_net_flow_wh - _act_wh_self * _is_active_self
 
             start_soc = (
                 cp.hstack([soc_init_param, soc[:-1]]) if T > 1 else cp.hstack([soc_init_param])
@@ -832,7 +843,7 @@ class LinearOptimizer:
             # when the inverter DC→AC path is active.  The headroom constraint ensures
             # AC + PV charging never overfills the battery.
 
-            self._constraints.append(soc == start_soc + delta)
+            self._constraints.append(soc == start_soc + battery_net_flow_wh)
             self._constraints.extend([soc >= bat.min_soc_wh, soc <= bat.max_soc_wh])
         else:
             soc = None
@@ -846,6 +857,7 @@ class LinearOptimizer:
             pv_ac=pv_ac,
             pv_to_bat=pv_to_bat,
             soc=soc,
+            battery_net_flow_wh=battery_net_flow_wh,
             mode_ch_activity=mode_ch_activity,
             mode_dc_activity=mode_dc_activity,
         )
@@ -974,10 +986,9 @@ class LinearOptimizer:
         """
         inv = block.inverter
         modes = np.full(T, int(InverterMode.IDLE), dtype=np.int8)
-        eps = 1e-4
 
-        p_ch = self._expr_to_vec(block.p_ch, T)
-        p_dc = self._expr_to_vec(block.p_dc, T)
+        p_ch = self._expr_to_vec(block.mode_ch_activity, T).astype(bool)
+        p_dc = self._expr_to_vec(block.mode_dc_activity, T).astype(bool)
 
         ch_mode = (
             InverterMode.AC_CHARGE
@@ -994,27 +1005,14 @@ class LinearOptimizer:
         # pv_to_bat is passive DC-bus routing and does not change the reported mode.
         # pv_to_bat = self._expr_to_vec(block.pv_to_bat, T)
 
-        modes[p_ch > eps] = int(ch_mode)
-        modes[p_dc > eps] = int(dc_mode)
+        modes[p_ch] = int(ch_mode)
+        modes[p_dc] = int(dc_mode)
 
         # Battery inverters: pv_ac > 0 requires mode_dc=1 by the bypass-gate constraint,
         # so the inverter IS actively running its DC→AC path — report as discharge mode.
         if inv.battery is not None and block.mode_dc_activity is not None:
-            pv_ac_vec = self._expr_to_vec(block.pv_ac, T)
-            modes[pv_ac_vec > eps] = int(dc_mode)
-
-        # For switch-cost models: binary=1 with zero power means "parking in mode"
-        # to avoid incurring a future switch penalty.
-        if inv.parameters.mode_switch_cost > 0.0:
-            if block.mode_ch_activity is not None:
-                ch_active = np.round(self._expr_to_vec(block.mode_ch_activity, T)).astype(bool)
-                ch_parking = ch_active & (p_ch <= eps) & (p_dc <= eps)
-                modes[ch_parking] = int(ch_mode)
-
-            if block.mode_dc_activity is not None:
-                dc_active = np.round(self._expr_to_vec(block.mode_dc_activity, T)).astype(bool)
-                dc_parking = dc_active & (p_dc <= eps) & (p_ch <= eps)
-                modes[dc_parking] = int(dc_mode)
+            pv_ac_vec = self._expr_to_vec(block.pv_ac, T).astype(bool)
+            modes[pv_ac_vec] = int(dc_mode)
 
         return modes
 
