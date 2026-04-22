@@ -1070,9 +1070,18 @@ class LinearOptimizer:
     def _extract_modes(self, block: _InverterModelBlock, T: int) -> np.ndarray:
         """Map solver solution to InverterMode per timestep.
 
-        Primary signal: actual power flow (p_ch / p_dc > eps).
-        When switch cost is active, binaries are also used to capture "parked" mode
-        slots where the mode is maintained at zero power to avoid switch penalties.
+        Binary-based extraction is used as the primary signal when ``mode_switch_cost > 0``.
+        In that case the solver controls the binaries deliberately:
+        - binary=1, energy>0  → mode is actively running
+        - binary=1, energy=0  → "parked" mode: held at 1 to avoid a future switch penalty
+
+        When ``mode_switch_cost = 0`` the binaries are degenerate.  The semi-continuous
+        constraint only provides an upper bound (p ≤ max × binary), so binary=1 with p=0
+        is feasible and HiGHS may choose it as an arbitrary tie-break.  Energy-flow based
+        extraction is used instead so that IDLE is reported when no energy actually flows.
+
+        PV→AC bypass (pv_ac > 0) always implies the DC→AC path is open regardless of
+        switch cost, so it is always captured via the energy-flow check.
         """
         inv = block.inverter
         eps = 1e-3
@@ -1089,28 +1098,33 @@ class LinearOptimizer:
             else InverterMode.DISCHARGE_ZERO_FEED_IN
         )
 
-        # Energy-based mode detection: report active mode only when actual energy flows.
-        ch_flow = self._expr_to_vec(block.p_ch, T) > eps
-        dc_flow = self._expr_to_vec(block.p_dc, T) > eps
-        pv_ac_flow = self._expr_to_vec(block.pv_ac, T) > eps
-
-        modes[ch_flow] = int(ch_mode)
-        modes[dc_flow] = int(dc_mode)
-
-        # Battery inverters: pv_ac > 0 requires mode_dc=1 by the bypass-gate constraint,
-        # so the inverter IS actively running its DC→AC path — report as discharge mode.
-        if inv.battery is not None:
-            modes[pv_ac_flow] = int(dc_mode)
-
-        # When switch cost is active, also report "parked" binary modes where the
-        # solver intentionally maintains a mode at zero power to avoid switch penalties.
         if inv.parameters.mode_switch_cost > 0:
+            # --- Binary-based (primary) ---
+            # With switch cost the solver only sets binary=1 deliberately.
+            # Parked slots (binary=1, energy=0) are a valid mode state and must be reported.
             if block.mode_ch_activity is not None:
                 ch_binary = self._expr_to_vec(block.mode_ch_activity, T) > 0.5
-                modes[ch_binary & ~dc_flow & ~pv_ac_flow] = int(ch_mode)
+                modes[ch_binary] = int(ch_mode)
             if block.mode_dc_activity is not None:
                 dc_binary = self._expr_to_vec(block.mode_dc_activity, T) > 0.5
+                # mode_ch + mode_dc <= 1 ensures mutual exclusion; dc takes precedence
+                # for bypass/discharge reporting (overwriting ch where both would apply).
                 modes[dc_binary] = int(dc_mode)
+        else:
+            # --- Energy-flow based (primary) ---
+            # With switch_cost=0 the binary is a free variable when p=0 and may be set to
+            # 1 by HiGHS as a degenerate tie-break. Use actual energy flow to infer mode.
+            ch_flow = self._expr_to_vec(block.p_ch, T) > eps
+            dc_flow = self._expr_to_vec(block.p_dc, T) > eps
+            modes[ch_flow] = int(ch_mode)
+            modes[dc_flow] = int(dc_mode)
+
+        # PV→AC bypass: the bypass-gate constraint (pv_ac <= pv_pred * mode_dc) forces
+        # mode_dc=1 whenever pv_ac > 0.  For switch_cost>0 this is already captured by
+        # the binary above; the energy-flow check below covers switch_cost=0 explicitly.
+        if inv.battery is not None:
+            pv_ac_flow = self._expr_to_vec(block.pv_ac, T) > eps
+            modes[pv_ac_flow] = int(dc_mode)
 
         return modes
 
