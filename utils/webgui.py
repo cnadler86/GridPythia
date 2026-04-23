@@ -31,7 +31,7 @@ from structlog import get_logger
 
 from GridPythia.config import AppConfig
 from GridPythia.optimization.plots import SolutionPlotter
-from GridPythia.optimization.solution import LinearSolution, OptimizationObjective
+from GridPythia.optimization.solution import OptimizationObjective
 from GridPythia.optimization.solver import LinearOptimizer
 from GridPythia.prediction.electricprice.energycharts import (
     ElecPriceEnergyCharts,
@@ -68,6 +68,11 @@ app = FastAPI(title="GridPythia Web GUI", docs_url=None, redoc_url=None)
 _providers: PredictionSetup | None = None
 _providers_config_mtime: float = 0.0
 
+# ── optimizer singleton (reuses compiled CVXPY model across requests) ─────
+_optimizer: LinearOptimizer | None = None
+_optimizer_config_mtime: float = 0.0
+_optimizer_lock = asyncio.Lock()
+
 
 def _get_providers(cfg: AppConfig, raw_yaml: dict[str, Any]) -> PredictionSetup:
     """Return the persistent provider singleton, rebuilding only when config changed."""
@@ -80,6 +85,60 @@ def _get_providers(cfg: AppConfig, raw_yaml: dict[str, Any]) -> PredictionSetup:
         _providers = _build_providers(cfg, raw_yaml)
         _providers_config_mtime = mtime
     return _providers
+
+
+def _get_optimizer(cfg: AppConfig) -> LinearOptimizer:
+    """Return optimizer singleton, rebuilding only when config changed.
+
+    Reusing a LinearOptimizer instance allows CVXPY model reuse (compiled once,
+    runtime parameters updated per solve), which reduces repeated setup overhead.
+    """
+    global _optimizer, _optimizer_config_mtime  # noqa: PLW0603
+    try:
+        mtime = _config_path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+
+    if _optimizer is None or mtime != _optimizer_config_mtime:
+        inverters = _build_inverters(cfg)
+        objective = (
+            OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
+            if cfg.optimization.solver.objective == "self_consumption"
+            else OptimizationObjective.MINIMIZE_COST
+        )
+        solver_opts = dict(cfg.optimization.solver.solver_opts)
+        _optimizer = LinearOptimizer(
+            inverters=inverters,
+            objective=objective,
+            solver_opts=solver_opts,
+        )
+        _optimizer_config_mtime = mtime
+
+    return _optimizer
+
+
+def _soc_overrides_wh_for_solver(
+    optimizer: LinearOptimizer,
+    battery_soc_pct_overrides: dict[str, float],
+) -> dict[str, float]:
+    """Map GUI battery SoC overrides (battery_id -> %) to solver SoC map (inverter_id -> Wh)."""
+    if not battery_soc_pct_overrides:
+        return {}
+
+    soc_wh_by_inverter: dict[str, float] = {}
+    for inv in optimizer.inverters:
+        if inv.battery is None or not inv.parameters.battery_id:
+            continue
+        bat_id = inv.parameters.battery_id
+        if bat_id not in battery_soc_pct_overrides:
+            continue
+        raw_pct = float(battery_soc_pct_overrides[bat_id])
+        pct = float(
+            np.clip(raw_pct, inv.battery.min_soc_percentage, inv.battery.max_soc_percentage)
+        )
+        soc_wh_by_inverter[inv.device_id] = (pct / 100.0) * float(inv.battery.capacity_wh)
+
+    return soc_wh_by_inverter
 
 
 # ── prediction data cache (avoids double-fetch within one optimize cycle) ─
@@ -689,30 +748,31 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
         )
         _set_cached_pdata(pdata, forecast_from)
 
-    # ── Build inverters with SoC overrides ────────────────────────────
+    # ── Run optimization with singleton optimizer ─────────────────────
     try:
-        inverters = _build_inverters(cfg, req.battery_soc)
+        optimizer = _get_optimizer(cfg)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Inverter build error: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"Optimizer setup error: {exc}") from exc
 
-    # ── Run optimization (blocking; offloaded to thread) ─────────────
     objective = (
         OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
         if cfg.optimization.solver.objective == "self_consumption"
         else OptimizationObjective.MINIMIZE_COST
     )
     solver_opts = dict(cfg.optimization.solver.solver_opts)
-    optimizer = LinearOptimizer(inverters=inverters)
+    soc_wh_overrides = _soc_overrides_wh_for_solver(optimizer, req.battery_soc)
 
     try:
-        solution: LinearSolution = await asyncio.to_thread(
-            lambda: optimizer.solve(
-                pdata,
-                objective=objective,
-                solver_opts=solver_opts,
-                validate_with_simulation=True,
+        async with _optimizer_lock:
+            solution = await asyncio.to_thread(
+                lambda: optimizer.solve(
+                    pdata,
+                    soc=soc_wh_overrides or None,
+                    objective=objective,
+                    solver_opts=solver_opts,
+                    validate_with_simulation=True,
+                )
             )
-        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Optimization failed: {exc}") from exc
 
@@ -724,7 +784,7 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
 
     # Per-inverter optimization tabs
     _plotter = SolutionPlotter()
-    for inv in inverters:
+    for inv in optimizer.inverters:
         tab_id = f"tab-inv-{inv.device_id}"
         charts[tab_id] = _fig_to_dict(_plotter.plot_inverter(solution, inv.device_id))
 
