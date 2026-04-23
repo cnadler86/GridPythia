@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import aiohttp
 import numpy as np
+import plotly.graph_objects as go
 from pydantic import BaseModel, Field, field_validator
 from structlog import get_logger
 
@@ -104,6 +105,16 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
     @property
     def provider_id(self) -> str:
         return "EnergyCharts"
+
+    @property
+    def last_real_ts(self) -> "datetime | None":
+        """Timestamp of the last real API data point.
+
+        Values *after* this timestamp were synthesised by the statistical
+        model (ETS / median fallback).  Use this to shade the forecast
+        region in plots.  ``None`` before the first successful fetch.
+        """
+        return self._last_real_ts
 
     # ── API request ───────────────────────────────────────────────────
 
@@ -455,3 +466,22 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
             )
 
         return np.array(result, dtype=np.float32)
+
+    def plot(self, values: np.ndarray, timestamps: list) -> "go.Figure":
+        """Return a Plotly figure for *values*, highlighting the forecast region.
+
+        The forecast region (timestamps after :attr:`last_real_ts`) is shaded
+        with a light pastel background.
+
+        Args:
+            values:     EUR/Wh array returned by :meth:`fetch`.
+            timestamps: The same timestamp list passed to :meth:`fetch`.
+        """
+        from GridPythia.prediction.plots.electricprice import ElecPricePlotter
+
+        return ElecPricePlotter().plot(
+            values,
+            list(timestamps),
+            forecast_from=self._last_real_ts,
+            title=f"Electricity Price – {self._bidding_zone}",
+        )

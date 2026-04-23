@@ -237,7 +237,7 @@ class TestArbitrage:
         )
         inv = _make_hybrid_inverter()
 
-        plan = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred).inverter_plans[0]
+        plan = LinearOptimizer([inv]).solve(pred).inverter_plans[0]
 
         assert plan["modes"][1] != int(InverterMode.AC_CHARGE)
         assert plan["charge_ac_wh"][1] == pytest.approx(0.0, abs=1e-6)
@@ -254,7 +254,7 @@ class TestArbitrage:
         )
         inv = _make_hybrid_inverter()
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert plan["modes"][1] == int(InverterMode.AC_CHARGE)
@@ -274,7 +274,7 @@ class TestArbitrage:
         )
         inv = _make_hybrid_inverter()
 
-        plan = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred).inverter_plans[0]
+        plan = LinearOptimizer([inv]).solve(pred).inverter_plans[0]
         assert inv.battery is not None
         max_ch_wh = inv.battery.max_charge_power_w * 1.0
         max_dc_wh = inv.battery.max_discharge_power_w * 1.0
@@ -289,7 +289,7 @@ class TestArbitrage:
         pred = _make_prediction(load_w=[400.0, 0.0], price_eur_wh=[0.00060, 0.0])
         inv = _make_hybrid_inverter()
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert plan["modes"][0] == int(InverterMode.DISCHARGE_ZERO_FEED_IN)
@@ -316,7 +316,7 @@ class TestTerminalValue:
         )
         inv = _make_hybrid_inverter()
 
-        plan = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred).inverter_plans[0]
+        plan = LinearOptimizer([inv]).solve(pred).inverter_plans[0]
 
         assert plan["modes"][0] not in (int(InverterMode.DISCHARGE), int(InverterMode.DISCHARGE_ZERO_FEED_IN))
         assert any(
@@ -342,7 +342,7 @@ class TestPVRouting:
         )
         inv = _make_hybrid_inverter()
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         soc = np.asarray(sol.result.battery_wh_per_dt["hybrid_h1"], dtype=float)
 
         assert soc[0] > 500.0  # SoC increased from initial 500 Wh
@@ -368,7 +368,7 @@ class TestPVRouting:
             pv_wh={"hybrid_pv_bat": [400.0]},
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert plan["modes"][0] == int(InverterMode.IDLE)
@@ -392,7 +392,7 @@ class TestPVRouting:
             pv_wh={"hybrid_pv_cap": [900.0]},
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert inv.battery is not None
@@ -421,12 +421,13 @@ class TestPVRouting:
             pv_wh={"hybrid_min_rate": [500.0]},
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         # With PV bypass active, mode may be reported as DISCHARGE while p_dc stays zero.
         assert plan["discharge_ac_wh"][0] == pytest.approx(0.0, abs=1e-6)
         # SoC rises but cannot exceed battery charge-power cap for one slot.
+        assert inv.battery is not None
         soc0 = float(inv.battery.min_soc_wh)
         soc1 = float(sol.result.battery_wh_per_dt["hybrid_min_rate"][0])
         assert soc1 > soc0
@@ -448,11 +449,12 @@ class TestPVRouting:
             pv_wh={"hybrid_min_zfi": [500.0]},
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         # With PV bypass active, mode may be reported as DISCHARGE while p_dc stays zero.
         assert plan["discharge_ac_wh"][0] == pytest.approx(0.0, abs=1e-6)
+        assert inv.battery is not None
         soc0 = float(inv.battery.min_soc_wh)
         soc1 = float(sol.result.battery_wh_per_dt["hybrid_min_zfi"][0])
         assert soc1 > soc0
@@ -479,7 +481,7 @@ class TestPVRouting:
             pv_wh={"hybrid_bypass": [400.0]},
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         # Battery headroom = 0 → pv_to_bat must be 0
@@ -504,7 +506,7 @@ class TestPVRouting:
         )
         inv = _make_hybrid_inverter()
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert any(m == int(InverterMode.DISCHARGE_ZERO_FEED_IN) for m in plan["modes"])
@@ -539,7 +541,7 @@ class TestPVBatteryTopology:
             pv_wh={"pv_bat": [500.0]},
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert plan["charge_ac_wh"][0] == pytest.approx(0.0, abs=1e-6)  # No AC charge
@@ -555,7 +557,7 @@ class TestPVBatteryTopology:
             pv_wh={"pv_bat": [400.0, 0.0]},
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         # t=1: PV=0, expensive slot → discharge from battery
@@ -580,7 +582,7 @@ class TestFeedInTariff:
             pv_wh={"pv_string": [1000.0]},
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
 
         assert float(sol.inverter_plans[0].pv_to_ac_wh[0]) > 0.0
         assert float(sol.result.grid_import_wh_per_dt[0]) < 300.0
@@ -595,7 +597,7 @@ class TestFeedInTariff:
             feedintariff_eur_wh=[0.00008],
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
 
         assert np.isfinite(float(np.sum(sol.result.revenue_per_dt)))
         assert np.isfinite(float(np.sum(sol.result.costs_per_dt)))
@@ -612,7 +614,7 @@ class TestFeedInTariff:
             feedintariff_eur_wh=[0.00001],  # negligible tariff → no incentive to export
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
 
         assert float(sol.result.feedin_wh_per_dt[0]) == pytest.approx(0.0, abs=5.0)
         assert float(sol.result.battery_wh_per_dt["hybrid_h1"][0]) > 500.0
@@ -638,7 +640,7 @@ class TestBatteryBoundaryConditions:
         )
         pred = _make_prediction(load_w=[0.0], price_eur_wh=[0.00010])
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert plan["modes"][0] == int(InverterMode.IDLE)
@@ -657,7 +659,7 @@ class TestBatteryBoundaryConditions:
         )
         pred = _make_prediction(load_w=[400.0], price_eur_wh=[0.00090])
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert plan["discharge_ac_wh"][0] == pytest.approx(0.0, abs=1e-6)
@@ -719,7 +721,7 @@ class TestModeSwitchCosts:
         )
         inv = self._make_sw_inverter(switch_cost=0.005)
 
-        plan = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred).inverter_plans[0]
+        plan = LinearOptimizer([inv]).solve(pred).inverter_plans[0]
         assert inv.battery is not None
         max_ch_wh = inv.battery.max_charge_power_w * 1.0
         isolated_charge_wh = float(plan["charge_ac_wh"][3]) if plan["modes"][3] == int(InverterMode.AC_CHARGE) else 0.0
@@ -733,10 +735,10 @@ class TestModeSwitchCosts:
             price_eur_wh=[0.00030, 0.00045, 0.00070],
         )
         inv_idle = self._make_sw_inverter(switch_cost=0.020)
-        sol_idle = LinearOptimizer([inv_idle], pred.steps, pred.dt_hours).solve(pred)
+        sol_idle = LinearOptimizer([inv_idle]).solve(pred)
 
         inv_ch = self._make_sw_inverter(switch_cost=0.020)
-        sol_ch = LinearOptimizer([inv_ch], pred.steps, pred.dt_hours).solve(
+        sol_ch = LinearOptimizer([inv_ch]).solve(
             pred, initial_modes={"hybrid_sw": InverterMode.AC_CHARGE}
         )
 
@@ -782,7 +784,7 @@ class TestModeSwitchCosts:
             price_eur_wh=[0.01, 0.012, 0.011, 0.90, 0.4],
         )
 
-        plan = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred).inverter_plans[0]
+        plan = LinearOptimizer([inv]).solve(pred).inverter_plans[0]
 
         AC = InverterMode.AC_CHARGE
         ZFI = InverterMode.DISCHARGE_ZERO_FEED_IN
@@ -829,7 +831,7 @@ class TestModeSwitchCosts:
                 price_eur_wh=[0.10, 0.80, 0.40],
                 pv_wh={"hybrid_zfi_cost": [0.0, 0.0, 0.0]},
             )
-            return LinearOptimizer([inv], pred.steps, pred.dt_hours), pred
+            return LinearOptimizer([inv]), pred
 
         low_opt, pred_low = _make(0.0)
         low_plan = low_opt.solve(pred_low).inverter_plans[0]
@@ -875,7 +877,7 @@ class TestMultiInverterTopologies:
             price_eur_wh=[0.00010, 0.00090],
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
 
         assert plan["modes"][0] == int(InverterMode.AC_CHARGE)
@@ -895,7 +897,7 @@ class TestMultiInverterTopologies:
             pv_wh={"pv_string": [0.0, 0.0]},
         )
 
-        sol = LinearOptimizer([pv_inv, bat_inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([pv_inv, bat_inv]).solve(pred)
         bat_plan = next(p for p in sol.inverter_plans if p.device_id == "ac_bat")
 
         assert bat_plan["modes"][1] == int(InverterMode.DISCHARGE_ZERO_FEED_IN)
@@ -911,7 +913,7 @@ class TestMultiInverterTopologies:
             pv_wh={"pv_string": [800.0, 0.0]},  # 800 Wh covers all of slot 0
         )
 
-        sol_with_pv = LinearOptimizer([pv_inv, bat_inv], pred.steps, pred.dt_hours).solve(pred)
+        sol_with_pv = LinearOptimizer([pv_inv, bat_inv]).solve(pred)
         pv_plan = next(p for p in sol_with_pv.inverter_plans if p.device_id == "pv_string")
 
         assert float(pv_plan.pv_to_ac_wh[0]) > 0.0
@@ -929,7 +931,7 @@ class TestMultiInverterTopologies:
             pv_wh={"hybrid_a": [0.0, 0.0, 0.0], "hybrid_b": [0.0, 0.0, 0.0]},
         )
 
-        sol = LinearOptimizer([inv_a, inv_b], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv_a, inv_b]).solve(pred)
 
         # Both inverters must have a separate SoC track in the result.
         assert "hybrid_a" in sol.result.battery_wh_per_dt
@@ -969,7 +971,7 @@ class TestEnergyConservation:
             pv_wh={"hv_eff1": [300.0, 0.0, 100.0]},
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
         soc = np.asarray(plan.battery_soc_wh, dtype=float)
         charge = np.asarray(plan.charge_ac_wh, dtype=float)
@@ -992,7 +994,7 @@ class TestEnergyConservation:
             pv_wh={"hybrid_h1": [200.0, 0.0, 500.0, 0.0]},
         )
 
-        plan = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred).inverter_plans[0]
+        plan = LinearOptimizer([inv]).solve(pred).inverter_plans[0]
         eps = 1e-3
 
         for t in range(len(plan.modes)):
@@ -1016,7 +1018,7 @@ class TestEnergyConservation:
             pv_wh={"hv_bounds": [800.0, 0.0, 800.0, 0.0, 0.0]},
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred)
+        sol = LinearOptimizer([inv]).solve(pred)
         plan = sol.inverter_plans[0]
         soc = np.asarray(plan.battery_soc_wh, dtype=float)
 
@@ -1036,7 +1038,7 @@ class TestEnergyConservation:
             pv_wh={"hybrid_h1": pv},
         )
 
-        plan = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred).inverter_plans[0]
+        plan = LinearOptimizer([inv]).solve(pred).inverter_plans[0]
         pv_arr = np.array(pv, dtype=float)
         pv_ac = np.asarray(plan.pv_to_ac_wh, dtype=float)
         pv_bat = np.asarray(plan.pv_to_battery_wh, dtype=float)
@@ -1066,11 +1068,11 @@ class TestOptimizationObjectives:
         )
 
         sol_cost = LinearOptimizer(
-            [_make_hybrid_inverter(zero_feed_in=False)], pred.steps, pred.dt_hours,
+            [_make_hybrid_inverter(zero_feed_in=False)],
             objective=OptimizationObjective.MINIMIZE_COST,
         ).solve(pred)
         sol_sc = LinearOptimizer(
-            [_make_hybrid_inverter(zero_feed_in=False)], pred.steps, pred.dt_hours,
+            [_make_hybrid_inverter(zero_feed_in=False)],
             objective=OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION,
         ).solve(pred)
 
@@ -1125,7 +1127,7 @@ class TestActiveInverterConsumption:
             price_eur_wh=[0.00020, 0.00022, 0.00080],
         )
         inv = self._make_inverter(active_consumption_w=30.0)
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(
+        sol = LinearOptimizer([inv]).solve(
             pred, validate_with_simulation=True
         )
 
@@ -1142,7 +1144,7 @@ class TestActiveInverterConsumption:
         pred = _make_prediction(load_w=[0.0, 0.0], price_eur_wh=[0.00025, 0.00030])
         inv = self._make_inverter(active_consumption_w=500.0)
 
-        plan = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(pred).inverter_plans[0]
+        plan = LinearOptimizer([inv]).solve(pred).inverter_plans[0]
 
         assert plan["modes"][0] == int(InverterMode.IDLE)
         assert plan["modes"][1] == int(InverterMode.IDLE)
@@ -1153,8 +1155,8 @@ class TestActiveInverterConsumption:
         inv_no = self._make_inverter(active_consumption_w=0.0)
         inv_with = self._make_inverter(active_consumption_w=30.0)
 
-        sol_no = LinearOptimizer([inv_no], pred.steps, pred.dt_hours).solve(pred)
-        sol_with = LinearOptimizer([inv_with], pred.steps, pred.dt_hours).solve(pred)
+        sol_no = LinearOptimizer([inv_no]).solve(pred)
+        sol_with = LinearOptimizer([inv_with]).solve(pred)
 
         if any(m != int(InverterMode.IDLE) for m in sol_with.inverter_plans[0]["modes"]):
             losses_no = float(np.sum(sol_no.result.losses_wh_per_dt))
@@ -1177,7 +1179,8 @@ class TestModelInfrastructure:
             price_eur_wh=[0.05, 0.05, 0.05, 0.05],
         )
         inv = _make_hybrid_inverter()
-        opt = LinearOptimizer([inv], pred.steps, pred.dt_hours)
+        opt = LinearOptimizer([inv])
+        opt.solve(pred)  # trigger lazy compilation
 
         for objective, problem in opt._problems.items():
             assert problem is not None, f"Problem for {objective} is None"
@@ -1190,7 +1193,8 @@ class TestModelInfrastructure:
             price_eur_wh=[0.05, 0.05, 0.05, 0.05],
         )
         inv = _make_hybrid_inverter()
-        opt = LinearOptimizer([inv], pred.steps, pred.dt_hours)
+        opt = LinearOptimizer([inv])
+        opt.solve(pred)  # trigger lazy compilation
 
         for objective, problem in opt._problems.items():
             assert problem is not None, f"Problem for {objective} is None"
@@ -1230,7 +1234,7 @@ class TestModelInfrastructure:
             battery=battery,
         )
 
-        sol = LinearOptimizer([inv], pred.steps, pred.dt_hours).solve(
+        sol = LinearOptimizer([inv]).solve(
             pred, validate_with_simulation=True
         )
 

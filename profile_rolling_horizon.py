@@ -242,8 +242,6 @@ def run_profile(
         if optimizer is None:
             optimizer = LinearOptimizer(
                 inverters=inverters,
-                horizon=pred_window.steps,
-                dt_hours=pred_window.dt_hours,
                 objective=objective,
                 solver_opts=base_opts,
             )

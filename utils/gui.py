@@ -1596,8 +1596,6 @@ class OptimizationTab(_Tab):
         if self._optimizer_cache is None or self._optimizer_cache_sig != sig:
             self._optimizer_cache = LinearOptimizer(
                 inverters=[inv],
-                horizon=prediction.steps,
-                dt_hours=prediction.dt_hours,
             )
             self._optimizer_cache_sig = sig
             logger.info("optimizer_instance_rebuilt", tab="optimization")
@@ -1883,21 +1881,15 @@ class OptimizationTab(_Tab):
                         if isinstance(res_tuple, LinearSolution)
                         else "legacy",
                     )
-                    # Capture serialized prediction (for plotting only).
-                    sol_pred_dict: dict | None = None
+                    # Capture prediction object and timestamps for plotting.
                     sol_pred_ts: list[datetime] | None = None
+                    sol_pred: PredictionData | None = None
                     try:
                         if isinstance(res_tuple, LinearSolution):
-                            pdict = getattr(sol, "prediction", None)
-                            if isinstance(pdict, dict):
-                                sol_pred_dict = pdict
-                                try:
-                                    sol_pred_ts = [
-                                        datetime.fromisoformat(s)
-                                        for s in pdict.get("timestamps", [])
-                                    ]
-                                except Exception:
-                                    sol_pred_ts = None
+                            pred_data = getattr(sol, "prediction", None)
+                            if isinstance(pred_data, PredictionData):
+                                sol_pred = pred_data
+                                sol_pred_ts = pred_data.timestamps
                     except Exception:
                         logger.exception("Failed to extract solution.prediction for plotting")
                     out = res.to_dict()
@@ -1905,7 +1897,7 @@ class OptimizationTab(_Tab):
                     # simulation result to avoid redundant output (price / PV).
                     try:
                         pred = getattr(sol, "prediction", None)
-                        if isinstance(pred, dict):
+                        if isinstance(pred, PredictionData):
 
                             def _close(a, b, rtol=1e-6, atol=1e-9):
                                 try:
@@ -1917,25 +1909,23 @@ class OptimizationTab(_Tab):
                                     return False
                                 return bool(np.allclose(aa, bb, rtol=rtol, atol=atol))
 
-                            # electricity price in prediction uses key 'electricprice_eur_wh'
-                            pp = pred.get("electricprice_eur_wh")
+                            # electricity price channel
+                            pp = pred.electricprice
                             if pp is not None and "electricity_price_per_dt" in out:
                                 if _close(out.get("electricity_price_per_dt", []), pp):
                                     out.pop("electricity_price_per_dt", None)
 
-                            # PV prediction channels are exposed as 'pv_<inv>_wh' in prediction
-                            pv_keys = [k for k in pred.keys() if k.startswith("pv_")]
-                            if pv_keys and out.get("solar_generation_wh_per_dt"):
+                            # PV prediction channels
+                            if pred.pv_by_inverter and out.get("solar_generation_wh_per_dt"):
                                 # If solar_generation matches the prediction per-inverter arrays,
                                 # drop it from the result to avoid duplication.
                                 sol_gen = out.get("solar_generation_wh_per_dt") or {}
                                 match = True
                                 for inv_id, arr in sol_gen.items():
-                                    pv_key = f"pv_{inv_id}"
-                                    if pv_key not in pred:
+                                    if inv_id not in pred.pv_by_inverter:
                                         match = False
                                         break
-                                    if not _close(arr, pred.get(pv_key)):
+                                    if not _close(arr, pred.pv_by_inverter[inv_id]):
                                         match = False
                                         break
                                 if match:
@@ -1952,22 +1942,39 @@ class OptimizationTab(_Tab):
                         self._fig.clear()
                         n = len(res.costs_per_dt)
 
-                        # Convert timestamps to matplotlib-compatible numeric x values.
-                        # Keep a copy of original datetimes in `x_dt` for hover tooltips.
+                        # --- Zeitachsen: immer echte Timestamps aus Prediction nutzen ---
                         x_dt: Optional[List[datetime]] = None
+                        # 1. Aus solution.prediction['timestamps'] (sol_pred_ts)
                         if sol_pred_ts and len(sol_pred_ts) >= n:
                             x_dt = list(sol_pred_ts[:n])
+                        # 2. Fallback: aus PredictionData (self._last_ts)
+                        elif self._last_ts and len(self._last_ts) >= n:
+                            x_dt = list(self._last_ts[:n])
+                        # 3. Fallback: aus res (SimulationResult) falls vorhanden
+                        elif (
+                            hasattr(res, "timestamps")
+                            and res.timestamps
+                            and len(res.timestamps) >= n
+                        ):
+                            x_dt = list(res.timestamps[:n])
+                        # 4. Notfalls: Index
                         else:
-                            ts = getattr(self, "_last_ts", None)
-                            if ts and len(ts) >= n:
-                                x_dt = list(ts[:n])
+                            x_dt = None
 
                         if x_dt is not None:
                             x_vals = mdates.date2num(x_dt)
                         else:
                             x_vals = list(range(n))
 
+                        # --- X-Achse: Uhrzeit-Format für Zeitstempel ---
+                        def set_time_axis(ax):
+                            if x_dt is not None:
+                                ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                                ax.xaxis.set_minor_formatter(mdates.DateFormatter("%H:%M"))
+                                ax.figure.autofmt_xdate(rotation=25)
+
                         # Top: energy flows
+
                         ax = self._fig.add_subplot(311)
                         ax.plot(x_vals, list(res.grid_import_wh_per_dt), label="Grid import (Wh)")
                         ax.plot(
@@ -1994,10 +2001,8 @@ class OptimizationTab(_Tab):
                         ax.legend(loc="upper right", fontsize=8)
                         ax.set_ylabel("Wh")
                         ax.grid(alpha=0.3)
-                        if x_dt is None:
-                            # numeric x: don't format dates
-                            pass
-                        else:
+                        set_time_axis(ax)
+                        if x_dt is not None:
                             # Add hover to energy flows
                             try:
                                 grid_import_data = list(res.grid_import_wh_per_dt)
@@ -2014,6 +2019,7 @@ class OptimizationTab(_Tab):
 
                         # Middle: PV generation and Load (left axis), electric price (right axis)
                         ax2 = self._fig.add_subplot(312)
+                        set_time_axis(ax2)
                         # compute total load (grid import + self-consumption)
                         load_wh = [
                             g + s
@@ -2039,25 +2045,18 @@ class OptimizationTab(_Tab):
 
                         # Plot PV sources: prefer prediction PV if available, otherwise simulation result
                         pv_handles = []
-                        if sol_pred_dict:
-                            # collect pv_*_wh keys
-                            pv_map = {
-                                k[len("pv_") : -len("_wh")]: np.asarray(v, dtype=float)
-                                for k, v in sol_pred_dict.items()
-                                if k.startswith("pv_") and k.endswith("_wh")
-                            }
-                            if pv_map:
-                                for i, (k, arr) in enumerate(pv_map.items()):
-                                    col = f"C{i + 2}"
-                                    vals = list(arr[:n])
-                                    (h,) = ax2.plot(
-                                        x_vals,
-                                        vals,
-                                        color=col,
-                                        linewidth=1.2,
-                                        label=f"PV {k} (Wh, pred)",
-                                    )
-                                    pv_handles.append(h)
+                        if sol_pred and sol_pred.pv_by_inverter:
+                            for i, (k, arr) in enumerate(sol_pred.pv_by_inverter.items()):
+                                col = f"C{i + 2}"
+                                vals = list(np.asarray(arr, dtype=float)[:n])
+                                (h,) = ax2.plot(
+                                    x_vals,
+                                    vals,
+                                    color=col,
+                                    linewidth=1.2,
+                                    label=f"PV {k} (Wh, pred)",
+                                )
+                                pv_handles.append(h)
                         else:
                             sol_gen = getattr(res, "solar_generation_wh_per_dt", None)
                             if sol_gen:
@@ -2078,10 +2077,8 @@ class OptimizationTab(_Tab):
                         # Right axis: electricity price (€/Wh)
                         ax3 = ax2.twinx()
                         # Plot electricity price: prefer prediction price if available
-                        if sol_pred_dict and "electricprice_eur_wh" in sol_pred_dict:
-                            price_vals = list(
-                                np.asarray(sol_pred_dict["electricprice_eur_wh"], dtype=float)[:n]
-                            )
+                        if sol_pred is not None and sol_pred.electricprice is not None:
+                            price_vals = list(np.asarray(sol_pred.electricprice, dtype=float)[:n])
                         else:
                             price_arr = getattr(res, "electricity_price_per_dt", None)
                             if price_arr is not None:
@@ -2126,6 +2123,7 @@ class OptimizationTab(_Tab):
 
                         # Bottom: battery SoC (%) (left axis) and inverter modes (right axis)
                         ax4 = self._fig.add_subplot(313)
+                        set_time_axis(ax4)
                         ax4r = ax4.twinx()
                         plotted = False
                         handles = []
@@ -2283,8 +2281,8 @@ class OptimizationTab(_Tab):
                     if solve_meta:
                         meta["solve_info"] = solve_meta
                     payload: dict[str, Any] = {"meta": meta, "result": out}
-                    if sol_pred_dict is not None:
-                        payload["prediction"] = sol_pred_dict
+                    if sol_pred is not None:
+                        payload["prediction"] = sol_pred.to_dict()
                     txt.insert("1.0", json.dumps(payload, indent=2))
                     txt.configure(state="disabled")
                     suffix = f" · {solve_meta}" if solve_meta else ""

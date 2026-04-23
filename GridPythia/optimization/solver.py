@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import dataclass, replace
 from platform import machine
 from typing import Any, cast
 
@@ -25,6 +24,12 @@ import cvxpy as cp
 import numpy as np
 from structlog import get_logger
 
+from GridPythia.optimization.solution import (
+    InverterPlan,
+    LinearSolution,
+    OptimizationObjective,
+    SimulationParityReport,
+)
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.inverterbase import InverterBase
@@ -37,7 +42,7 @@ logger = get_logger(__name__)
 _DEFAULT_HIGHS_OPTS = {
     "verbose": False,
     "warm_start": True,
-    "time_limit": 60,
+    "time_limit": 30,
     "mip_rel_gap": 0.03,
     "presolve": "on",
     "mip_lp_solver": "ipm",
@@ -48,57 +53,6 @@ _DEFAULT_HIGHS_OPTS = {
     "mip_heuristic_run_root_reduced_cost": False,
     "small_matrix_value": 1e-4,
 }
-
-
-class OptimizationObjective(str, Enum):
-    """Supported objective functions for :class:`LinearOptimizer`."""
-
-    MINIMIZE_COST = "cost"
-    MAXIMIZE_SELF_CONSUMPTION = "self_consumption"
-
-
-@dataclass
-class SimulationParityReport:
-    """Difference report between LP result and GridSimulation replay."""
-
-    ok: bool
-    max_abs_soc_error_wh: float
-    max_abs_grid_import_error_wh: float
-    max_abs_feedin_error_wh: float
-    max_abs_cost_error_eur: float
-
-
-@dataclass(frozen=True, slots=True)
-class InverterPlan:
-    """Typed inverter schedule exported by :class:`LinearOptimizer`."""
-
-    device_id: str
-    modes: np.ndarray  # InverterMode int per timestep (np.int8)
-    charge_ac_wh: np.ndarray  # AC energy drawn from grid for charging [Wh/dt]
-    discharge_ac_wh: np.ndarray  # AC energy delivered to home from battery [Wh/dt]
-    pv_to_ac_wh: np.ndarray  # PV energy routed directly to AC [Wh/dt]
-    pv_to_battery_wh: np.ndarray  # PV energy routed into battery [Wh/dt]
-    battery_soc_wh: np.ndarray | None = None  # SoC at end of each slot [Wh]
-
-    def __getitem__(self, key: str) -> Any:
-        return getattr(self, key)
-
-    def get(self, key: str, default: Any | None = None) -> Any | None:
-        return getattr(self, key, default)
-
-
-@dataclass
-class LinearSolution:
-    """Solution produced by :class:`LinearOptimizer`."""
-
-    result: SimulationResult
-    objective: OptimizationObjective
-    solver_status: str
-    solve_time_s: float
-    inverter_plans: list[InverterPlan]
-    parity_report: SimulationParityReport | None = None
-    simulation_result: SimulationResult | None = None
-    prediction: dict | None = None
 
 
 @dataclass
@@ -118,12 +72,23 @@ class _InverterModelBlock:
     """Decision and helper expressions for one inverter block."""
 
     inverter: InverterBase
+    # AC-side charging energy per timestep [Wh] (variable when inverter+bat present)
     p_ch: cp.Expression
+    # AC-side discharging energy per timestep [Wh] (variable when inverter+bat present)
     p_dc: cp.Expression
+    # AC power from PV routed to the AC bus per timestep [Wh]
     pv_ac: cp.Expression
+    # PV energy routed into the battery (DC side) per timestep [Wh]
     pv_to_bat: cp.Expression
+    # Buffered portion of pv_ac: backed by battery headroom, 100% controllable [Wh]
+    pv_ac_buffered: cp.Expression
+    # State-of-charge time series for the connected battery [Wh] or None
     soc: cp.Variable | None
+    # Net battery energy flow [Wh/dt]: positive=charge, negative=discharge
+    battery_net_flow_wh: cp.Expression | None
+    # Binary/indicator for AC-charge mode activity (1 when AC charging active)
     mode_ch_activity: cp.Expression | None
+    # Binary/indicator for DC-discharge mode activity (1 when discharge/bypass active)
     mode_dc_activity: cp.Expression | None
 
 
@@ -135,14 +100,11 @@ class LinearOptimizer:
     battery start SoC, and initial inverter mode).
     """
 
-    _MIN_ACTIVE_AC_RATE_PCT = 0.0
     _MONETARY_OBJECTIVE_SCALE = 100.0
 
     def __init__(
         self,
         inverters: list[InverterBase],
-        horizon: int,
-        dt_hours: float,
         *,
         objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
         solver_opts: Mapping[str, Any] | None = None,
@@ -152,20 +114,15 @@ class LinearOptimizer:
         self._solver_opts: dict[str, Any] = dict(solver_opts) if solver_opts else {}
         self._cached_prediction: PredictionData | None = None
         self._cached_solution: LinearSolution | None = None
-
-        if horizon <= 0:
-            raise ValueError(f"horizon must be > 0, got {horizon}")
-        if dt_hours <= 0:
-            raise ValueError(f"dt_hours must be > 0, got {dt_hours}")
+        self._T = 0
+        self._dt = 0.0
 
         self._log = logger.bind(
             component="optimizer",
             inverter_ids=[inv.device_id for inv in inverters],
-            steps=int(horizon),
         )
 
         self._compiled = False
-        self._compile_problem(horizon=int(horizon), dt=float(dt_hours))
 
     def solve(
         self,
@@ -274,7 +231,7 @@ class LinearOptimizer:
             objective=effective_objective,
             solver_status=status,
             solve_time=solve_time,
-            prediction=prediction.to_dict(),
+            prediction=prediction,
         )
 
         self._cached_prediction = prediction
@@ -282,8 +239,8 @@ class LinearOptimizer:
 
         if validate_with_simulation:
             parity, sim_res = self._validate_with_simulation(solution, prep, prediction)
-            solution.parity_report = parity
-            solution.simulation_result = sim_res
+            solution = replace(solution, parity_report=parity, simulation_result=sim_res)
+            self._cached_solution = solution
             if parity.ok:
                 self._log.debug("optimizer_parity_ok")
             else:
@@ -319,16 +276,22 @@ class LinearOptimizer:
 
     def _build_warm_start_plan(
         self, shift_steps: int
-    ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    ) -> dict[
+        str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]
+    ]:
         """Build a warm-start seed from the cached solution, shifted by *shift_steps*.
 
-        Returns a dict mapping device_id → (modes, charge_ac_wh, discharge_ac_wh, pv_to_bat_wh, pv_ac_wh).
+        Returns a dict mapping device_id → (modes, charge_ac_wh, discharge_ac_wh,
+        pv_to_bat_wh, pv_ac_wh, soc_wh | None).
         """
         if self._cached_solution is None or shift_steps <= 0:
             return {}
 
         T = self._T
-        out: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+        out: dict[
+            str,
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None],
+        ] = {}
         for inv_plan in self._cached_solution.inverter_plans:
             src_modes = np.asarray(inv_plan.modes, dtype=np.int8)
             src_ch = np.asarray(inv_plan.charge_ac_wh, dtype=np.float32)
@@ -343,6 +306,7 @@ class LinearOptimizer:
                     np.zeros(T, dtype=np.float32),
                     np.zeros(T, dtype=np.float32),
                     np.zeros(T, dtype=np.float32),
+                    None,
                 )
                 continue
 
@@ -385,12 +349,25 @@ class LinearOptimizer:
             # pv_ac is 0 in IDLE (gated by mode_dc)
             shifted_pva[shifted_modes == int(InverterMode.IDLE)] = 0.0
 
+            # Shift the SoC trace: new_soc[t] = old_soc[t + shift_steps]
+            shifted_soc: np.ndarray | None = None
+            if inv_plan.battery_soc_wh is not None and len(inv_plan.battery_soc_wh) > 0:
+                src_soc = np.asarray(inv_plan.battery_soc_wh, dtype=np.float32)
+                shifted_soc = np.empty(T, dtype=np.float32)
+                soc_src_start = min(shift_steps, int(src_soc.size))
+                soc_copied = min(max(int(src_soc.size) - soc_src_start, 0), T)
+                if soc_copied > 0:
+                    shifted_soc[:soc_copied] = src_soc[soc_src_start : soc_src_start + soc_copied]
+                if soc_copied < T:
+                    shifted_soc[soc_copied:] = src_soc[-1]
+
             out[inv_plan.device_id] = (
                 shifted_modes,
                 shifted_ch,
                 shifted_dc,
                 shifted_pvb,
                 shifted_pva,
+                shifted_soc,
             )
         return out
 
@@ -430,49 +407,73 @@ class LinearOptimizer:
 
         self._g_import = cp.Variable(self._T, nonneg=True, name="g_import")
         self._g_feedin = cp.Variable(self._T, nonneg=True, name="g_feedin")
-        self._pv_self = cp.Variable(self._T, nonneg=True, name="pv_self")
-        # pv_export is computed implicitly as (total_pv_ac - pv_self) to reduce variables
+        self._pv_unbuffered_self = cp.Variable(self._T, nonneg=True, name="pv_unbuf_self")
 
-        # Fraunhofer SC model parameters (updated per solve with linearization coefficients)
+        # Fraunhofer SC model parameters (updated per solve with linearization coefficients).
+        # Applied only to unbuffered PV (PV on AC not backed by battery headroom).
         # Keep DPP compliance by avoiding parameter*parameter terms in constraints.
         self._sc_rhs_base = cp.Parameter(self._T, name="sc_rhs_base")
         self._sc_c_pv = cp.Parameter(self._T, name="sc_c_pv")
+        self._sc_c_buf = cp.Parameter(self._T, name="sc_c_buf")
 
         total_p_ch_terms: list[object] = []
         total_p_dc_terms: list[object] = []
         total_pv_ac_var_terms: list[object] = []
+        total_pv_buffered_terms: list[object] = []
         blocks = [self._build_inverter_block(inv) for inv in self.inverters]
         for _inv, block in zip(self.inverters, blocks, strict=False):
-            total_p_ch_terms.append(cast(cp.Expression, block.p_ch))
-            total_p_dc_terms.append(cast(cp.Expression, block.p_dc))
-            total_pv_ac_var_terms.append(cast(cp.Expression, block.pv_ac))
+            total_p_ch_terms.append(block.p_ch)
+            total_p_dc_terms.append(block.p_dc)
+            total_pv_ac_var_terms.append(block.pv_ac)
+            total_pv_buffered_terms.append(block.pv_ac_buffered)
 
         total_p_ch = self._sum_terms(total_p_ch_terms, self._T)
         total_p_dc = self._sum_terms(total_p_dc_terms, self._T)
         total_pv_ac_var = self._sum_terms(total_pv_ac_var_terms, self._T)
         total_pv_ac = total_pv_ac_var + self._pv_external_param
+        total_pv_buffered = self._sum_terms(total_pv_buffered_terms, self._T)
 
-        # Store total_pv_ac for use in constraints
+        # Store expressions for use in other methods
         self._total_pv_ac_expr = total_pv_ac
+        self._total_pv_buffered_expr = total_pv_buffered
 
-        # Fraunhofer self-consumption model constraint (vectorized)
-        # pv_self <= rhs_base + c_pv * pv_ac, where rhs_base already includes c_const + c_load * load.
+        # --- Fraunhofer self-consumption model (on UNBUFFERED PV only) ---
+        # Unbuffered PV = total_pv_ac - total_pv_buffered.
+        # Buffered PV is backed by battery headroom → 100% controllable → directly
+        # covers load.  Only the unbuffered remainder goes through Fraunhofer.
+        #
+        # Linearized SC constraint:
+        #   pv_unbuf_self <= sc_rhs_base + c_pv * total_pv_ac_var + c_buf * total_pv_buffered
+        # where sc_rhs_base folds c_const + c_pv * pv_external + c_load * load, and
+        # c_buf = -(c_pv + c_load) (more buffered → less remaining load → less SC).
         self._constraints.append(
-            self._pv_self <= self._sc_rhs_base + cp.multiply(self._sc_c_pv, total_pv_ac_var)
+            self._pv_unbuffered_self
+            <= self._sc_rhs_base
+            + cp.multiply(self._sc_c_pv, total_pv_ac_var)
+            + cp.multiply(self._sc_c_buf, total_pv_buffered)
         )
-        # Physical bounds
+        # Physical bounds on unbuffered self-consumption
         self._constraints.extend(
             [
-                self._pv_self <= total_pv_ac,  # Can't self-consume more than available PV
-                self._pv_self <= self._load_param,  # Can't self-consume more than load
+                # Can't self-consume more unbuffered PV than exists
+                self._pv_unbuffered_self <= total_pv_ac - total_pv_buffered,
+                # Buffered PV + unbuffered self-consumption can't exceed load
+                self._pv_unbuffered_self <= self._load_param - total_pv_buffered,
             ]
         )
 
-        # Grid balance: g_import - g_feedin == load + p_ch - p_dc + (pv_ac - pv_self) - pv_self
-        # Simplifies to: g_import - g_feedin == load + p_ch - p_dc + pv_ac - 2*pv_self
+        # --- Corrected AC-bus energy balance ---
+        # IN:  g_import + p_dc + total_pv_ac
+        # OUT: load + p_ch + g_feedin
         self._constraints.append(
             self._g_import - self._g_feedin
-            == self._load_param + total_p_ch - total_p_dc + total_pv_ac - 2 * self._pv_self
+            == self._load_param + total_p_ch - total_p_dc - total_pv_ac
+        )
+
+        # --- Minimum feedin from uncontrollable PV ---
+        # Unbuffered PV that can't be self-consumed must be exported.
+        self._constraints.append(
+            self._g_feedin >= total_pv_ac - total_pv_buffered - self._pv_unbuffered_self
         )
 
         terminal_terms = [block.soc[-1] for block in blocks if block.soc is not None]
@@ -512,13 +513,19 @@ class LinearOptimizer:
 
     def _ensure_compiled_layout(self, prep: _PreparedInputs) -> None:
         if not self._compiled:
-            raise RuntimeError("LinearOptimizer problem is not compiled")
+            self._compile_problem(horizon=prep.T, dt=prep.dt)
+            return
         if prep.T != self._T or prep.dt != self._dt:
-            raise ValueError(
-                "Prediction shape mismatch for compiled optimizer: "
-                f"expected horizon={self._T}, dt_hours={self._dt}, "
-                f"got horizon={prep.T}, dt_hours={prep.dt}"
+            self._log.warning(
+                "optimizer_recompile",
+                old_T=self._T,
+                new_T=prep.T,
+                old_dt=self._dt,
+                new_dt=prep.dt,
             )
+            self._cached_prediction = None
+            self._cached_solution = None
+            self._compile_problem(horizon=prep.T, dt=prep.dt)
 
     def _update_runtime_parameters(
         self,
@@ -567,17 +574,45 @@ class LinearOptimizer:
             pv_arr = prep.pv_by_source.get(inv_id, np.zeros(prep.T, dtype=float))
             total_pv_ac_estimate += pv_arr
 
+        # Estimate buffered PV per inverter: min(pv, headroom_in_ac_terms)
+        total_buffered_estimate = np.zeros(prep.T, dtype=float)
+        for block in self._blocks:
+            inv = block.inverter
+            if inv.battery is not None and inv.device_id in self._pv_params:
+                bat = inv.battery
+                soc_init = float(self._soc_init_params[inv.device_id].value or bat.soc_wh)
+                headroom_wh = max(bat.max_soc_wh - soc_init, 0.0)
+                eta_buf = bat.charging_efficiency / inv.parameters.dc_to_ac_efficiency
+                headroom_ac = headroom_wh / max(eta_buf, 1e-9)
+                pv_arr = prep.pv_by_source.get(inv.device_id, np.zeros(prep.T, dtype=float))
+                buf_est = np.minimum(pv_arr, headroom_ac)
+                buf_est = np.minimum(buf_est, prep.load_wh)
+                total_buffered_estimate += buf_est
+
+        # Unbuffered PV estimate (operating point for Fraunhofer linearization)
+        total_unbuffered_estimate = np.maximum(total_pv_ac_estimate - total_buffered_estimate, 0.0)
+        remaining_load_estimate = np.maximum(prep.load_wh - total_buffered_estimate, 0.0)
+
         # Use a strictly positive baseload to satisfy FraunhoferSCModel input contract.
-        min_load = float(np.min(prep.load_wh)) if prep.load_wh.size > 0 else 0.0
+        min_load = (
+            float(np.min(remaining_load_estimate)) if remaining_load_estimate.size > 0 else 0.0
+        )
         sc_model = FraunhoferSCModel(baseload_wh=max(min_load, 10.0), dt=prep.dt)
 
-        # Linearize around (pv_estimate, load) to get tight constraints.
+        # Linearize around (unbuffered_estimate, remaining_load_estimate).
         c_const, c_pv, c_load = sc_model.linearize_batch(
-            pv_0=total_pv_ac_estimate, load_0=prep.load_wh
+            pv_0=total_unbuffered_estimate, load_0=remaining_load_estimate
         )
-        # Fold all parameter-only parts into one runtime parameter to keep the CVXPY model DPP.
-        self._sc_rhs_base.value = c_const + c_load * prep.load_wh + c_pv * external
+        # Fold all parameter-only parts into sc_rhs_base to keep the CVXPY model DPP.
+        # The constraint is: pv_unbuf_self <= c_const + c_pv * unbuf + c_load * remaining_load
+        #   unbuf = (total_pv_ac_var - total_pv_buffered) + pv_external
+        #   remaining_load = load - total_pv_buffered
+        # Expanding: c_const + c_pv * pv_external + c_load * load  [→ sc_rhs_base]
+        #   + c_pv * total_pv_ac_var                                [→ sc_c_pv]
+        #   + (-(c_pv + c_load)) * total_pv_buffered                [→ sc_c_buf]
+        self._sc_rhs_base.value = c_const + c_pv * external + c_load * prep.load_wh
         self._sc_c_pv.value = c_pv
+        self._sc_c_buf.value = -(c_pv + c_load)
 
         terminal_value = self._estimate_terminal_value(prep, self._blocks)
         self._terminal_value_param.value = terminal_value
@@ -586,7 +621,8 @@ class LinearOptimizer:
         self,
         prep: _PreparedInputs,
         warm_start_plan: Mapping[
-            str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            str,
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None],
         ]
         | None,
     ) -> None:
@@ -604,7 +640,7 @@ class LinearOptimizer:
             if seed is None:
                 continue
 
-            seed_modes, seed_ch_wh, seed_dc_wh, seed_pvb_wh, seed_pva_wh = seed
+            seed_modes, seed_ch_wh, seed_dc_wh, seed_pvb_wh, seed_pva_wh, seed_soc_wh = seed
             if seed_modes.size == 0:
                 continue
 
@@ -629,10 +665,38 @@ class LinearOptimizer:
                 block.mode_dc_activity.value = dc
 
             if isinstance(block.p_ch, cp.Variable):
-                block.p_ch.value = seed_ch_wh[: prep.T].astype(float)
+                p_ch_val = seed_ch_wh[: prep.T].astype(float)
+                # Project to semi-continuous domain: when mode_ch=1, p_ch >= min.
+                # This ensures the warm start satisfies the min-power constraint so
+                # HiGHS can accept it directly without an LP repair step.
+                _min_p_w = inv.parameters.min_ac_output_power_w
+                if _min_p_w > 0.0 and isinstance(block.mode_ch_activity, cp.Variable):
+                    _ch_on = (
+                        block.mode_ch_activity.value > 0.5
+                        if block.mode_ch_activity.value is not None
+                        else np.zeros(prep.T, dtype=bool)
+                    )
+                    _min_ch_wh = _min_p_w * prep.dt
+                    p_ch_val = p_ch_val.copy()
+                    p_ch_val[~_ch_on] = 0.0
+                    p_ch_val[_ch_on] = np.maximum(p_ch_val[_ch_on], _min_ch_wh)
+                block.p_ch.value = p_ch_val
 
             if isinstance(block.p_dc, cp.Variable):
-                block.p_dc.value = seed_dc_wh[: prep.T].astype(float)
+                p_dc_val = seed_dc_wh[: prep.T].astype(float)
+                # Project to semi-continuous domain: when mode_dc=1, p_dc >= min.
+                _min_p_w = inv.parameters.min_ac_output_power_w
+                if _min_p_w > 0.0 and isinstance(block.mode_dc_activity, cp.Variable):
+                    _dc_on = (
+                        block.mode_dc_activity.value > 0.5
+                        if block.mode_dc_activity.value is not None
+                        else np.zeros(prep.T, dtype=bool)
+                    )
+                    _min_dc_wh = _min_p_w * prep.dt
+                    p_dc_val = p_dc_val.copy()
+                    p_dc_val[~_dc_on] = 0.0
+                    p_dc_val[_dc_on] = np.maximum(p_dc_val[_dc_on], _min_dc_wh)
+                block.p_dc.value = p_dc_val
 
             if isinstance(block.pv_to_bat, cp.Variable):
                 block.pv_to_bat.value = seed_pvb_wh[: prep.T].astype(float)
@@ -640,25 +704,52 @@ class LinearOptimizer:
             if isinstance(block.pv_ac, cp.Variable):
                 block.pv_ac.value = seed_pva_wh[: prep.T].astype(float)
 
-            if isinstance(block.soc, cp.Variable) and inv.device_id in self._soc_init_params:
-                soc0 = float(self._soc_init_params[inv.device_id].value or 0.0)
-                block.soc.value = np.full(prep.T, soc0, dtype=float)
+            # Warm-start pv_ac_buffered: estimate from battery headroom
+            if isinstance(block.pv_ac_buffered, cp.Variable):
+                pv_ac_val = seed_pva_wh[: prep.T].astype(float)
+                if inv.battery is not None and inv.device_id in self._soc_init_params:
+                    bat = inv.battery
+                    soc0 = float(self._soc_init_params[inv.device_id].value or bat.soc_wh)
+                    headroom_wh = max(bat.max_soc_wh - soc0, 0.0)
+                    eta_buf = bat.charging_efficiency / inv.parameters.dc_to_ac_efficiency
+                    headroom_ac = headroom_wh / max(eta_buf, 1e-9)
+                    buf_val = np.minimum(pv_ac_val, headroom_ac)
+                    buf_val = np.minimum(buf_val, np.maximum(prep.load_wh, 0.0))
+                    block.pv_ac_buffered.value = buf_val
+                else:
+                    block.pv_ac_buffered.value = np.zeros(prep.T, dtype=float)
 
-        # Warm-start pv_self with Fraunhofer model estimate
-        if isinstance(self._pv_self, cp.Variable):
-            # Compute total PV AC estimate
+            if isinstance(block.soc, cp.Variable) and inv.device_id in self._soc_init_params:
+                if seed_soc_wh is not None and seed_soc_wh.size >= prep.T:
+                    block.soc.value = seed_soc_wh[: prep.T].astype(float)
+                else:
+                    soc0 = float(self._soc_init_params[inv.device_id].value or 0.0)
+                    block.soc.value = np.full(prep.T, soc0, dtype=float)
+
+        # Warm-start pv_unbuffered_self with Fraunhofer model estimate
+        if isinstance(self._pv_unbuffered_self, cp.Variable):
+            # Compute total PV AC and buffered estimates
             total_pv_ac_est = np.zeros(prep.T, dtype=float)
+            total_buffered_est = np.zeros(prep.T, dtype=float)
             for block in self._blocks:
                 inv_id = block.inverter.device_id
                 if inv_id in prep.pv_by_source:
                     total_pv_ac_est += prep.pv_by_source[inv_id]
+                if (
+                    isinstance(block.pv_ac_buffered, cp.Variable)
+                    and block.pv_ac_buffered.value is not None
+                ):
+                    total_buffered_est += np.asarray(block.pv_ac_buffered.value, dtype=float)
+
+            total_unbuffered_est = np.maximum(total_pv_ac_est - total_buffered_est, 0.0)
+            remaining_load_est = np.maximum(prep.load_wh - total_buffered_est, 0.0)
 
             # Use Fraunhofer model for warm-start (vectorized).
-            mean_load = float(np.mean(prep.load_wh)) if prep.load_wh.size > 0 else 0.0
+            mean_load = float(np.mean(remaining_load_est)) if remaining_load_est.size > 0 else 0.0
             sc_model = FraunhoferSCModel(baseload_wh=max(mean_load, 1.0), dt=prep.dt)
-            pv_self_est = sc_model.self_consumed_wh(total_pv_ac_est, prep.load_wh)
+            unbuf_self_est = sc_model.self_consumed_wh(total_unbuffered_est, remaining_load_est)
 
-            self._pv_self.value = np.asarray(pv_self_est, dtype=float)
+            self._pv_unbuffered_self.value = np.asarray(unbuf_self_est, dtype=float)
 
     def _build_inverter_block(self, inv: InverterBase) -> _InverterModelBlock:
         T = self._T
@@ -673,20 +764,22 @@ class LinearOptimizer:
 
         mode_ch_activity: cp.Expression | None = None
         mode_dc_activity: cp.Expression | None = None
+        battery_net_flow_wh: cp.Expression | None = None
 
         if inv.battery is not None and inv.is_optimizable and has_charge_mode:
             max_ch_power_w = float(inv.battery.max_charge_power_w)
             if inv.parameters.max_ac_charge_power_w > 0:
                 max_ch_power_w = min(max_ch_power_w, float(inv.parameters.max_ac_charge_power_w))
             max_ch_wh = max_ch_power_w * dt
+            mode_ch_activity = cp.Variable(T, boolean=True, name=f"mode_ch_{inv_id}")
             if max_ch_wh > 0:
-                mode_ch_activity = cp.Variable(T, boolean=True, name=f"mode_ch_{inv_id}")
                 p_ch = cp.Variable(T, nonneg=True, name=f"p_ch_{inv_id}")
-                min_ch_wh = max_ch_wh * (self._MIN_ACTIVE_AC_RATE_PCT / 100.0)
-                self._constraints.append(p_ch >= min_ch_wh * mode_ch_activity)
                 self._constraints.append(p_ch <= max_ch_wh * mode_ch_activity)
             else:
                 p_ch = cp.Constant(np.zeros(T, dtype=float))
+            if inv.parameters.min_ac_output_power_w > 0 and max_ch_wh > 0:
+                min_ch_wh = inv.parameters.min_ac_output_power_w * dt
+                self._constraints.append(p_ch >= min_ch_wh * mode_ch_activity)
         else:
             p_ch = cp.Constant(np.zeros(T, dtype=float))
 
@@ -695,14 +788,15 @@ class LinearOptimizer:
             if inv.parameters.max_ac_output_power_w > 0:
                 max_dc_power_w = min(max_dc_power_w, float(inv.parameters.max_ac_output_power_w))
             max_dc_wh = max_dc_power_w * dt
+            mode_dc_activity = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
             if max_dc_wh > 0:
-                mode_dc_activity = cp.Variable(T, boolean=True, name=f"mode_dc_{inv_id}")
                 p_dc = cp.Variable(T, nonneg=True, name=f"p_dc_{inv_id}")
-                min_dc_wh = max_dc_wh * (self._MIN_ACTIVE_AC_RATE_PCT / 100.0)
-                self._constraints.append(p_dc >= min_dc_wh * mode_dc_activity)
                 self._constraints.append(p_dc <= max_dc_wh * mode_dc_activity)
             else:
                 p_dc = cp.Constant(np.zeros(T, dtype=float))
+            if inv.parameters.min_ac_output_power_w > 0 and max_dc_wh > 0:
+                min_dc_wh = inv.parameters.min_ac_output_power_w * dt
+                self._constraints.append(p_dc >= min_dc_wh * mode_dc_activity)
         else:
             p_dc = cp.Constant(np.zeros(T, dtype=float))
 
@@ -714,9 +808,12 @@ class LinearOptimizer:
             pv_ac = cp.Variable(T, nonneg=True, name=f"pv_ac_{inv_id}")
             if inv.battery is not None:
                 pv_to_bat = cp.Variable(T, nonneg=True, name=f"pv_to_bat_{inv_id}")
+                pv_ac_buffered = cp.Variable(T, nonneg=True, name=f"pv_ac_buf_{inv_id}")
                 self._constraints.append(
                     pv_ac + pv_to_bat <= pv_pred
                 )  # Curtailment allowed when AC and battery are saturated
+                # Buffered PV cannot exceed total PV on AC.
+                self._constraints.append(pv_ac_buffered <= pv_ac)
                 if mode_dc_activity is not None:
                     # Gate PV→AC on the discharge binary ("bypass mode"):
                     # the DC→AC path is only open when the inverter is active (mode_dc=1).
@@ -730,10 +827,12 @@ class LinearOptimizer:
                 # the combined headroom constraint prevents overfilling.
             else:
                 pv_to_bat = cp.Constant(np.zeros(T, dtype=float))
+                pv_ac_buffered = cp.Constant(np.zeros(T, dtype=float))
                 self._constraints.append(pv_ac <= pv_pred)
         else:
             pv_ac = cp.Constant(np.zeros(T, dtype=float))
             pv_to_bat = cp.Constant(np.zeros(T, dtype=float))
+            pv_ac_buffered = cp.Constant(np.zeros(T, dtype=float))
 
         max_ac_out = inv.parameters.max_ac_output_power_w * dt
         self._constraints.append(pv_ac + p_dc <= max_ac_out)
@@ -749,7 +848,8 @@ class LinearOptimizer:
             eta_c_pv = bat.charging_efficiency
             eta_d = bat.discharging_efficiency * inv.parameters.dc_to_ac_efficiency
 
-            delta = p_ch * eta_c_ac + pv_to_bat * eta_c_pv - p_dc / eta_d
+            # Net battery flow in stored-energy units [Wh/dt].
+            battery_net_flow_wh = p_ch * eta_c_ac + pv_to_bat * eta_c_pv - p_dc / eta_d
 
             _active_w_self = inv.parameters.active_inverter_consumption_w
             _is_active_self = None
@@ -762,7 +862,7 @@ class LinearOptimizer:
                 elif mode_dc_activity is not None:
                     _is_active_self = mode_dc_activity
                 if _is_active_self is not None:
-                    delta = delta - _act_wh_self * _is_active_self
+                    battery_net_flow_wh = battery_net_flow_wh - _act_wh_self * _is_active_self
 
             start_soc = (
                 cp.hstack([soc_init_param, soc[:-1]]) if T > 1 else cp.hstack([soc_init_param])
@@ -775,6 +875,40 @@ class LinearOptimizer:
             else:
                 self._constraints.append(p_dc / eta_d <= start_soc - bat.min_soc_wh)
 
+            # RLT strengthening cuts for semi-continuous min-power constraints.
+            # Derived by substituting p_dc >= min_dc * mode_dc into the SoC discharge
+            # constraint above.  This creates a direct binary→SoC link that tightens
+            # the LP relaxation at each B&B node, reducing tree size.
+            _min_p_w = inv.parameters.min_ac_output_power_w
+            if _min_p_w > 0.0 and mode_dc_activity is not None:
+                _min_dc_wh_rlt = _min_p_w * dt
+                if _is_active_self is not None:
+                    # Strongest valid cut: combine min discharge + active consumption.
+                    # mode_dc*(min_dc/eta_d + act) + act*mode_ch (if present) <= SoC headroom
+                    if mode_ch_activity is not None:
+                        self._constraints.append(
+                            mode_dc_activity * (_min_dc_wh_rlt / eta_d + _act_wh_self)
+                            + _act_wh_self * mode_ch_activity
+                            <= start_soc - bat.min_soc_wh
+                        )
+                    else:
+                        self._constraints.append(
+                            mode_dc_activity * (_min_dc_wh_rlt / eta_d + _act_wh_self)
+                            <= start_soc - bat.min_soc_wh
+                        )
+                else:
+                    self._constraints.append(
+                        mode_dc_activity * _min_dc_wh_rlt / eta_d <= start_soc - bat.min_soc_wh
+                    )
+            # RLT cut for min charge: mode_ch * min_ch * eta_c_ac <= SoC headroom
+            # (Commented out: in practice this cut interacts poorly with presolve
+            #  on specific prediction windows and can be slower overall.)
+            # if _min_p_w > 0.0 and mode_ch_activity is not None:
+            #     _min_ch_wh_rlt = _min_p_w * dt
+            #     self._constraints.append(
+            #         mode_ch_activity * _min_ch_wh_rlt * eta_c_ac <= bat.max_soc_wh - start_soc
+            #     )
+
             # Combined battery charge-rate limit in raw battery input energy [Wh/dt]:
             # AC charging contributes after AC->DC conversion, PV->battery is already
             # on the DC side before battery charging losses.
@@ -782,8 +916,14 @@ class LinearOptimizer:
                 p_ch * inv.parameters.ac_to_dc_efficiency + pv_to_bat <= bat.max_charge_power_w * dt
             )
 
+            # Headroom constraint: actual charging + buffered PV headroom <= available SoC capacity.
+            # pv_ac_buffered is PV on AC that is backed by battery headroom (the inverter
+            # COULD route it to battery instead of AC).  eta_buf converts AC-side Wh to
+            # stored-energy Wh:  PV_AC → (÷ dc_to_ac) → DC → (× charging_eff) → stored.
+            eta_buf = bat.charging_efficiency / inv.parameters.dc_to_ac_efficiency
             self._constraints.append(
-                p_ch * eta_c_ac + pv_to_bat * eta_c_pv <= bat.max_soc_wh - start_soc
+                p_ch * eta_c_ac + pv_to_bat * eta_c_pv + pv_ac_buffered * eta_buf
+                <= bat.max_soc_wh - start_soc
             )
 
             # Physical model: PV is passively coupled to the battery DC bus.
@@ -792,7 +932,7 @@ class LinearOptimizer:
             # when the inverter DC→AC path is active.  The headroom constraint ensures
             # AC + PV charging never overfills the battery.
 
-            self._constraints.append(soc == start_soc + delta)
+            self._constraints.append(soc == start_soc + battery_net_flow_wh)
             self._constraints.extend([soc >= bat.min_soc_wh, soc <= bat.max_soc_wh])
         else:
             soc = None
@@ -805,7 +945,9 @@ class LinearOptimizer:
             p_dc=p_dc,
             pv_ac=pv_ac,
             pv_to_bat=pv_to_bat,
+            pv_ac_buffered=pv_ac_buffered,
             soc=soc,
+            battery_net_flow_wh=battery_net_flow_wh,
             mode_ch_activity=mode_ch_activity,
             mode_dc_activity=mode_dc_activity,
         )
@@ -928,16 +1070,22 @@ class LinearOptimizer:
     def _extract_modes(self, block: _InverterModelBlock, T: int) -> np.ndarray:
         """Map solver solution to InverterMode per timestep.
 
-        Primary signal: actual power flow (p_ch / p_dc > eps).
-        When switch cost is active, binaries are also used to capture "parked" mode
-        slots where the mode is maintained at zero power to avoid switch penalties.
+        Binary-based extraction is used as the primary signal when ``mode_switch_cost > 0``.
+        In that case the solver controls the binaries deliberately:
+        - binary=1, energy>0  → mode is actively running
+        - binary=1, energy=0  → "parked" mode: held at 1 to avoid a future switch penalty
+
+        When ``mode_switch_cost = 0`` the binaries are degenerate.  The semi-continuous
+        constraint only provides an upper bound (p ≤ max × binary), so binary=1 with p=0
+        is feasible and HiGHS may choose it as an arbitrary tie-break.  Energy-flow based
+        extraction is used instead so that IDLE is reported when no energy actually flows.
+
+        PV→AC bypass (pv_ac > 0) always implies the DC→AC path is open regardless of
+        switch cost, so it is always captured via the energy-flow check.
         """
         inv = block.inverter
+        eps = 1e-3
         modes = np.full(T, int(InverterMode.IDLE), dtype=np.int8)
-        eps = 1e-4
-
-        p_ch = self._expr_to_vec(block.p_ch, T)
-        p_dc = self._expr_to_vec(block.p_dc, T)
 
         ch_mode = (
             InverterMode.AC_CHARGE
@@ -950,31 +1098,33 @@ class LinearOptimizer:
             else InverterMode.DISCHARGE_ZERO_FEED_IN
         )
 
-        # Set modes from active AC power flows only.
-        # pv_to_bat is passive DC-bus routing and does not change the reported mode.
-        # pv_to_bat = self._expr_to_vec(block.pv_to_bat, T)
-
-        modes[p_ch > eps] = int(ch_mode)
-        modes[p_dc > eps] = int(dc_mode)
-
-        # Battery inverters: pv_ac > 0 requires mode_dc=1 by the bypass-gate constraint,
-        # so the inverter IS actively running its DC→AC path — report as discharge mode.
-        if inv.battery is not None and block.mode_dc_activity is not None:
-            pv_ac_vec = self._expr_to_vec(block.pv_ac, T)
-            modes[pv_ac_vec > eps] = int(dc_mode)
-
-        # For switch-cost models: binary=1 with zero power means "parking in mode"
-        # to avoid incurring a future switch penalty.
-        if inv.parameters.mode_switch_cost > 0.0:
+        if inv.parameters.mode_switch_cost > 0:
+            # --- Binary-based (primary) ---
+            # With switch cost the solver only sets binary=1 deliberately.
+            # Parked slots (binary=1, energy=0) are a valid mode state and must be reported.
             if block.mode_ch_activity is not None:
-                ch_active = np.round(self._expr_to_vec(block.mode_ch_activity, T)).astype(bool)
-                ch_parking = ch_active & (p_ch <= eps) & (p_dc <= eps)
-                modes[ch_parking] = int(ch_mode)
-
+                ch_binary = self._expr_to_vec(block.mode_ch_activity, T) > 0.5
+                modes[ch_binary] = int(ch_mode)
             if block.mode_dc_activity is not None:
-                dc_active = np.round(self._expr_to_vec(block.mode_dc_activity, T)).astype(bool)
-                dc_parking = dc_active & (p_dc <= eps) & (p_ch <= eps)
-                modes[dc_parking] = int(dc_mode)
+                dc_binary = self._expr_to_vec(block.mode_dc_activity, T) > 0.5
+                # mode_ch + mode_dc <= 1 ensures mutual exclusion; dc takes precedence
+                # for bypass/discharge reporting (overwriting ch where both would apply).
+                modes[dc_binary] = int(dc_mode)
+        else:
+            # --- Energy-flow based (primary) ---
+            # With switch_cost=0 the binary is a free variable when p=0 and may be set to
+            # 1 by HiGHS as a degenerate tie-break. Use actual energy flow to infer mode.
+            ch_flow = self._expr_to_vec(block.p_ch, T) > eps
+            dc_flow = self._expr_to_vec(block.p_dc, T) > eps
+            modes[ch_flow] = int(ch_mode)
+            modes[dc_flow] = int(dc_mode)
+
+        # PV→AC bypass: the bypass-gate constraint (pv_ac <= pv_pred * mode_dc) forces
+        # mode_dc=1 whenever pv_ac > 0.  For switch_cost>0 this is already captured by
+        # the binary above; the energy-flow check below covers switch_cost=0 explicitly.
+        if inv.battery is not None:
+            pv_ac_flow = self._expr_to_vec(block.pv_ac, T) > eps
+            modes[pv_ac_flow] = int(dc_mode)
 
         return modes
 
@@ -988,7 +1138,7 @@ class LinearOptimizer:
         objective: OptimizationObjective,
         solver_status: str,
         solve_time: float,
-        prediction: dict | None = None,
+        prediction: PredictionData,
     ) -> LinearSolution:
         T = prep.T
         dt = prep.dt
@@ -1064,12 +1214,12 @@ class LinearOptimizer:
         )
 
         return LinearSolution(
-            result=result,
+            prediction=prediction,
+            inverter_plans=tuple(inverter_plans),
             objective=objective,
             solver_status=solver_status,
             solve_time_s=solve_time,
-            inverter_plans=inverter_plans,
-            prediction=prediction,
+            result=result,
         )
 
     def _validate_with_simulation(

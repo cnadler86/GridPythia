@@ -382,8 +382,6 @@ def _run_rolling_horizon(
             t0_build = time.perf_counter()
             optimizer = LinearOptimizer(
                 inverters,
-                horizon=pred_current.steps,
-                dt_hours=pred_current.dt_hours,
                 objective=objective,
                 solver_opts=solver_opts if use_warm_start else solver_opts,
             )

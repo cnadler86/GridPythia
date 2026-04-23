@@ -78,6 +78,8 @@ class PredictionConfig(BaseModel):
 
     latitude: float = 47.99545
     longitude: float = 7.83355
+    horizon: float = Field(default=48.0, gt=0.0, description="Prediction horizon in hours")
+    dt_hours: float = Field(default=0.25, gt=0.0, description="Time step duration in hours")
     electricprice: ElectricPriceConfig = Field(default_factory=ElectricPriceConfig)
     feedintariff: FeedInTariffConfig = Field(default_factory=FeedInTariffConfig)
     load: LoadConfigModel = Field(default_factory=LoadConfigModel)

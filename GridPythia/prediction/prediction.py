@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from math import floor
 from typing import Any
 
 import numpy as np
@@ -38,6 +39,7 @@ class PredictionData:
     """Aligned prediction channels with an explicit typed consumer API."""
 
     __slots__ = (
+        "_requested_start",
         "_timestamps",
         "dt_hours",
         "_load_wh",
@@ -51,6 +53,7 @@ class PredictionData:
     def __init__(
         self,
         *,
+        requested_start: datetime | None = None,
         timestamps: Sequence[datetime] | None = None,
         dt_hours: float,
         load_wh: Sequence[float] | np.ndarray | None = None,
@@ -65,10 +68,14 @@ class PredictionData:
             raise TypeError("PredictionData requires timestamps and load_wh")
         timestamps_tuple = tuple(timestamps)
 
+        if requested_start is not None and requested_start.tzinfo is None:
+            raise ValueError("requested_start must be timezone-aware")
+
         steps = len(timestamps_tuple)
         if steps == 0:
             raise ValueError("PredictionData requires at least one timestamp")
 
+        self._requested_start = requested_start
         self._timestamps = timestamps_tuple
         self.dt_hours = float(dt_hours)
         self._load_wh = self._coerce_series("load_wh", load_wh, steps)
@@ -139,6 +146,10 @@ class PredictionData:
         return out
 
     @property
+    def requested_start(self) -> datetime | None:
+        return self._requested_start
+
+    @property
     def timestamps(self) -> list[datetime]:
         return list(self._timestamps)
 
@@ -198,6 +209,9 @@ class PredictionData:
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
+            "requested_start": (
+                self._requested_start.isoformat() if self._requested_start is not None else None
+            ),
             "timestamps": [ts.isoformat() for ts in self._timestamps],
             "dt_hours": float(self.dt_hours),
         }
@@ -252,6 +266,54 @@ class Prediction:
         self.setup = setup
 
     @staticmethod
+    def _normalize_start(start: datetime | None) -> datetime:
+        """Return a timezone-aware start datetime in local timezone when omitted."""
+        if start is None:
+            return datetime.now().astimezone()
+        if start.tzinfo is None:
+            return start.astimezone()
+        return start
+
+    @staticmethod
+    def _build_aligned_timestamps(
+        start: datetime,
+        hours: int | float,
+        dt_hours: float,
+    ) -> tuple[list[datetime], int]:
+        """Build grid-aligned timestamps starting at the floored dt-grid boundary.
+
+        Returns aligned timestamps and the index where the original requested start
+        occurs in the timestamp array. Timestamps are always at full grid boundaries;
+        the caller's start is maintained via `requested_start` metadata only.
+
+        For an unaligned start (e.g., 14:07 with 15-min grid), this returns
+        [14:00, 14:15, 14:30, ...] with start_idx=1 to indicate that the request
+        actually begins at index 1 (14:15).
+        """
+        if dt_hours <= 0:
+            raise ValueError(f"dt_hours must be > 0, got {dt_hours}")
+
+        base_steps = max(1, round(hours / dt_hours))
+        step_seconds = dt_hours * 3600.0
+
+        start_epoch = start.timestamp()
+        slot_epoch = floor(start_epoch / step_seconds) * step_seconds
+        aligned_start = datetime.fromtimestamp(slot_epoch, tz=start.tzinfo)
+
+        elapsed_in_slot = start_epoch - slot_epoch
+        eps = 1e-9
+        is_aligned = elapsed_in_slot <= eps
+
+        if is_aligned:
+            start_idx = 0
+            steps = base_steps
+        else:
+            start_idx = 1
+            steps = base_steps + 1
+
+        return make_timestamps(aligned_start, steps * dt_hours, dt_hours), start_idx
+
+    @staticmethod
     def _to_utc_timestamps(timestamps: list[datetime]) -> list[datetime]:
         """Normalize timestamps to UTC for internet-backed provider calls."""
         return [
@@ -276,24 +338,39 @@ class Prediction:
 
     async def fetch(
         self,
-        start: datetime,
-        hours: int | float,
+        start: datetime | None = None,
+        hours: int | float = 24,
         dt_hours: float = 1.0,
     ) -> PredictionData:
-        """Fetch all prediction channels in parallel for the next *hours* from *start*.
+        """Fetch aligned prediction channels at grid-aligned timestamps.
+
+        Alignment behavior:
+        - Prediction timestamps are aligned to the dt-grid (e.g. ``:00, :15, :30, :45`` for 15 min).
+        - All energy values are for complete grid slots (no fractional scaling).
+        - If *start* is unaligned, one extra leading slot is added so that the returned
+          window covers the requested start + horizon. The caller's original start is
+          stored in ``requested_start`` for reference.
+
+        Start contract:
+        - *start* defaults to timezone-aware local ``now``.
+        - Returned timestamps are always at grid boundaries.
+        - ``PredictionData.requested_start`` stores the original timezone-aware request start.
 
         Timezone contract:
         - Internet-backed providers (electricity price, feed-in tariff, PV, weather)
           are always called with UTC timestamps.
-        - Load providers are called with the original requested timestamps
+        - Load providers are called with aligned grid timestamps
           (load profiles are timezone-invariant by design).
-
-        Returned timestamps keep the original requested timezone representation.
         """
-        timestamps = make_timestamps(start, hours, dt_hours)
+        requested_start = self._normalize_start(start)
+        timestamps, start_idx = self._build_aligned_timestamps(
+            requested_start,
+            hours,
+            dt_hours,
+        )
+        n = len(timestamps)
         internet_provider_timestamps = self._to_utc_timestamps(timestamps)
         load_provider_timestamps = timestamps
-        n = len(timestamps)
 
         providers = []
         if self.setup.electricprice:
@@ -309,7 +386,7 @@ class Prediction:
 
         logger.info(
             "prediction_fetch_start",
-            start=start.isoformat(),
+            start=requested_start.isoformat(),
             hours=hours,
             dt_hours=dt_hours,
             steps=n,
@@ -398,6 +475,7 @@ class Prediction:
         )
 
         return PredictionData(
+            requested_start=requested_start,
             timestamps=timestamps,
             dt_hours=dt_hours,
             load_wh=load_wh,

@@ -65,6 +65,9 @@ class InverterParameters(BaseModel):
     has_pv: bool = Field(
         default=True, description="Whether a PV plane is attached to this inverter"
     )
+    min_ac_output_power_w: float = Field(
+        default=0.0, ge=0.0, description="Min AC output (to grid) in W"
+    )
     max_ac_output_power_w: float = Field(
         default=5000, ge=0.0, description="Max AC output (to grid) in W"
     )
@@ -92,8 +95,6 @@ class OptimizationSolverConfig(BaseModel):
     provider: Literal["highs", "blackbox"] = "highs"
     objective: Literal["cost", "self_consumption"] = "cost"
     solver_opts: dict[str, Any] = Field(default_factory=dict)
-    horizon: int = Field(default=48, gt=0, description="Optimization horizon in time steps")
-    dt_hours: float = Field(default=0.25, gt=0.0, description="Time step duration in hours")
 
     @field_validator("solver_opts", mode="before")
     @classmethod

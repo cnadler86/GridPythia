@@ -1,6 +1,6 @@
 """Tests for the unified Prediction orchestrator."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -365,3 +365,68 @@ class TestPrediction:
         pred = Prediction(PredictionSetup(pv={"a": PVOne(), "b": PVTwo()}))
         with pytest.raises(ValueError, match="Duplicate PV inverter id"):
             await pred.fetch(start=START, hours=4, dt_hours=1.0)
+
+    async def test_fetch_unaligned_start_aligns_grid_and_returns_full_slots(self):
+        class FlatLoad(LoadProvider):
+            @property
+            def provider_id(self) -> str:
+                return "FlatLoad"
+
+            def _get_day_profile_w(self, day_type):
+                return [0.0] * 24, 1.0
+
+            async def fetch(self, timestamps: list, *, use_vacation_profile: bool = False) -> np.ndarray:
+                return np.full(len(timestamps), 120.0, dtype=np.float32)
+
+        class FlatPV(PVForecastProvider):
+            @property
+            def provider_id(self) -> str:
+                return "FlatPV"
+
+            async def fetch(self, timestamps: list) -> np.ndarray:
+                return np.full(len(timestamps), 80.0, dtype=np.float32)
+
+            async def fetch_by_inverter(self, timestamps: list) -> dict[str, np.ndarray]:
+                return {"inverter1": np.full(len(timestamps), 80.0, dtype=np.float32)}
+
+        pred = Prediction(
+            PredictionSetup(
+                electricprice=ElecPriceFixed(price_kwh=0.30),
+                load=FlatLoad(),
+                pv={"roof": FlatPV()},
+            )
+        )
+        start = datetime(2025, 6, 15, 4, 5, tzinfo=timezone.utc)
+        data = await pred.fetch(start=start, hours=48, dt_hours=0.25)
+
+        assert data.requested_start == start
+        assert data.timestamps[0] == datetime(2025, 6, 15, 4, 0, tzinfo=timezone.utc)
+        assert data.timestamps[1] == datetime(2025, 6, 15, 4, 15, tzinfo=timezone.utc)
+
+        assert data.load_wh[0] == pytest.approx(120.0)
+        assert data.load_wh[1] == pytest.approx(120.0)
+        assert data.pv_by_inverter["inverter1"][0] == pytest.approx(80.0)
+        assert data.pv_by_inverter["inverter1"][1] == pytest.approx(80.0)
+        assert data.electricprice is not None
+        assert data.electricprice[0] == pytest.approx(0.0003)
+
+
+    async def test_fetch_default_start_is_timezone_aware(self):
+        pred = Prediction(PredictionSetup())
+        data = await pred.fetch(hours=1, dt_hours=1.0)
+
+        assert data.requested_start is not None
+        assert data.requested_start.tzinfo is not None
+        assert data.timestamps[0].tzinfo is not None
+
+    def test_predictiondata_to_dict_includes_requested_start(self):
+        requested_start = START + timedelta(minutes=5)
+        data = PredictionData(
+            requested_start=requested_start,
+            timestamps=[START, START.replace(hour=1)],
+            dt_hours=1.0,
+            load_wh=np.array([1.0, 2.0], dtype=np.float32),
+        )
+
+        payload = data.to_dict()
+        assert payload["requested_start"] == requested_start.isoformat()

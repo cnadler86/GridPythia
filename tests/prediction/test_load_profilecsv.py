@@ -162,6 +162,7 @@ class TestLoadProfileCSVGetProfileSeries:
         _write_csv_weekend(p, weekday_wh=100.0, weekend_wh=60.0)
         provider = LoadProfileCSV(LoadProfileConfig(path=p))
         provider._ensure_loaded()
+        assert provider._profiles is not None
         vac = provider._profiles["vacations"]  # type: ignore[index]
         assert all(v == pytest.approx(60.0) for v in vac)
 
