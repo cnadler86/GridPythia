@@ -19,7 +19,7 @@ PALETTE = {
 }
 
 # Pastel fill used to mark forecast / fallback regions.
-FORECAST_FILL_COLOR = "rgba(255, 200, 100, 0.18)"
+FORECAST_FILL_COLOR = "rgba(230, 210, 255, 0.25)"  # pastel lavendel
 FORECAST_LINE_COLOR = "rgba(200, 140, 40, 0.55)"
 
 _LAYOUT_DEFAULTS: dict[str, Any] = {

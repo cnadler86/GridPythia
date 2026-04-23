@@ -46,6 +46,7 @@ class ElecPricePlotter:
                 mode="lines",
                 line={"color": PALETTE["blue"], "width": 1.8, "shape": "hv"},
                 fill="tozeroy",
+                # Keep the normal area blue; only the forecast window is shaded lavender.
                 fillcolor="rgba(21, 101, 192, 0.10)",
                 name="Price",
                 hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.5f} EUR/kWh<extra></extra>",

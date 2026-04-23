@@ -22,6 +22,49 @@ from plotly.subplots import make_subplots
 if TYPE_CHECKING:
     from GridPythia.optimization.solution import EnergySolution
 
+
+def _calc_pretty_ticks(
+    vmin: float, vmax: float, target_nticks: int = 6
+) -> tuple[float, float, float]:
+    """Calculate 'pretty' tick parameters (tick0, dtick) for a given value range.
+
+    This uses the Wilkinson algorithm to find nice, round tick intervals.
+    Returns (tick0, dtick, max_val) where:
+    - tick0: starting value for the first tick
+    - dtick: interval between ticks
+    - max_val: rounded maximum value for the axis
+
+    Args:
+        vmin: minimum value in data
+        vmax: maximum value in data
+        target_nticks: desired number of ticks (default 6)
+    """
+    if vmin == vmax:
+        vmin, vmax = vmin - 1, vmax + 1
+
+    span = vmax - vmin
+    magnitude = 10 ** np.floor(np.log10(span))
+
+    # Try candidate tick intervals: 1, 2, 5 times the magnitude
+    candidates = [1, 2, 5, 10]
+    best_candidate = 1
+    best_error = float("inf")
+
+    for cand in candidates:
+        dtick = cand * magnitude
+        nticks = span / dtick
+        error = abs(nticks - target_nticks)
+        if error < best_error:
+            best_error = error
+            best_candidate = cand
+
+    dtick = best_candidate * magnitude
+    tick0 = np.floor(vmin / dtick) * dtick
+    max_val = np.ceil(vmax / dtick) * dtick
+
+    return float(tick0), float(dtick), float(max_val)
+
+
 # ── colour constants ──────────────────────────────────────────────────────
 _C_IMPORT = "#1565C0"  # grid import  – blue
 _C_FEEDIN = "#2E7D32"  # feed-in      – green
@@ -246,7 +289,33 @@ class SolutionPlotter:
                 col=1,
             )
 
-        fig.update_yaxes(title_text="Wh", row=1, col=1)
+        # Calculate pretty ticks for energy axis (Wh) in row 1
+        wh_values = (
+            list(result.grid_import_wh_per_dt)
+            + list(result.self_consumption_wh_per_dt)
+            + list(result.feedin_wh_per_dt)
+        )
+        if result.losses_wh_per_dt is not None:
+            wh_values.extend(result.losses_wh_per_dt)
+
+        if wh_values:
+            wh_min, wh_max = min(wh_values), max(wh_values)
+            if wh_min < wh_max:
+                tick0_wh, dtick_wh, max_wh = _calc_pretty_ticks(wh_min, wh_max, target_nticks=6)
+                fig.update_yaxes(
+                    title_text="Wh",
+                    tickmode="linear",
+                    tick0=tick0_wh,
+                    dtick=dtick_wh,
+                    range=[tick0_wh, max_wh],
+                    row=1,
+                    col=1,
+                )
+            else:
+                fig.update_yaxes(title_text="Wh", row=1, col=1)
+        else:
+            fig.update_yaxes(title_text="Wh", row=1, col=1)
+
         fig.update_layout(barmode="relative")
 
         # ── row 2: battery SoC (optional) ────────────────────────────
@@ -432,18 +501,69 @@ class SolutionPlotter:
                 row=1,
                 col=1,
             )
-        fig.update_yaxes(title_text="Wh", row=1, col=1)
+
+        # Calculate pretty ticks for energy axis (Wh) in row 1
+        wh_values = (
+            list(result.grid_import_wh_per_dt)
+            + list(result.self_consumption_wh_per_dt)
+            + list(result.feedin_wh_per_dt)
+        )
+
+        if wh_values:
+            wh_min, wh_max = min(wh_values), max(wh_values)
+            if wh_min < wh_max:
+                tick0_wh, dtick_wh, max_wh = _calc_pretty_ticks(wh_min, wh_max, target_nticks=6)
+                fig.update_yaxes(
+                    title_text="Wh",
+                    tickmode="linear",
+                    tick0=tick0_wh,
+                    dtick=dtick_wh,
+                    range=[tick0_wh, max_wh],
+                    row=1,
+                    col=1,
+                )
+            else:
+                fig.update_yaxes(title_text="Wh", row=1, col=1)
+        else:
+            fig.update_yaxes(title_text="Wh", row=1, col=1)
+
         fig.update_layout(barmode="relative")
 
         # ── row 2: mode background + SoC line + power bars ───────────
         if has_battery:
+            assert plan is not None, "plan should not be None when has_battery is True"
             _add_mode_backgrounds(fig, timestamps, plan.modes, dt_hours, row=2, n_rows=2)
+
+            # SoC is an end-of-interval state. Shift the curve one dt to the right,
+            # while keeping an initial anchor at the first timestamp.
+            soc_array = np.asarray(result.battery_soc_percentage_per_dt[inv_device_id])
+
+            # Calculate initial SoC: if first SoC is available, estimate initial as slightly higher
+            # (or use the constraint from the plan). For now, use a reasonable estimate.
+            if len(soc_array) > 0:
+                # The first element is SoC after first step; estimate initial SoC
+                # by assuming it started at or near this level (in absence of better data,
+                # use the first value itself as a proxy for "starting" SoC display)
+                initial_soc_est = soc_array[0]
+                soc_shifted = np.concatenate([[initial_soc_est], soc_array])
+            else:
+                soc_shifted = soc_array
+
+            # Create shifted time axis: first point at t0 (initial anchor),
+            # then end-of-slot states at t + dt.
+            if timestamps:
+                from datetime import timedelta
+
+                dt_td = timedelta(hours=dt_hours)
+                timestamps_shifted = [timestamps[0]] + [ts + dt_td for ts in timestamps]
+            else:
+                timestamps_shifted = timestamps
 
             # SoC is a state variable → line (left axis)
             fig.add_trace(
                 go.Scatter(
-                    x=timestamps,
-                    y=np.asarray(result.battery_soc_percentage_per_dt[inv_device_id]).tolist(),
+                    x=timestamps_shifted,
+                    y=soc_shifted.tolist(),
                     name="SoC",
                     mode="lines",
                     line={"color": _C_SOC, "width": 2.2},
@@ -498,7 +618,36 @@ class SolutionPlotter:
                     col=1,
                     secondary_y=True,
                 )
-            fig.update_yaxes(title_text="Power (W)", row=2, col=1, secondary_y=True)
+
+            # Calculate pretty ticks for power axis (right, secondary_y)
+            all_power = []
+            if np.any(plan.charge_ac_wh):
+                all_power.extend((np.asarray(plan.charge_ac_wh) / dt_hours).tolist())
+            if np.any(plan.discharge_ac_wh):
+                all_power.extend((np.asarray(plan.discharge_ac_wh) / dt_hours).tolist())
+            if plan.pv_to_battery_wh is not None and np.any(plan.pv_to_battery_wh):
+                all_power.extend((np.asarray(plan.pv_to_battery_wh) / dt_hours).tolist())
+
+            if all_power:
+                power_min, power_max = min(all_power), max(all_power)
+                if power_min < power_max:
+                    tick0_p, dtick_p, max_p = _calc_pretty_ticks(
+                        power_min, power_max, target_nticks=5
+                    )
+                    fig.update_yaxes(
+                        title_text="Power (W)",
+                        tickmode="linear",
+                        tick0=tick0_p,
+                        dtick=dtick_p,
+                        range=[tick0_p, max_p],
+                        row=2,
+                        col=1,
+                        secondary_y=True,
+                    )
+                else:
+                    fig.update_yaxes(title_text="Power (W)", row=2, col=1, secondary_y=True)
+            else:
+                fig.update_yaxes(title_text="Power (W)", row=2, col=1, secondary_y=True)
 
         # Build layout with per-inverter-specific overrides (wider margins for secondary y-axis)
         layout_params = {

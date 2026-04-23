@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import aiohttp
 import numpy as np
+import plotly.graph_objects as go
 from pydantic import BaseModel, Field, field_validator
 from structlog import get_logger
 
@@ -476,8 +477,6 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
             values:     EUR/Wh array returned by :meth:`fetch`.
             timestamps: The same timestamp list passed to :meth:`fetch`.
         """
-        import plotly.graph_objects as go  # noqa: F401 – local import keeps plotly optional
-
         from GridPythia.prediction.plots.electricprice import ElecPricePlotter
 
         return ElecPricePlotter().plot(

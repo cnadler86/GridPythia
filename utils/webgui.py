@@ -62,6 +62,51 @@ _config_path: Path = Path(__file__).resolve().parent.parent / "config.yaml"
 
 app = FastAPI(title="GridPythia Web GUI", docs_url=None, redoc_url=None)
 
+# ── persistent provider singleton (keeps internal caches alive) ───────────
+# Rebuilt only when the config changes. This avoids re-fetching EnergyCharts
+# on every request because the internal TimeBucketCache survives across calls.
+_providers: PredictionSetup | None = None
+_providers_config_mtime: float = 0.0
+
+
+def _get_providers(cfg: AppConfig, raw_yaml: dict[str, Any]) -> PredictionSetup:
+    """Return the persistent provider singleton, rebuilding only when config changed."""
+    global _providers, _providers_config_mtime  # noqa: PLW0603
+    try:
+        mtime = _config_path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    if _providers is None or mtime != _providers_config_mtime:
+        _providers = _build_providers(cfg, raw_yaml)
+        _providers_config_mtime = mtime
+    return _providers
+
+
+# ── prediction data cache (avoids double-fetch within one optimize cycle) ─
+# Also stores forecast_from (last_real_ts from EnergyCharts) so plots can
+# shade the statistical forecast region in lavendel.
+_pdata_cache: PredictionData | None = None
+_pdata_cache_ts: datetime | None = None
+_pdata_forecast_from: datetime | None = None  # last real API timestamp
+_PDATA_CACHE_TTL_S: float = 300.0  # 5 minutes
+
+
+def _get_cached_pdata() -> "tuple[PredictionData, datetime | None] | None":
+    """Return (PredictionData, forecast_from) if still fresh, else None."""
+    if _pdata_cache is None or _pdata_cache_ts is None:
+        return None
+    age = (datetime.now() - _pdata_cache_ts).total_seconds()
+    if age >= _PDATA_CACHE_TTL_S:
+        return None
+    return _pdata_cache, _pdata_forecast_from
+
+
+def _set_cached_pdata(pdata: "PredictionData", forecast_from: "datetime | None") -> None:
+    global _pdata_cache, _pdata_cache_ts, _pdata_forecast_from  # noqa: PLW0603
+    _pdata_cache = pdata
+    _pdata_cache_ts = datetime.now()
+    _pdata_forecast_from = forecast_from
+
 
 # ── config helpers ────────────────────────────────────────────────────────
 
@@ -200,13 +245,17 @@ def _fig_to_dict(fig: go.Figure) -> dict[str, Any]:
     return json.loads(fig.to_json())
 
 
-def _make_prediction_figures(pdata: PredictionData) -> dict[str, Any]:
+def _make_prediction_figures(
+    pdata: PredictionData, forecast_from: datetime | None = None
+) -> dict[str, Any]:
     """Delegate to the existing per-channel prediction plotters."""
     ts = pdata.timestamps
     figs: dict[str, Any] = {}
 
     if pdata.electricprice is not None:
-        figs["tab-elecprice"] = _fig_to_dict(ElecPricePlotter().plot(pdata.electricprice, ts))
+        figs["tab-elecprice"] = _fig_to_dict(
+            ElecPricePlotter().plot(pdata.electricprice, ts, forecast_from=forecast_from)
+        )
     if pdata.feedintariff is not None:
         figs["tab-feedin"] = _fig_to_dict(FeedInTariffPlotter().plot(pdata.feedintariff, ts))
     figs["tab-load"] = _fig_to_dict(LoadPlotter().plot(pdata.load_wh, ts))
@@ -332,40 +381,73 @@ def _build_html(cfg: AppConfig, has_weather: bool) -> str:
     .spinner-border {{ width: 1rem; height: 1rem; border-width: .15em; }}
     #tabContent {{ background: #fff; border: 1px solid #dee2e6; border-top: none;
                    border-radius: 0 0 .375rem .375rem; padding: .75rem; }}
+
+    /* Responsive adjustments */
+    @media (max-width: 768px) {{
+      .navbar {{ flex-wrap: wrap; }}
+      .navbar-brand {{ font-size: 1rem; }}
+      #battery-controls {{ width: 100%; margin-top: 0.5rem; order: 3; }}
+      .optimize-controls {{ order: 4; margin-top: 0.5rem; }}
+      #mainTabs {{ flex-wrap: nowrap; overflow-x: auto; }}
+      .nav-tabs .nav-link {{ white-space: nowrap; padding: .25rem .5rem; font-size: .75rem; }}
+      #tabContent {{ padding: .5rem; }}
+      .gp-chart {{ min-height: 250px; }}
+    }}
+
+    @media (max-width: 576px) {{
+      body {{ font-size: .75rem; }}
+      .navbar {{ padding: 0.5rem; }}
+      .d-flex > div {{ margin-right: 0.25rem !important; }}
+      #mainTabs {{ border-bottom: 1px solid #dee2e6; overflow-x: auto; scrollbar-width: thin; }}
+      #mainTabs::-webkit-scrollbar {{ height: 4px; }}
+      #mainTabs::-webkit-scrollbar-track {{ background: #f1f1f1; }}
+      #mainTabs::-webkit-scrollbar-thumb {{ background: #888; border-radius: 2px; }}
+      .nav-tabs .nav-link {{ padding: .2rem .4rem; font-size: .65rem; }}
+      #tabContent {{ padding: .25rem; }}
+      .gp-chart {{ min-height: 200px; }}
+    }}
   </style>
 </head>
 <body>
 
 <!-- ── Navbar ────────────────────────────────────────────────── -->
 <nav class="navbar navbar-dark bg-dark py-2 px-3">
-  <span class="navbar-brand fw-bold me-3">⚡ GridPythia</span>
-  <div class="d-flex flex-wrap align-items-end gap-1">
-{battery_cards_html}
-    <div class="d-flex flex-column me-2">
-      <div class="small text-white-50 mb-1">Horizon: {horizon_h:.0f} h · Δt: {dt_min} min · {objective}</div>
-      <button class="btn btn-success btn-sm px-4 fw-semibold" id="btn-optimize" onclick="runOptimize()">
-        ▶ Optimize
-      </button>
+  <div class="container-fluid">
+    <span class="navbar-brand fw-bold">⚡ GridPythia</span>
+
+    <!-- Right section with status and timezone -->
+    <div class="d-flex align-items-center gap-2 ms-auto">
+      <span id="status-msg" class="text-white-50 text-truncate" style="max-width: 200px; font-size: .8rem;"></span>
+      <div id="spinner" class="spinner-border text-light d-none" role="status" style="width:1rem; height:1rem; border-width:.15em">
+        <span class="visually-hidden">Loading…</span>
+      </div>
+      <span id="tz-display" class="badge bg-secondary ms-2" style="font-size:.65rem;"></span>
     </div>
   </div>
-  <div class="d-flex align-items-center gap-2 ms-auto">
-    <span id="status-msg" class="text-white-50"></span>
-    <div id="spinner" class="spinner-border text-light d-none" role="status">
-      <span class="visually-hidden">Loading…</span>
+
+  <!-- Battery controls + Optimize (wrapped for responsiveness) -->
+  <div class="w-100" id="battery-controls">
+    <div class="d-flex flex-wrap gap-1 align-items-end mt-2">
+{battery_cards_html}
+      <div class="d-flex flex-column optimize-controls">
+        <div class="small text-white-50 mb-1" style="font-size:.7rem;">Horizon: {horizon_h:.0f} h · Δt: {dt_min} min · {objective}</div>
+        <button class="btn btn-success btn-sm px-3 fw-semibold" id="btn-optimize" onclick="runOptimize()" style="font-size:.75rem;">
+          ▶ Optimize
+        </button>
+      </div>
     </div>
-    <span id="tz-display" class="badge bg-secondary ms-2"></span>
   </div>
 </nav>
 
-<!-- ── Inverter info bar ──────────────────────────────────────── -->
-<div class="px-3 py-2 bg-light border-bottom d-flex flex-wrap align-items-center gap-1">
-  <span class="small text-muted fw-semibold me-2">Inverters:</span>
+<!-- ── Inverter info bar (scrollable on mobile) ──────────────────── -->
+<div class="px-2 py-2 bg-light border-bottom d-flex flex-wrap align-items-center gap-1 overflow-x-auto">
+  <span class="small text-muted fw-semibold me-1" style="white-space:nowrap;">Inverters:</span>
 {inverter_cards_html}
 </div>
 
-<!-- ── Tabs ──────────────────────────────────────────────────── -->
-<div class="px-3 pt-2">
-  <ul class="nav nav-tabs" id="mainTabs">
+<!-- ── Tabs (scrollable on mobile) ──────────────────────────────── -->
+<div class="px-2 pt-1">
+  <ul class="nav nav-tabs d-flex flex-nowrap overflow-x-auto pb-0" id="mainTabs" style="border-bottom: 1px solid #dee2e6;">
 {tab_nav_items}  </ul>
   <div class="tab-content" id="tabContent">
 {tab_panes_html}  </div>
@@ -400,7 +482,7 @@ document.querySelectorAll('.nav-link[data-tab]').forEach(link => {{
   link.addEventListener('click', e => {{ e.preventDefault(); showTab(link.dataset.tab); }});
 }});
 
-// ── Optimize ────────────────────────────────────────────────────
+// ── Optimize ────────────────────────────────────────────────
 async function runOptimize() {{
   const btn    = document.getElementById('btn-optimize');
   const spinner = document.getElementById('spinner');
@@ -408,30 +490,33 @@ async function runOptimize() {{
 
   btn.disabled = true;
   spinner.classList.remove('d-none');
-  statusEl.textContent = 'Fetching & optimizing…';
+  statusEl.textContent = 'Fetching…';
 
   const soc = {{}};
   document.querySelectorAll('.bat-soc-input').forEach(inp => {{
     soc[inp.dataset.battery] = parseFloat(inp.value);
   }});
 
+  const payload = {{ timezone: TZ, battery_soc: soc }};
+
   try {{
-    const resp = await fetch('/api/optimize', {{
+    // Phase 1: Fetch predictions
+    const fetchResp = await fetch('/api/fetch', {{
       method: 'POST',
       headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ timezone: TZ, battery_soc: soc }})
+      body: JSON.stringify(payload)
     }});
 
-    if (!resp.ok) {{
-      const body = await resp.json().catch(() => ({{ detail: resp.statusText }}));
-      throw new Error(body.detail || resp.statusText);
+    if (!fetchResp.ok) {{
+      const body = await fetchResp.json().catch(() => ({{ detail: fetchResp.statusText }}));
+      throw new Error('Fetch failed: ' + (body.detail || fetchResp.statusText));
     }}
 
-    const data = await resp.json();
+    const fetchData = await fetchResp.json();
 
-    // Render each chart
+    // Render prediction charts immediately
     let rendered = 0;
-    for (const [tabId, figData] of Object.entries(data.charts)) {{
+    for (const [tabId, figData] of Object.entries(fetchData.charts)) {{
       const el = document.getElementById('chart-' + tabId);
       if (!el) continue;
       const layout = Object.assign({{ autosize: true }}, figData.layout || {{}});
@@ -439,7 +524,33 @@ async function runOptimize() {{
       rendered++;
     }}
 
-    statusEl.textContent = data.status || `Done ✓ (${{rendered}} charts)`;
+    statusEl.textContent = 'Forecasts loaded ✓ · Optimizing…';
+
+    // Phase 2: Run optimization
+    const optResp = await fetch('/api/optimize', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(payload)
+    }});
+
+    if (!optResp.ok) {{
+      const body = await optResp.json().catch(() => ({{ detail: optResp.statusText }}));
+      throw new Error('Optimization failed: ' + (body.detail || optResp.statusText));
+    }}
+
+    const optData = await optResp.json();
+
+    // Render inverter charts
+    let optRendered = 0;
+    for (const [tabId, figData] of Object.entries(optData.charts)) {{
+      const el = document.getElementById('chart-' + tabId);
+      if (!el) continue;
+      const layout = Object.assign({{ autosize: true }}, figData.layout || {{}});
+      Plotly.react(el, figData.data || [], layout, {{ responsive: true, displayModeBar: true }});
+      optRendered++;
+    }}
+
+    statusEl.textContent = optData.status || `Done ✓ (${{rendered + optRendered}} charts)`;
 
     // Jump to first inverter tab after optimization
     if (FIRST_INV_TAB) showTab(FIRST_INV_TAB);
@@ -478,38 +589,105 @@ class OptimizeRequest(BaseModel):
     battery_soc: dict[str, float] = {}
 
 
-@app.post("/api/optimize")
-async def optimize(req: OptimizeRequest) -> JSONResponse:
-    """Fetch predictions, run optimization, return Plotly figure JSON for all tabs."""
-    # ── Load config ───────────────────────────────────────────────────
+@app.post("/api/fetch")
+async def fetch_predictions(req: OptimizeRequest) -> JSONResponse:
+    """Fetch predictions and return Plotly figure JSON for prediction tabs.
+
+    If the server-side pdata cache is still fresh, the cached data is returned
+    immediately without any external API calls.
+    """
+    # ── Fast path: serve from cache if still fresh ────────────────────
+    cached = _get_cached_pdata()
+    if cached is not None:
+        pdata, forecast_from = cached
+        charts = _make_prediction_figures(pdata, forecast_from)
+        logger.info("webgui_fetch_served_from_cache", charts=list(charts.keys()))
+        return JSONResponse({"charts": charts, "from_cache": True})
+
+    # ── Slow path: build providers (singletons) and fetch ─────────────
     try:
         cfg, raw_yaml = _load_config()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Config error: {exc}") from exc
 
-    # ── Timezone ──────────────────────────────────────────────────────
     try:
         tz = ZoneInfo(req.timezone)
     except ZoneInfoNotFoundError:
         logger.warning("unknown_timezone", tz=req.timezone)
         tz = ZoneInfo("UTC")
 
-    # ── Build providers ───────────────────────────────────────────────
     try:
-        setup = _build_providers(cfg, raw_yaml)
+        setup = _get_providers(cfg, raw_yaml)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Provider build error: {exc}") from exc
 
-    # ── Fetch prediction ──────────────────────────────────────────────
     pred = Prediction(setup)
     start = datetime.now(tz=tz)
     hours = float(cfg.prediction.horizon)
     dt = float(cfg.prediction.dt_hours)
 
     try:
-        pdata: PredictionData = await pred.fetch(start=start, hours=hours, dt_hours=dt)
+        pdata = await pred.fetch(start=start, hours=hours, dt_hours=dt)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Prediction fetch failed: {exc}") from exc
+
+    # Extract forecast_from from the EnergyCharts provider (if present)
+    forecast_from: datetime | None = None
+    if isinstance(setup.electricprice, ElecPriceEnergyCharts):
+        forecast_from = setup.electricprice.last_real_ts
+
+    _set_cached_pdata(pdata, forecast_from)
+
+    charts = _make_prediction_figures(pdata, forecast_from)
+    logger.info("webgui_fetch_done", charts=list(charts.keys()))
+    return JSONResponse({"charts": charts, "from_cache": False})
+
+
+@app.post("/api/optimize")
+async def optimize(req: OptimizeRequest) -> JSONResponse:
+    """Run optimization and return Plotly figure JSON for all tabs.
+
+    Reuses server-side cached PredictionData when fresh (populated by /api/fetch).
+    Falls back to a fresh fetch if the cache has expired.
+    """
+    # ── Load config ───────────────────────────────────────────────────
+    try:
+        cfg, raw_yaml = _load_config()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Config error: {exc}") from exc
+
+    try:
+        tz = ZoneInfo(req.timezone)
+    except ZoneInfoNotFoundError:
+        logger.warning("unknown_timezone", tz=req.timezone)
+        tz = ZoneInfo("UTC")
+
+    # ── Prediction: use cache or re-fetch via persistent providers ────
+    cached = _get_cached_pdata()
+    if cached is not None:
+        pdata, forecast_from = cached
+        logger.info("webgui_optimize_using_cached_pdata")
+    else:
+        try:
+            setup = _get_providers(cfg, raw_yaml)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Provider build error: {exc}") from exc
+
+        pred = Prediction(setup)
+        start = datetime.now(tz=tz)
+        hours = float(cfg.prediction.horizon)
+        dt = float(cfg.prediction.dt_hours)
+        try:
+            pdata = await pred.fetch(start=start, hours=hours, dt_hours=dt)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Prediction fetch failed: {exc}") from exc
+
+        forecast_from = (
+            setup.electricprice.last_real_ts
+            if isinstance(setup.electricprice, ElecPriceEnergyCharts)
+            else None
+        )
+        _set_cached_pdata(pdata, forecast_from)
 
     # ── Build inverters with SoC overrides ────────────────────────────
     try:
@@ -542,7 +720,7 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
     charts: dict[str, Any] = {}
 
     # Prediction tabs
-    charts.update(_make_prediction_figures(pdata))
+    charts.update(_make_prediction_figures(pdata, forecast_from))
 
     # Per-inverter optimization tabs
     _plotter = SolutionPlotter()
