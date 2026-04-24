@@ -141,7 +141,7 @@ class MQTTGateway:
 
 ## MQTT Topic Structure
 
-```
+```text
 gridpythia/
 ├── inverter/
 │   ├── {device_id}/
@@ -159,7 +159,7 @@ gridpythia/
 
 ## Data Flow: Optimization Cycle
 
-```
+```text
 1. SchedulerService triggers every N minutes
        │
        ▼
