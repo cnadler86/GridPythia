@@ -58,7 +58,7 @@ class PredictionCache:
 
     def get(self) -> tuple[PredictionData, datetime | None] | None:
         """Return cached data if valid, else None."""
-        if self.is_valid():
+        if self.is_valid() and self.data is not None:
             return self.data, self.forecast_from
         return None
 

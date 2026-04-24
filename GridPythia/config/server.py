@@ -46,6 +46,19 @@ class ServerConfig(BaseModel):
 
     model_config = {"frozen": True}
 
+    bind_host: str = Field(
+        default="127.0.0.1",
+        description=(
+            "Host/IP used by the web server bind. Use 0.0.0.0 to listen on all interfaces."
+        ),
+    )
+    bind_port: int = Field(
+        default=8080,
+        ge=1,
+        le=65535,
+        description="TCP port used by the web server bind.",
+    )
+
     inverter_status_max_age_s: float = Field(
         default=300.0,
         gt=0.0,

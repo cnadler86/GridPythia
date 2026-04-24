@@ -543,7 +543,8 @@ class SolutionPlotter:
 
         # ── row 2: mode background + SoC line + power bars ───────────
         if has_battery:
-            assert plan is not None, "plan should not be None when has_battery is True"
+            if plan is None:
+                raise ValueError("plan should not be None when has_battery is True")
             _add_mode_backgrounds(fig, timestamps, plan.modes, dt_hours, row=2, n_rows=2)
 
             # SoC is an end-of-interval state. Shift the curve one dt to the right,

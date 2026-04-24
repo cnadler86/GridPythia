@@ -12,7 +12,7 @@ If you mainly want to run the server and open the dashboard, this is enough:
 
 ```bash
 # From repo root (venv active)
-python -m utils.webgui --port 8080
+python -m main --port 8080
 ```
 
 Then open:
@@ -30,10 +30,10 @@ What happens automatically in the dashboard:
 
 ```bash
 # From the repo root (venv already active):
-python -m utils.webgui
+python -m main
 
 # Custom config or port:
-python -m utils.webgui --config /path/to/config.yaml --port 8080
+python -m main --config /path/to/config.yaml --port 8080
 
 # Then open: http://localhost:8080
 ```
@@ -41,10 +41,10 @@ python -m utils.webgui --config /path/to/config.yaml --port 8080
 Interactive API docs: **`http://localhost:8080/api/docs`**
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ----------- |
 | `--config PATH` | `config.yaml` | Path to the YAML configuration file |
-| `--host HOST` | `0.0.0.0` | Bind address |
-| `--port PORT` | `8080` | TCP port |
+| `--host HOST` | `server.bind_host` | Bind address (CLI override) |
+| `--port PORT` | `server.bind_port` | TCP port (CLI override) |
 | `--reload` | off | Auto-reload on code changes (dev only) |
 
 ---
@@ -132,6 +132,11 @@ optimization:
 
 ```yaml
 server:
+  # Web server bind. Set to your LAN IP for direct device access,
+  # or use 0.0.0.0 to listen on all interfaces.
+  bind_host: "127.0.0.1"
+  bind_port: 8080
+
   # Optimization is blocked when any optimisable inverter's last status
   # report is older than this value (seconds).
   inverter_status_max_age_s: 300   # 5 minutes
@@ -164,7 +169,7 @@ REST call — from your home-automation system, a cron job, or an MQTT bridge.
 Call this whenever your inverter publishes a new state (once per minute is
 usually sufficient).
 
-**Request**
+### Request
 
 ```http
 POST /api/inverters/SF800Pro/status
@@ -177,11 +182,11 @@ Content-Type: application/json
 ```
 
 | Field | Type | Required | Description |
-|-------|------|----------|--------------|
+| ------- | ------ | ---------- | ----------- |
 | `soc` | float | ✅ | Battery SoC in % `[0–100]` |
 | `mode` | int | — | Active mode (default `0` = IDLE). See [Inverter modes](#inverter-modes). |
 
-**Response `200 OK`**
+### Response `200 OK`
 
 ```json
 {
@@ -249,12 +254,14 @@ rest_command:
 ## Endpoints overview
 
 | Method | Path | Description |
-|--------|------|-------------|
+| -------- | ------ | ----------- |
 | `GET` | `/api/config` | UI bootstrap: batteries, inverters, horizon settings |
 | `GET` | `/api/predictions/status` | Cache age and TTL |
 | `POST` | `/api/predictions/fetch` | Fetch all forecast channels; returns Plotly charts |
 | `POST` | `/api/inverters/{device_id}/status` | Report inverter SoC + mode |
 | `GET` | `/api/inverters/status` | All known inverter states |
+| `GET` | `/api/optimize/status` | Optimization cache age and TTL |
+| `GET` | `/api/optimize` | Get last cached optimization result |
 | `POST` | `/api/optimize` | Run MILP optimizer; returns schedule + charts |
 
 ---
@@ -265,13 +272,15 @@ Fetches electricity price, PV forecast, load, and (optionally) weather.
 Results are cached for `prediction_cache_ttl_s` (default 5 min) and reused by
 `/api/optimize` if called shortly after.
 
-**Request**
+### Fetch request
 
 ```json
 { "timezone": "Europe/Berlin" }
 ```
 
-**Response** – `charts` maps tab-id → Plotly figure JSON:
+### Fetch response
+
+`charts` maps tab-id → Plotly figure JSON:
 
 ```json
 {
@@ -291,7 +300,7 @@ Results are cached for `prediction_cache_ttl_s` (default 5 min) and reused by
 
 Runs the MILP optimizer and returns the full schedule.
 
-**Request**
+### Optimizer request
 
 ```json
 {
@@ -303,12 +312,12 @@ Runs the MILP optimizer and returns the full schedule.
 ```
 
 | Field | Description |
-|-------|-------------|
+| ------- | ----------- |
 | `battery_soc` | Override SoC per battery in % (keyed by `battery_id`). If omitted, uses the last value from `/api/inverters/{id}/status`, or `initial_soc_percentage` from config as fallback. |
 | `initial_modes` | Override starting mode per inverter (keyed by `inverter_id`). Defaults to `IDLE (0)`. |
 | `solver_opts` | Per-call HiGHS options, merged over config defaults. |
 
-**Response**
+### Optimizer response
 
 ```json
 {
@@ -351,7 +360,7 @@ Each step covers one `dt_hours` slot (e.g. 15 min = 0.25 h).  All energy values 
 in **Wh for that slot** (not W).
 
 | Field | What it means |
-|-------|---------------|
+| ------- | ------------- |
 | `mode` | What the inverter should do in this slot. See table below. |
 | `discharge_ac_wh` | Energy drawn from battery, delivered to home load (after inverter losses). |
 | `charge_ac_wh` | Energy drawn from the grid to charge the battery (before battery losses). |
@@ -369,7 +378,7 @@ flat price profile).
 ## Inverter modes
 
 | Value | Name | Description |
-|-------|------|-------------|
+| ------- | ------ | ------------- |
 | `0` | `IDLE` | Battery is passive; PV flows directly to load |
 | `1` | `DISCHARGE` | Battery discharges; excess may feed into the grid |
 | `2` | `DISCHARGE_ZERO_FEED_IN` | Battery discharges; zero export to grid |
@@ -380,7 +389,7 @@ flat price profile).
 
 ## Architecture notes
 
-```
+```text
 GridPythia/server/
 ├── app.py               # FastAPI app factory
 ├── state.py             # Request-shared singletons (providers, optimizer, coordinator)
@@ -401,7 +410,6 @@ GridPythia/server/
   It is updated by `POST /api/inverters/{id}/status` and read by `POST /api/optimize`.
 - The **prediction cache** avoids double-fetching when the dashboard calls
   `/predictions/fetch` and then `/optimize` in quick succession.
-
 
 ---
 
@@ -424,7 +432,7 @@ GridPythia/server/
     └── index.html       # Single-page frontend (pure HTML/JS/CSS, no server-side templating)
 ```
 
-**Design principles**
+### Design principles
 
 - The frontend (`index.html`) is a fully static file.  It bootstraps by calling `GET /api/config`
   on page load and constructs all UI elements (battery inputs, inverter info, tabs) from that
@@ -439,18 +447,19 @@ GridPythia/server/
 ## Running
 
 ```bash
-uv run python -m utils.webgui
+# start the server (venv active)
+python -m main
 # then open http://localhost:8080
 ```
 
 Options:
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------------------- | ------------------------ | ------------- |
 | `--config PATH` | `config.yaml` in repo root | Path to YAML configuration file |
-| `--host HOST`   | `0.0.0.0` | Bind address |
-| `--port PORT`   | `8080`    | TCP port |
-| `--reload`      | off       | Enable uvicorn auto-reload (dev only) |
+| `--host HOST` | `server.bind_host` | Bind address (CLI override) |
+| `--port PORT` | `server.bind_port` | TCP port (CLI override) |
+| `--reload` | off | Enable uvicorn auto-reload (dev only) |
 
 Interactive API docs are available at **`/api/docs`** (Swagger UI) and **`/api/redoc`** (ReDoc).
 
@@ -462,7 +471,7 @@ Interactive API docs are available at **`/api/docs`** (Swagger UI) and **`/api/r
 
 Returns UI bootstrap data.  Called once on page load.
 
-**Response** `200 OK`
+#### Config response `200 OK`
 
 ```json
 {
@@ -498,7 +507,7 @@ Returns UI bootstrap data.  Called once on page load.
 
 Returns the current state of the server-side prediction cache.
 
-**Response** `200 OK`
+#### Status response `200 OK`
 
 ```json
 {
@@ -515,12 +524,12 @@ EnergyCharts provider is not configured.
 
 ---
 
-### `POST /api/predictions/fetch`
+### `POST /api/predictions/fetch` (detailed)
 
 Fetches all forecast channels and returns Plotly figure JSON.
 Serves from the server-side 5-minute cache when available.
 
-**Request body**
+#### Fetch request body
 
 ```json
 {
@@ -529,10 +538,10 @@ Serves from the server-side 5-minute cache when available.
 ```
 
 | Field | Type | Default | Description |
-|-------|------|---------|-------------|
+| ------- | ------ | --------- | ----------- |
 | `timezone` | string | `"UTC"` | IANA timezone name for the forecast start time |
 
-**Response** `200 OK`
+#### Fetch response body
 
 ```json
 {
@@ -553,11 +562,11 @@ when weather is configured.
 
 ---
 
-### `POST /api/optimize`
+### `POST /api/optimize` (detailed)
 
 Runs the MILP energy optimizer and returns the full solution together with Plotly charts.
 
-**Request body**
+#### Optimizer request body
 
 ```json
 {
@@ -576,13 +585,13 @@ Runs the MILP energy optimizer and returns the full solution together with Plotl
 ```
 
 | Field | Type | Default | Description |
-|-------|------|---------|-------------|
+| ------- | ------ | --------- | ----------- |
 | `timezone` | string | `"UTC"` | IANA timezone for forecast start |
 | `battery_soc` | `{battery_id: float}` | `{}` | Battery SoC overrides in % `[0, 100]`.  Clamped to `[min_soc, max_soc]`. |
-| `initial_modes` | `{inverter_id: int}` | `{}` | Inverter mode at the start of the horizon. See [InverterMode](#invertermodes). Defaults to `IDLE (0)`. |
-| `solver_opts` | object \| null | `null` | HiGHS option overrides for this call only, merged over config defaults. |
+| `initial_modes` | `{inverter_id: int}` | `{}` | Inverter mode at the start of the horizon. See [InverterMode](#inverter-modes). Defaults to `IDLE (0)`. |
+| Field | Type | Default | Description |
 
-**Response** `200 OK`
+#### Optimizer response body
 
 ```json
 {
@@ -625,10 +634,10 @@ Runs the MILP energy optimizer and returns the full solution together with Plotl
 }
 ```
 
-**`summary` fields**
+#### `summary` fields
 
 | Field | Description |
-|-------|-------------|
+| ------- | ----------- |
 | `solver_status` | HiGHS status string (`"optimal"`, `"optimal_inaccurate"`, `"user_limit"`) |
 | `solve_time_s` | Wall-clock seconds spent inside the solver |
 | `objective` | Objective function used (`"cost"` or `"self_consumption"`) |
@@ -639,12 +648,12 @@ Runs the MILP energy optimizer and returns the full solution together with Plotl
 | `savings_eur` | `naive_net_cost_eur - net_cost_eur` |
 | `parity_ok` | `true` when the LP solution matches a GridSimulation replay within tolerances; `null` when parity checking was skipped |
 
-**`inverter_plans[].steps[]` fields**
+#### `inverter_plans[].steps[]` fields
 
 | Field | Unit | Description |
-|-------|------|-------------|
+| ------- | ------ | ----------- |
 | `timestamp` | ISO 8601 | Wall-clock start of this time slot |
-| `mode` | int | [InverterMode](#invertermodes) integer |
+| `mode` | int | [InverterMode](#inverter-modes) integer |
 | `mode_name` | string | Human-readable mode name |
 | `charge_ac_wh` | Wh | AC energy drawn from grid to charge battery |
 | `discharge_ac_wh` | Wh | AC energy delivered from battery to home |
@@ -654,30 +663,22 @@ Runs the MILP energy optimizer and returns the full solution together with Plotl
 
 ---
 
-## InverterModes
-
-| Value | Name | Description |
-|-------|------|-------------|
-| `0` | `IDLE` | No active charging or discharging |
-| `1` | `DISCHARGE` | Battery discharges to cover home load and/or feed into grid |
-| `2` | `DISCHARGE_ZERO_FEED_IN` | Discharge with zero-feed-in limit (no export to grid) |
-| `3` | `AC_CHARGE` | Charge battery from grid |
-| `4` | `AC_CHARGE_ZERO_FEED_IN` | Charge from grid with zero-feed-in limit |
-
----
-
 ## Singleton State and Caching
 
 The server maintains three singleton objects that survive across HTTP requests:
 
 | Object | Location | Rebuilt when |
-|--------|----------|--------------|
+| -------- | ---------- | -------------- |
 | Provider instances | `state.providers` | Config file `mtime` changes |
 | `LinearOptimizer` (compiled CVXPY model) | `state.optimizer` | Config file `mtime` changes |
 | `PredictionData` cache | `state.pdata_cache` | Older than 5 minutes (TTL) |
 
 The prediction cache avoids double-fetching from external APIs when `/api/predictions/fetch`
 and `/api/optimize` are called in quick succession (the standard UI flow).
+
+Optimization results are cached server-side as well, so the dashboard can
+restore the last solution after reopening. Use `/api/optimize/status` to
+inspect cache metadata and `/api/optimize` (GET) to retrieve the cached payload.
 
 The optimizer singleton preserves the compiled CVXPY problem structure across calls.
 Only the runtime Parameters (price arrays, battery start SoC, initial modes) are updated per

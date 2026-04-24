@@ -3,6 +3,7 @@
 import pytest
 
 from GridPythia.prediction.registry import (
+    ProviderProtocol,
     ProviderRegistry,
     electricprice_registry,
     feedintariff_registry,
@@ -16,42 +17,50 @@ from GridPythia.prediction.registry import (
 class TestProviderRegistry:
     """Test the generic ProviderRegistry class."""
 
+    class _DummyProvider(ProviderProtocol):
+        def __init__(self, value: int = 0):
+            self.value = value
+
+        @property
+        def provider_id(self) -> str:
+            return "dummy"
+
     def test_register_and_create(self):
         """Test registering and creating a provider."""
-        registry: ProviderRegistry[object] = ProviderRegistry(_category="test")
+        registry: ProviderRegistry[TestProviderRegistry._DummyProvider] = ProviderRegistry(
+            _category="test"
+        )
 
-        class DummyProvider:
-            def __init__(self, value: int):
-                self.value = value
-
-            @property
-            def provider_id(self) -> str:
-                return "dummy"
-
-        registry.register("Dummy", lambda cfg: DummyProvider(cfg.get("value", 0)))
+        registry.register("Dummy", lambda cfg: self._DummyProvider(cfg.get("value", 0)))
 
         provider = registry.create("Dummy", {"value": 42})
         assert provider.value == 42
 
     def test_unknown_provider_raises(self):
         """Test that creating an unknown provider raises KeyError."""
-        registry: ProviderRegistry[object] = ProviderRegistry(_category="test")
+        registry: ProviderRegistry[TestProviderRegistry._DummyProvider] = ProviderRegistry(
+            _category="test"
+        )
 
         with pytest.raises(KeyError, match="Unknown test provider 'NotExists'"):
             registry.create("NotExists", {})
 
     def test_available_providers(self):
         """Test listing available providers."""
-        registry: ProviderRegistry[object] = ProviderRegistry(_category="test")
-        registry.register("A", lambda cfg: object())
-        registry.register("B", lambda cfg: object())
+        registry: ProviderRegistry[TestProviderRegistry._DummyProvider] = ProviderRegistry(
+            _category="test"
+        )
+        registry.register("A", lambda cfg: self._DummyProvider())
+        registry.register("B", lambda cfg: self._DummyProvider())
 
         assert set(registry.available()) == {"A", "B"}
 
     def test_is_registered(self):
         """Test checking if a provider is registered."""
-        registry: ProviderRegistry[object] = ProviderRegistry(_category="test")
-        registry.register("Exists", lambda cfg: object())
+        registry: ProviderRegistry[TestProviderRegistry._DummyProvider] = ProviderRegistry(
+            _category="test"
+        )
+        registry.register("Exists", lambda cfg: self._DummyProvider())
 
         assert registry.is_registered("Exists") is True
         assert registry.is_registered("NotExists") is False

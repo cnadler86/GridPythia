@@ -52,7 +52,7 @@ def test_fixture_solution_matches_regression_signature() -> None:
 def test_rolling_horizon_auto_roll_aligns_modes() -> None:
     """Two consecutive solves with shifted timestamps should both succeed and
     the optimizer should auto-roll the warm-start plan by the correct number of steps."""
-    from profile_rolling_horizon import slice_prediction
+    from utils.profile_rolling_horizon import slice_prediction
 
     scenario = load_solver_fixture_scenario()
     pred = scenario.prediction

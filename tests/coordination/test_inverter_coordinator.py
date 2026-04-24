@@ -82,7 +82,9 @@ class TestInverterCoordinator:
     def test_mode_as_int(self):
         coord = InverterCoordinator()
         coord.update_status("inv1", soc=50.0, mode=2)  # DISCHARGE_ZFI
-        assert coord.get_state("inv1").mode == InverterMode.DISCHARGE_ZERO_FEED_IN
+        state = coord.get_state("inv1")
+        assert state is not None
+        assert state.mode == InverterMode.DISCHARGE_ZERO_FEED_IN
 
     def test_snapshot_is_copy(self):
         coord = InverterCoordinator()

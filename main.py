@@ -20,9 +20,20 @@ from structlog import get_logger
 
 logger = get_logger(__name__)
 
-_DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config.yaml"
+_DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.yaml"
+_DEFAULT_HOST = "127.0.0.1"
+_DEFAULT_PORT = 8080
+_DEFAULT_LOG_LEVEL = "warning"
 # Module-level app reference used by uvicorn when --reload is active.
 _reload_config_path: Path = _DEFAULT_CONFIG
+
+
+def _load_bind_from_config(config_path: Path) -> tuple[str, int]:
+    """Load bind host/port defaults from AppConfig server section."""
+    from GridPythia.config import AppConfig
+
+    cfg = AppConfig.from_yaml_file(config_path)
+    return cfg.server.bind_host, cfg.server.bind_port
 
 
 def _make_app():  # -> FastAPI (imported lazily to keep this module light)
@@ -42,12 +53,22 @@ def run() -> None:
         default=str(_DEFAULT_CONFIG),
         help="Path to config.yaml (default: %(default)s)",
     )
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8080, help="TCP port (default: 8080)")
+    parser.add_argument(
+        "--host", default=None, help="Bind address (overrides config server.bind_host)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="TCP port (overrides config server.bind_port)",
+    )
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload (dev mode)")
     args = parser.parse_args()
 
     _reload_config_path = Path(args.config).expanduser().resolve()
+    cfg_host, cfg_port = _load_bind_from_config(_reload_config_path)
+    bind_host = args.host or cfg_host or _DEFAULT_HOST
+    bind_port = args.port if args.port is not None else cfg_port
 
     import structlog
 
@@ -67,26 +88,26 @@ def run() -> None:
     import uvicorn
 
     logger.info(
-        "webgui_starting", config=str(_reload_config_path), url=f"http://localhost:{args.port}"
+        "app_starting", config=str(_reload_config_path), url=f"http://{bind_host}:{bind_port}"
     )
 
     if args.reload:
         uvicorn.run(
-            "utils.webgui:_make_app",
+            "main:_make_app",
             factory=True,
-            host=args.host,
-            port=args.port,
+            host=bind_host,
+            port=bind_port,
             reload=True,
-            log_level="warning",
+            log_level=_DEFAULT_LOG_LEVEL,
         )
     else:
         from GridPythia.server import create_app
 
         uvicorn.run(
             create_app(_reload_config_path),
-            host=args.host,
-            port=args.port,
-            log_level="warning",
+            host=bind_host,
+            port=bind_port,
+            log_level=_DEFAULT_LOG_LEVEL,
         )
 
 

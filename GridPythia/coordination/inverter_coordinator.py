@@ -159,7 +159,7 @@ def next_optimization_slot(
     now: datetime,
     interval_minutes: int = 15,
 ) -> datetime:
-    """Return the next optimization slot aligned to the hour boundary.
+    r"""Return the next optimization slot aligned to the hour boundary.
 
     Grid slots are defined as :math:`0, N, 2N, \\ldots` minutes past the hour
     where *N* = ``interval_minutes``.  Fires *at* the boundary (not before).

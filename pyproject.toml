@@ -30,11 +30,16 @@ dev = [
     "pytest-cov",
     "matplotlib",
     "ty",
+    "ruff>=0.15.11",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["GridPythia*"]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple/"
+default = true
 # where = ["GridPythia"]
 # include = ["*"]
 
