@@ -1153,6 +1153,7 @@ class LinearOptimizer:
         losses_arr = np.zeros(T, dtype=float)
         battery_wh_per_dt: dict[str, np.ndarray] = {}
         battery_soc_pct: dict[str, np.ndarray] = {}
+        battery_initial_soc_pct: dict[str, float] = {}
         inv_modes_per_dt: dict[str, np.ndarray] = {}
         inverter_plans: list[InverterPlan] = []
 
@@ -1167,6 +1168,8 @@ class LinearOptimizer:
 
             if inv.battery is not None and block.soc is not None:
                 bat = inv.battery
+                soc0_wh = float(self._soc_init_params[inv_id].value or bat.soc_wh)
+                battery_initial_soc_pct[inv_id] = float(soc0_wh * (100.0 / bat.capacity_wh))
                 soc_vals = np.maximum(np.asarray(block.soc.value, dtype=float), 0.0)
                 battery_soc_wh = np.asarray(soc_vals, dtype=np.float32)
                 battery_wh_per_dt[inv_id] = np.asarray(soc_vals, dtype=np.float32)
@@ -1211,6 +1214,7 @@ class LinearOptimizer:
             inverter_modes_per_dt=inv_modes_per_dt,
             battery_wh_per_dt=battery_wh_per_dt,
             battery_soc_percentage_per_dt=battery_soc_pct,
+            battery_initial_soc_percentage=battery_initial_soc_pct,
         )
 
         return LinearSolution(
