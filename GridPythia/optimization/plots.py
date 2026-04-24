@@ -13,6 +13,7 @@ Typical usage::
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -322,12 +323,23 @@ class SolutionPlotter:
         soc_row = 2 if has_soc else None
         if soc_row is not None:
             _COLORS_SOC = [_C_SOC, "#6A1B9A", "#E65100", "#2E7D32"]
+            dt_td = timedelta(hours=float(solution.prediction.dt_hours))
             for idx, (inv_id, soc_arr) in enumerate(result.battery_soc_percentage_per_dt.items()):
                 color = _COLORS_SOC[idx % len(_COLORS_SOC)]
+                soc_vals = np.asarray(soc_arr, dtype=float)
+                if len(timestamps) and soc_vals.size:
+                    init_soc = float(
+                        result.battery_initial_soc_percentage.get(inv_id, float(soc_vals[0]))
+                    )
+                    soc_plot = np.concatenate(([init_soc], soc_vals))
+                    x_plot = [timestamps[0]] + [ts + dt_td for ts in timestamps]
+                else:
+                    soc_plot = soc_vals
+                    x_plot = timestamps
                 fig.add_trace(
                     go.Scatter(
-                        x=timestamps,
-                        y=np.asarray(soc_arr).tolist(),
+                        x=x_plot,
+                        y=soc_plot.tolist(),
                         name=f"SoC {inv_id}",
                         mode="lines",
                         line={"color": color, "width": 1.8},
@@ -538,22 +550,17 @@ class SolutionPlotter:
             # while keeping an initial anchor at the first timestamp.
             soc_array = np.asarray(result.battery_soc_percentage_per_dt[inv_device_id])
 
-            # Calculate initial SoC: if first SoC is available, estimate initial as slightly higher
-            # (or use the constraint from the plan). For now, use a reasonable estimate.
             if len(soc_array) > 0:
-                # The first element is SoC after first step; estimate initial SoC
-                # by assuming it started at or near this level (in absence of better data,
-                # use the first value itself as a proxy for "starting" SoC display)
-                initial_soc_est = soc_array[0]
-                soc_shifted = np.concatenate([[initial_soc_est], soc_array])
+                initial_soc = float(
+                    result.battery_initial_soc_percentage.get(inv_device_id, soc_array[0])
+                )
+                soc_shifted = np.concatenate([[initial_soc], soc_array])
             else:
                 soc_shifted = soc_array
 
             # Create shifted time axis: first point at t0 (initial anchor),
             # then end-of-slot states at t + dt.
             if timestamps:
-                from datetime import timedelta
-
                 dt_td = timedelta(hours=dt_hours)
                 timestamps_shifted = [timestamps[0]] + [ts + dt_td for ts in timestamps]
             else:

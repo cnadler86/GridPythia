@@ -15,6 +15,25 @@ class FetchRequest(BaseModel):
     timezone: str = Field("UTC", description="IANA timezone name for the forecast start time")
 
 
+class InverterStatusRequest(BaseModel):
+    """Request body for ``POST /api/inverters/{device_id}/status``."""
+
+    soc: float = Field(..., ge=0.0, le=100.0, description="Battery state-of-charge in %")
+    mode: int = Field(0, ge=0, le=4, description="Active InverterMode (0=IDLE … 4=AC_CHARGE_ZFI)")
+
+
+class InverterStatusResponse(BaseModel):
+    """Response for ``GET /api/inverters/status``."""
+
+    device_id: str
+    soc: float
+    mode: int
+    mode_name: str
+    reported_at: str  # ISO 8601
+    age_s: float
+    is_fresh: bool
+
+
 class OptimizeRequest(BaseModel):
     """Request body for ``POST /api/optimize``."""
 
@@ -75,6 +94,9 @@ class AppConfigResponse(BaseModel):
     horizon_h: float
     dt_min: int
     objective: str
+    optimization_interval_min: int = 15
+    inverter_status_max_age_s: float = 300.0
+    mqtt_enabled: bool = False
 
 
 # ── Prediction status response ────────────────────────────────────────────
@@ -87,6 +109,17 @@ class PredictionsStatusResponse(BaseModel):
     age_s: float | None = None
     ttl_s: float
     forecast_from: str | None = None
+
+
+# ── Optimization status response ──────────────────────────────────────────
+
+
+class OptimizeStatusResponse(BaseModel):
+    """Cache status returned by ``GET /api/optimize/status``."""
+
+    has_cache: bool
+    age_s: float | None = None
+    ttl_s: float
 
 
 # ── Optimization response ─────────────────────────────────────────────────

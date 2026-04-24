@@ -20,6 +20,11 @@ from GridPythia.prediction.weather.provider import WeatherProvider
 logger = get_logger(__name__)
 
 
+async def _return(value):
+    """Trivial awaitable that immediately returns *value*."""
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class PredictionSolverView:
     """Dense numeric prediction view for solver-style consumers."""
@@ -484,3 +489,113 @@ class Prediction:
             pv_by_inverter=pv_arrays,
             weather_by_channel=weather_dict,
         )
+
+    async def fetch_partial(
+        self,
+        start: datetime | None = None,
+        hours: int | float = 24,
+        dt_hours: float = 1.0,
+    ) -> "tuple[PredictionData, dict[str, str]]":
+        """Like :meth:`fetch` but tolerates individual provider failures.
+
+        Each provider is fetched independently.  Failures are collected in
+        *errors* (provider_id → error message) and the remaining channels
+        are returned as a :class:`PredictionData` with zeros for the failed
+        ones.
+
+        Returns:
+            ``(PredictionData, errors)`` where *errors* is empty on full success.
+        """
+        requested_start = self._normalize_start(start)
+        timestamps, _ = self._build_aligned_timestamps(requested_start, hours, dt_hours)
+        n = len(timestamps)
+        internet_ts = self._to_utc_timestamps(timestamps)
+        errors: dict[str, str] = {}
+
+        async def _safe(coro, provider_id: str, fallback):
+            try:
+                return await coro
+            except Exception as exc:  # noqa: BLE001
+                errors[provider_id] = str(exc)
+                logger.warning("provider_fetch_failed", provider=provider_id, error=str(exc))
+                return fallback
+
+        zeros = np.zeros(n, dtype=np.float32)
+
+        eprice = await _safe(
+            self.setup.electricprice.fetch(internet_ts)
+            if self.setup.electricprice
+            else _return(zeros),
+            getattr(self.setup.electricprice, "provider_id", "electricprice"),
+            zeros.copy(),
+        )
+        ftariff = await _safe(
+            self.setup.feedintariff.fetch(internet_ts)
+            if self.setup.feedintariff
+            else _return(zeros),
+            getattr(self.setup.feedintariff, "provider_id", "feedintariff"),
+            zeros.copy(),
+        )
+        load_wh = await _safe(
+            self.setup.load.fetch(timestamps) if self.setup.load else _return(zeros),
+            getattr(self.setup.load, "provider_id", "load"),
+            zeros.copy(),
+        )
+
+        pv_names = list(self.setup.pv)
+        pv_arrays: dict[str, np.ndarray] = {}
+        for name in pv_names:
+            result = await _safe(
+                self.setup.pv[name].fetch_by_inverter(internet_ts),
+                self.setup.pv[name].provider_id,
+                None,
+            )
+            if result is not None and isinstance(result, Mapping):
+                for inv_id, arr in result.items():
+                    pv_arrays[str(inv_id)] = np.asarray(arr, dtype=np.float32)
+
+        weather_dict: dict[str, np.ndarray] | None = None
+        if self.setup.weather:
+            wraw = await _safe(
+                self.setup.weather.fetch(internet_ts),
+                self.setup.weather.provider_id,
+                None,
+            )
+            if wraw is not None and isinstance(wraw, Mapping):
+                weather_dict = {str(k): np.asarray(v, dtype=np.float32) for k, v in wraw.items()}
+
+        # Load is required; if it failed, substitute zeros and keep error
+        eprice = self._validate_series("electricprice_eur_wh", eprice, n)
+        ftariff = self._validate_series("feedintariff_eur_wh", ftariff, n)
+        try:
+            load_wh = self._validate_series("load_wh", load_wh, n)
+        except Exception:
+            load_wh = zeros.copy()
+
+        logger.info(
+            "prediction_fetch_partial_complete",
+            steps=n,
+            failed=list(errors.keys()),
+            ok_channels=[
+                c
+                for c in [
+                    "electricprice",
+                    "feedintariff",
+                    "load",
+                    *pv_arrays,
+                    *(weather_dict or {}),
+                ]
+                if c not in errors
+            ],
+        )
+
+        return PredictionData(
+            requested_start=requested_start,
+            timestamps=timestamps,
+            dt_hours=dt_hours,
+            load_wh=load_wh,
+            electricprice_eur_wh=eprice,
+            feedintariff_eur_wh=ftariff,
+            pv_by_inverter=pv_arrays,
+            weather_by_channel=weather_dict,
+        ), errors

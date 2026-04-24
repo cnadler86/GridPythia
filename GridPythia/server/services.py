@@ -204,6 +204,8 @@ def get_optimizer(cfg: AppConfig) -> LinearOptimizer:
             solver_opts=dict(cfg.optimization.solver.solver_opts),
         )
         state.optimizer_config_mtime = mtime
+        # Sync coordinator max-age from server config
+        state.coordinator._max_age_s = cfg.server.inverter_status_max_age_s
         logger.info("optimizer_rebuilt")
     return state.optimizer
 
@@ -225,6 +227,25 @@ def set_cached_pdata(pdata: PredictionData, forecast_from: datetime | None) -> N
     state.pdata_cache = pdata
     state.pdata_cache_ts = datetime.now()
     state.pdata_forecast_from = forecast_from
+
+
+# ── Solution cache ───────────────────────────────────────────────────────
+
+
+def get_cached_solution() -> dict | None:
+    """Return cached solution when fresh, else None."""
+    if state.solution_cache is None or state.solution_cache_ts is None:
+        return None
+    age = (datetime.now() - state.solution_cache_ts).total_seconds()
+    if age >= state.SOLUTION_CACHE_TTL_S:
+        return None
+    return state.solution_cache
+
+
+def set_cached_solution(solution_dict: dict) -> None:
+    """Store solution JSON and timestamp."""
+    state.solution_cache = solution_dict
+    state.solution_cache_ts = datetime.now()
 
 
 # ── SoC override mapping ──────────────────────────────────────────────────

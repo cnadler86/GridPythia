@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 # Colour palette shared across all plotters (Plotly-compatible hex strings).
@@ -50,14 +50,36 @@ def add_forecast_region(fig: Any, forecast_from: datetime, timestamps: list[date
     The shaded region starts at *forecast_from* and extends to the last
     timestamp.  Nothing is drawn when *forecast_from* is after the last
     timestamp (no forecasted values in this window).
+
+    Timezone handling: *forecast_from* is compared and passed to Plotly in the
+    same timezone as *timestamps* to avoid mixed-offset positioning issues.
     """
     if not timestamps:
         return
     last_ts = timestamps[-1]
-    if forecast_from >= last_ts:
+
+    # Normalise forecast_from to the same timezone as the plot's x-axis so that
+    # Plotly places the vrect at the correct position regardless of whether the
+    # timestamps are UTC or local.
+    plot_tz = last_ts.tzinfo if last_ts.tzinfo is not None else timezone.utc
+    ff_normalised = (
+        forecast_from.astimezone(plot_tz)
+        if forecast_from.tzinfo is not None
+        else forecast_from.replace(tzinfo=timezone.utc).astimezone(plot_tz)
+    )
+
+    # If the last real data point is at or after the last timestamp there is
+    # nothing to shade.
+    if ff_normalised >= last_ts:
         return
+
+    # Clamp to the first timestamp so we don't draw outside the plot area.
+    first_ts = timestamps[0]
+    if ff_normalised <= first_ts:
+        return
+
     fig.add_vrect(
-        x0=forecast_from,
+        x0=ff_normalised,
         x1=last_ts,
         fillcolor=FORECAST_FILL_COLOR,
         line={"color": FORECAST_LINE_COLOR, "width": 1, "dash": "dot"},

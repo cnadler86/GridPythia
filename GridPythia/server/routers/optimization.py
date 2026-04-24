@@ -17,7 +17,7 @@ from GridPythia.optimization.solution import OptimizationObjective
 from GridPythia.prediction.electricprice.energycharts import ElecPriceEnergyCharts
 from GridPythia.prediction.prediction import Prediction
 from GridPythia.server import services
-from GridPythia.server.models import OptimizeRequest, OptimizeSummary
+from GridPythia.server.models import OptimizeRequest, OptimizeStatusResponse, OptimizeSummary
 
 logger = get_logger(__name__)
 
@@ -186,11 +186,49 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
         savings_eur=round(savings, 3),
     )
 
-    return JSONResponse(
-        {
-            "summary": summary.model_dump(),
-            "inverter_plans": [p.model_dump() for p in inverter_plans],
-            "charts": charts,
-            "status": status,
-        }
+    response_data = {
+        "summary": summary.model_dump(),
+        "inverter_plans": [p.model_dump() for p in inverter_plans],
+        "charts": charts,
+        "status": status,
+    }
+
+    # Cache the solution for reuse when navigating back
+    services.set_cached_solution(response_data)
+
+    return JSONResponse(response_data)
+
+
+@router.get("/optimize/status")
+async def optimize_status() -> OptimizeStatusResponse:
+    """Return cache status and metadata (not the full solution).
+
+    **Response fields**
+
+    - ``has_cache`` – whether a cached solution exists and is still fresh.
+    - ``age_s`` – seconds since the last optimization (None if no cache).
+    - ``ttl_s`` – cache time-to-live in seconds.
+    """
+    cached = services.get_cached_solution()
+    if cached is None:
+        return OptimizeStatusResponse(has_cache=False, age_s=None, ttl_s=state.SOLUTION_CACHE_TTL_S)
+
+    age_s = (
+        (datetime.now() - state.solution_cache_ts).total_seconds()
+        if state.solution_cache_ts is not None
+        else None
     )
+
+    return OptimizeStatusResponse(has_cache=True, age_s=age_s, ttl_s=state.SOLUTION_CACHE_TTL_S)
+
+
+@router.get("/optimize")
+async def get_cached_optimize() -> JSONResponse:
+    """Return the cached optimization result if available.
+
+    Returns 204 (No Content) if no cache exists or cache is stale.
+    """
+    cached = services.get_cached_solution()
+    if cached is None:
+        return JSONResponse({"error": "No cached solution available"}, status_code=204)
+    return JSONResponse(cached)

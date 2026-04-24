@@ -19,6 +19,7 @@ FallbackProvider) to switch to alternative providers.
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
 import aiohttp
@@ -101,6 +102,8 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         self._cache_end_day: date | None = None
         self._min_history_points = 8
         self._lock = asyncio.Lock()
+        # Dedicated single-thread executor for CPU-bound statsmodels ETS fitting.
+        self._thread_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ets_")
 
     @property
     def provider_id(self) -> str:
@@ -127,7 +130,7 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
             "end": end.strftime("%Y-%m-%dT%H:%M"),
         }
 
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=120)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, params=params) as resp:
                 resp.raise_for_status()
@@ -152,7 +155,12 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
     # ── ETS / fallback ────────────────────────────────────────────────
 
     def _forecast(self, history: list[float], steps: int) -> list[float]:
-        """Extend *history* by *steps* 15-minute intervals using ETS or median."""
+        """Extend *history* by *steps* 15-minute intervals using ETS or median.
+
+        This is the synchronous implementation, called directly from tests or via
+        :meth:`_forecast_async` in production (runs in a thread-pool executor to
+        avoid blocking the event loop during the CPU-bound statsmodels fit).
+        """
         try:
             from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
@@ -183,6 +191,11 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         med = median(history) if history else 0.0
         # Floor median fallback at 0.0 as well
         return [max(0.0, med)] * steps
+
+    async def _forecast_async(self, history: list[float], steps: int) -> list[float]:
+        """Run :meth:`_forecast` in a thread-pool executor (non-blocking)."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._thread_pool, self._forecast, history, steps)
 
     # ── cache management ──────────────────────────────────────────────
 
@@ -257,16 +270,16 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         map_start: datetime,
         horizon_end: datetime,
         fallback_map: dict[int, float],
-    ) -> tuple[dict[int, float], int, int, int]:
+        forecast: list[float] | None = None,
+    ) -> tuple[dict[int, float], list[float], list[int], int, int, int]:
         """Build a complete 15-minute map for ``[map_start, horizon_end]``.
 
-        Missing slots are filled in this order:
+        When *forecast* is ``None`` the method also computes the forecast
+        synchronously (backward-compatible, used by tests).  When *forecast* is
+        provided (pre-computed asynchronously) it is used directly.
 
-        1. Existing cache values (same bucket).
-        2. Forecast from fresh history values.
-
-        Raises:
-            ValueError: If resulting map cannot fully cover the target range.
+        Returns:
+            (new_map, history, missing_buckets, api_hits, forecast_hits, fallback_hits)
         """
         start_bucket = int(map_start.timestamp()) // 900
         end_bucket = int(horizon_end.timestamp()) // 900
@@ -301,12 +314,14 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
                     f"Insufficient fresh history for forecast: {len(history)} points "
                     f"(< {self._min_history_points})"
                 )
-            logger.debug(
-                "energy_charts_forecasting_slots",
-                missing_slots=len(missing_buckets),
-                total_slots=len(target_buckets),
-            )
-            forecast = self._forecast(history, len(missing_buckets))
+            if forecast is None:
+                # Synchronous path (tests / direct callers)
+                logger.debug(
+                    "energy_charts_forecasting_slots",
+                    missing_slots=len(missing_buckets),
+                    total_slots=len(target_buckets),
+                )
+                forecast = self._forecast(history, len(missing_buckets))
             for b, fc_val in zip(missing_buckets, forecast, strict=False):
                 new_map[b] = fc_val
 
@@ -320,7 +335,7 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
 
         api_hits = sum(1 for b in target_buckets if b in lookup)
         forecast_hits = len(missing_buckets)
-        return new_map, api_hits, forecast_hits, fallback_hits
+        return new_map, history, missing_buckets, api_hits, forecast_hits, fallback_hits
 
     async def _refresh(
         self, now_utc: datetime, requested_start: datetime, requested_end: datetime
@@ -358,13 +373,34 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
         # Horizon extends to ensure we have buffer for forecasts
         horizon_end = max(map_end, requested_end) + self._horizon_buffer
 
-        # Build price map without fallback to old cache (complete replacement)
-        new_map, api_hits, forecast_hits, fallback_hits = self._build_price_map(
-            raw=raw,
-            map_start=map_start,
-            horizon_end=horizon_end,
-            fallback_map={},  # No fallback to old cache; replace entirely
+        # Build price map: first pass determines which buckets need forecasting.
+        # The forecast is computed asynchronously (CPU-bound ETS fit in thread pool).
+        new_map, history, missing_buckets, api_hits, forecast_hits, fallback_hits = (
+            self._build_price_map(
+                raw=raw,
+                map_start=map_start,
+                horizon_end=horizon_end,
+                fallback_map={},  # No fallback to old cache; replace entirely
+                forecast=None,  # will be filled below if needed
+            )
         )
+        if missing_buckets and history:
+            logger.debug(
+                "energy_charts_forecasting_slots",
+                missing_slots=len(missing_buckets),
+                total_slots=(
+                    int(horizon_end.timestamp()) // 900 - int(map_start.timestamp()) // 900 + 1
+                ),
+            )
+            forecast_vals = await self._forecast_async(history, len(missing_buckets))
+            charges_wh = self._charges_kwh / 1000.0
+            for b, fc_val in zip(missing_buckets, forecast_vals, strict=False):
+                adjusted = (
+                    (fc_val + charges_wh) * (1 + self._vat_rate)
+                    if (charges_wh != 0.0 or self._vat_rate != 0.0)
+                    else fc_val
+                )
+                new_map[b] = adjusted
 
         # Verify that the new cache covers at least the start of the requested range
         # (remaining gaps into the future will be filled by forecast)

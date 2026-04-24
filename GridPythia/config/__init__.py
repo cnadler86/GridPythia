@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from GridPythia.config.optimization import OptimizationConfig
 from GridPythia.config.prediction import PredictionConfig
+from GridPythia.config.server import ServerConfig
 
 
 class AppConfig(BaseModel):
@@ -19,6 +20,7 @@ class AppConfig(BaseModel):
 
     prediction: PredictionConfig = Field(default_factory=PredictionConfig)
     optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
+    server: ServerConfig = Field(default_factory=ServerConfig)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "AppConfig":
