@@ -14,6 +14,14 @@ from GridPythia.simulation.devices.battery import Battery
 from GridPythia.simulation.devices.inverterbase import InverterBase
 
 
+FIXTURE_PATHS: dict[str, Path] = {
+    "legacy_2026_04_06": Path("tests/optimization/fixtures/prediction_2026_04_06_48h_15m.json"),
+    "today_2026_04_25": Path("tests/optimization/fixtures/prediction_2026_04_25_48h_15m.json"),
+}
+
+DEFAULT_FIXTURE_KEY = "legacy_2026_04_06"
+
+
 @dataclass(frozen=True, slots=True)
 class SolverFixtureScenario:
     prediction: PredictionData
@@ -24,8 +32,15 @@ class SolverFixtureScenario:
 def load_solver_fixture_scenario(
     fixture_path: Path | None = None,
     config_path: Path | None = None,
+    fixture_key: str | None = None,
 ) -> SolverFixtureScenario:
-    fixture = fixture_path or Path("tests/optimization/fixtures/prediction_2026_04_06_48h_15m.json")
+    if fixture_path is not None:
+        fixture = fixture_path
+    else:
+        key = fixture_key or DEFAULT_FIXTURE_KEY
+        if key not in FIXTURE_PATHS:
+            raise ValueError(f"Unknown fixture_key={key!r}. Expected one of {sorted(FIXTURE_PATHS)}")
+        fixture = FIXTURE_PATHS[key]
     config_file = config_path or Path("config.yaml")
 
     payload = json.loads(fixture.read_text(encoding="utf-8"))

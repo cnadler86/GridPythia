@@ -32,7 +32,12 @@ from GridPythia.simulation.devices.battery import Battery
 from GridPythia.simulation.devices.inverterbase import InverterBase
 
 DEFAULT_CONFIG = Path("config.yaml")
-DEFAULT_FIXTURE = Path("tests/optimization/fixtures/prediction_2026_04_06_48h_15m.json")
+FIXTURE_BY_KEY: dict[str, Path] = {
+    "legacy": Path("tests/optimization/fixtures/prediction_2026_04_06_48h_15m.json"),
+    "today": Path("tests/optimization/fixtures/prediction_2026_04_25_48h_15m.json"),
+}
+DEFAULT_FIXTURE_KEY = "today"
+DEFAULT_FIXTURE = FIXTURE_BY_KEY[DEFAULT_FIXTURE_KEY]
 DEFAULT_ROLL_SHIFT_HOURS = 4.0
 
 
@@ -226,6 +231,7 @@ def run_profile(
     current_soc: dict[str, float] | None = None
     rows: list[RollStats] = []
 
+    print(f"Fixture file: {fixture_path}")
     print(f"Fixture steps: {pred.steps}, dt_hours: {pred.dt_hours}")
     print(f"Total roll span: {roll_shift_hours} h -> {roll_shift_steps} steps")
     print(f"Window length per solve: {window_steps} steps ({window_steps * dt:.2f} h)")
@@ -257,13 +263,17 @@ def run_profile(
         )
         wall_s = time.perf_counter() - t0
 
+        # Next roll starts one timestep later. Seed initial state from t+1 when available,
+        # otherwise fall back to t for very short horizons.
         current_modes = {
-            plan.device_id: InverterMode(int(plan.modes[0]))
+            plan.device_id: InverterMode(
+                int(plan.modes[1] if plan.modes.size > 1 else plan.modes[0])
+            )
             for plan in sol.inverter_plans
             if plan.modes.size > 0
         } or None
         current_soc = {
-            plan.device_id: float(soc_trace[0])
+            plan.device_id: float(soc_trace[1] if len(soc_trace) > 1 else soc_trace[0])
             for plan in sol.inverter_plans
             if (soc_trace := sol.result.battery_wh_per_dt.get(plan.device_id)) is not None
             and len(soc_trace) > 0
@@ -348,9 +358,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Profile rolling-horizon warm-start behavior")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Path to config.yaml")
     parser.add_argument(
+        "--fixture-key",
+        choices=sorted(FIXTURE_BY_KEY),
+        default=DEFAULT_FIXTURE_KEY,
+        help="Named fixture selection (used when --fixture is not passed)",
+    )
+    parser.add_argument(
         "--fixture",
         type=Path,
-        default=DEFAULT_FIXTURE,
+        default=None,
         help="Fixture prediction JSON path",
     )
     parser.add_argument(
@@ -371,9 +387,11 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    fixture_path = args.fixture if args.fixture is not None else FIXTURE_BY_KEY[args.fixture_key]
+
     run_profile(
         config_path=args.config,
-        fixture_path=args.fixture,
+        fixture_path=fixture_path,
         roll_shift_hours=args.rolling_hours,
         output_dir=args.output_dir,
     )
