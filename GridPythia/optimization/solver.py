@@ -14,11 +14,10 @@ from dataclasses import dataclass, replace
 from platform import machine
 from typing import Any, cast
 
+# ARM libatomic preloading is handled in main.py (before any CVXPY import).
+# The message below is kept for visibility when the solver is loaded.
 if machine() in ("armv7l", "armv6l"):
-    import os
-
-    print("Detected ARM architecture, preloading libatomic for HiGHS solver...")
-    os.environ["LD_PRELOAD"] = "/usr/lib/arm-linux-gnueabihf/libatomic.so.1"
+    pass  # libatomic already loaded by main.py via ctypes.CDLL(RTLD_GLOBAL)
 
 import cvxpy as cp
 import numpy as np

@@ -11,11 +11,11 @@ from GridPythia.prediction.plots._base import PALETTE, add_forecast_region, appl
 
 
 class ElecPricePlotter:
-    """Render an electricity price series as a step chart.
+    """Render an electricity price series as a bar chart.
 
     The *forecast_from* parameter, when supplied, adds a light pastel
-    background over the synthesised (ETS / statistical) region so the
-    viewer can distinguish real API data from model-extended values.
+    background over the ML-predicted / statistical region so the viewer
+    can distinguish real API data from predicted values.
     """
 
     def plot(
@@ -31,30 +31,54 @@ class ElecPricePlotter:
         Args:
             values:        EUR/Wh array (same length as *timestamps*).
             timestamps:    Time axis.
-            forecast_from: First timestamp that comes from the statistical
-                           model rather than the live API.  A pastel shaded
-                           region is drawn from this point to the end.
+            forecast_from: First timestamp that comes from the ML model / statistical
+                           model rather than the live API.  A pastel shaded region
+                           is drawn from this point to the end.
             title:         Plot title.
         """
         eur_kwh = np.asarray(values, dtype=float) * 1000.0  # EUR/Wh → EUR/kWh
 
-        fig = go.Figure()
-        fig.add_trace(
-            go.Scatter(
-                x=timestamps,
-                y=eur_kwh.tolist(),
-                mode="lines",
-                line={"color": PALETTE["blue"], "width": 1.8, "shape": "hv"},
-                fill="tozeroy",
-                # Keep the normal area blue; only the forecast window is shaded lavender.
-                fillcolor="rgba(21, 101, 192, 0.10)",
-                name="Price",
-                hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.5f} EUR/kWh<extra></extra>",
+        # Split into confirmed and predicted series for visual distinction.
+        if forecast_from is not None:
+            split_idx = next(
+                (i for i, ts in enumerate(timestamps) if ts >= forecast_from),
+                len(timestamps),
             )
-        )
+        else:
+            split_idx = len(timestamps)
+
+        known_ts = timestamps[:split_idx]
+        known_vals = eur_kwh[:split_idx].tolist()
+        pred_ts = timestamps[split_idx:]
+        pred_vals = eur_kwh[split_idx:].tolist()
+
+        fig = go.Figure()
+
+        if known_ts:
+            fig.add_trace(
+                go.Bar(
+                    x=known_ts,
+                    y=known_vals,
+                    marker_color=PALETTE["blue"],
+                    name="Price (real)",
+                    hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.4f} EUR/kWh<extra></extra>",
+                )
+            )
+
+        if pred_ts:
+            fig.add_trace(
+                go.Bar(
+                    x=pred_ts,
+                    y=pred_vals,
+                    marker_color="rgba(179, 157, 219, 0.85)",  # lavender for predicted
+                    name="Price (forecast)",
+                    hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.4f} EUR/kWh<extra></extra>",
+                )
+            )
 
         if forecast_from is not None:
             add_forecast_region(fig, forecast_from, timestamps)
 
         apply_default_layout(fig, title=title, xaxis_title="Time", yaxis_title="EUR / kWh")
+        fig.update_layout(bargap=0.02, barmode="overlay")
         return fig

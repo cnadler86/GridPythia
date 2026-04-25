@@ -13,13 +13,21 @@ class EnergyChartsConfigModel(BaseModel):
     bidding_zone: str = "DE-LU"
 
 
+class EpexPredictorConfigModel(BaseModel):
+    """EpexPredictor-specific configuration."""
+
+    region: str = "DE"
+    base_url: str = "https://epexpredictor.batzill.com"
+
+
 class ElectricPriceConfig(BaseModel):
     """Configuration for electricity price providers."""
 
-    provider: Literal["EnergyCharts", "Fixed"] = "EnergyCharts"
+    provider: Literal["EnergyCharts", "Fixed", "EpexPredictor"] = "EnergyCharts"
     charges_kwh: float = Field(default=0.1528, ge=0.0)
     vat_rate: float = Field(default=0.19, ge=0.0)
     energycharts: EnergyChartsConfigModel = Field(default_factory=EnergyChartsConfigModel)
+    epexpredictor: EpexPredictorConfigModel = Field(default_factory=EpexPredictorConfigModel)
 
 
 class FeedInTariffConfig(BaseModel):

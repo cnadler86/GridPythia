@@ -15,7 +15,6 @@ from fastapi.responses import JSONResponse
 from structlog import get_logger
 
 import GridPythia.server.state as state
-from GridPythia.prediction.electricprice.energycharts import ElecPriceEnergyCharts
 from GridPythia.prediction.prediction import Prediction
 from GridPythia.server import services
 from GridPythia.server.models import FetchRequest, PredictionsStatusResponse
@@ -70,7 +69,7 @@ async def _retry_failed_providers(
 
         if recovered:
             forecast_from: datetime | None = None
-            if isinstance(setup.electricprice, ElecPriceEnergyCharts):
+            if setup.electricprice is not None:
                 forecast_from = setup.electricprice.last_real_ts
             services.set_cached_pdata(pdata, forecast_from)
             logger.info("prediction_retry_recovered", recovered=recovered)
@@ -161,7 +160,7 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
         )
 
     forecast_from: datetime | None = None
-    if isinstance(setup.electricprice, ElecPriceEnergyCharts):
+    if setup.electricprice is not None:
         forecast_from = setup.electricprice.last_real_ts
 
     services.set_cached_pdata(pdata, forecast_from)

@@ -12,6 +12,31 @@ Usage::
 
 from __future__ import annotations
 
+# ── ARM / libatomic compatibility ──────────────────────────────────────────
+# On ARMv7/ARMv6 (e.g. Raspberry Pi) the HiGHS solver (via highspy / CVXPY)
+# requires libatomic to be loaded into the process BEFORE highspy's shared
+# library is dlopen()'d.
+# Setting os.environ["LD_PRELOAD"] mid-process only affects child processes,
+# NOT dlopen() in the current process.  Using ctypes.CDLL with RTLD_GLOBAL
+# inserts the symbols into the process-wide dynamic-linking namespace,
+# so any subsequent dlopen() call (e.g. highspy loading libhighs.so) can
+# resolve the atomic symbols without crashing.
+#
+# Manual steps required on the target once (if the library path differs):
+#   find /usr/lib -name 'libatomic*' 2>/dev/null
+#   # update LIBATOMIC_PATH below if needed, or install: apt-get install libatomic1
+import ctypes as _ctypes
+from platform import machine as _machine
+
+if _machine() in ("armv7l", "armv6l"):
+    _LIBATOMIC = "/usr/lib/arm-linux-gnueabihf/libatomic.so.1"
+    try:
+        _ctypes.CDLL(_LIBATOMIC, mode=_ctypes.RTLD_GLOBAL)
+        print(f"Preloaded {_LIBATOMIC} for ARM HiGHS compatibility.")
+    except OSError as _e:
+        print(f"Warning: could not preload {_LIBATOMIC}: {_e}")
+# ─────────────────────────────────────────────────────────────────────────
+
 import argparse
 import logging
 from pathlib import Path

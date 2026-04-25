@@ -25,7 +25,12 @@ from GridPythia.prediction.electricprice.energycharts import (
     ElecPriceEnergyCharts,
     EnergyChartsConfig,
 )
+from GridPythia.prediction.electricprice.epexpredictor import (
+    ElecPriceEpexPredictor,
+    EpexPredictorConfig,
+)
 from GridPythia.prediction.electricprice.fixed import ElecPriceFixed
+from GridPythia.prediction.electricprice.provider import ElecPriceFallbackChain
 from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
 from GridPythia.prediction.load.config import LoadProfileConfig
 from GridPythia.prediction.load.provider import load_provider_from_config
@@ -71,7 +76,24 @@ def build_providers(cfg: AppConfig, raw_yaml: dict[str, Any]) -> PredictionSetup
 
     # Electric price
     ep = pred_cfg.electricprice
-    if ep.provider == "EnergyCharts":
+    if ep.provider == "EpexPredictor":
+        primary = ElecPriceEpexPredictor(
+            EpexPredictorConfig(
+                region=ep.epexpredictor.region,
+                charges_kwh=ep.charges_kwh,
+                vat_rate=ep.vat_rate,
+                base_url=ep.epexpredictor.base_url,
+            )
+        )
+        fallback = ElecPriceEnergyCharts(
+            EnergyChartsConfig(
+                bidding_zone=ep.energycharts.bidding_zone,
+                charges_kwh=ep.charges_kwh,
+                vat_rate=ep.vat_rate,
+            )
+        )
+        electricprice = ElecPriceFallbackChain(primary=primary, fallback=fallback)
+    elif ep.provider == "EnergyCharts":
         electricprice = ElecPriceEnergyCharts(
             EnergyChartsConfig(
                 bidding_zone=ep.energycharts.bidding_zone,

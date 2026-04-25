@@ -1,6 +1,9 @@
 """Electric-price provider interface."""
 
+from __future__ import annotations
+
 from abc import abstractmethod
+from datetime import datetime
 
 import numpy as np
 from structlog import get_logger
@@ -12,6 +15,16 @@ logger = get_logger(__name__)
 
 class ElecPriceProvider(PredictionProvider):
     """Returns electricity market price in EUR/Wh per time step."""
+
+    @property
+    def last_real_ts(self) -> "datetime | None":
+        """Timestamp of the last real (non-predicted) data point.
+
+        Returns ``None`` by default.  Subclasses override this to expose the
+        boundary between live API data and statistical / ML predictions so that
+        the UI can shade the forecast region.
+        """
+        return None
 
     @abstractmethod
     async def fetch(self, timestamps: list) -> np.ndarray:
@@ -33,6 +46,13 @@ class ElecPriceFallbackChain(ElecPriceProvider):
     @property
     def provider_id(self) -> str:
         return f"{self._primary.provider_id}|fallback:{self._fallback.provider_id}"
+
+    @property
+    def last_real_ts(self) -> datetime | None:
+        """Return the primary provider's last real timestamp when available,
+        otherwise fall back to the fallback provider's value.
+        """
+        return self._primary.last_real_ts or self._fallback.last_real_ts
 
     async def fetch(self, timestamps: list) -> np.ndarray:
         try:

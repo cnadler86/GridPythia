@@ -121,7 +121,12 @@ def _register_builtin_providers() -> None:
         ElecPriceEnergyCharts,
         EnergyChartsConfig,
     )
+    from GridPythia.prediction.electricprice.epexpredictor import (
+        ElecPriceEpexPredictor,
+        EpexPredictorConfig,
+    )
     from GridPythia.prediction.electricprice.fixed import ElecPriceFixed
+    from GridPythia.prediction.electricprice.provider import ElecPriceFallbackChain
 
     def _energycharts_factory(cfg: Mapping[str, Any]) -> ElecPriceEnergyCharts:
         return ElecPriceEnergyCharts(
@@ -139,8 +144,28 @@ def _register_builtin_providers() -> None:
             vat_rate=cfg.get("vat_rate", 0.19),
         )
 
+    def _epexpredictor_factory(cfg: Mapping[str, Any]) -> ElecPriceFallbackChain:
+        """Build an EpexPredictor with EnergyCharts as automatic fallback."""
+        primary = ElecPriceEpexPredictor(
+            EpexPredictorConfig(
+                region=cfg.get("region", "DE"),
+                charges_kwh=cfg.get("charges_kwh", 0.0),
+                vat_rate=cfg.get("vat_rate", 0.19),
+                base_url=cfg.get("base_url", "https://epexpredictor.batzill.com"),
+            )
+        )
+        fallback = ElecPriceEnergyCharts(
+            EnergyChartsConfig(
+                bidding_zone=cfg.get("bidding_zone", "DE-LU"),
+                charges_kwh=cfg.get("charges_kwh", 0.0),
+                vat_rate=cfg.get("vat_rate", 0.19),
+            )
+        )
+        return ElecPriceFallbackChain(primary=primary, fallback=fallback)
+
     electricprice_registry.register("EnergyCharts", _energycharts_factory)
     electricprice_registry.register("Fixed", _fixed_price_factory)
+    electricprice_registry.register("EpexPredictor", _epexpredictor_factory)
 
     # --- Feed-In Tariff ---
     from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
