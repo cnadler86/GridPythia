@@ -469,6 +469,11 @@ class LinearOptimizer:
             == self._load_param + total_p_ch - total_p_dc - total_pv_ac
         )
 
+        # Physical export cap: only PV that reaches the AC bus may be exported.
+        # This prevents synthetic import->export arbitrage loops at negative prices
+        # without introducing additional binary variables.
+        self._constraints.append(self._g_feedin <= total_pv_ac)
+
         # --- Minimum feedin from uncontrollable PV ---
         # Unbuffered PV that can't be self-consumed must be exported.
         self._constraints.append(

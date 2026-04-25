@@ -93,6 +93,19 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Optimizer setup error: {exc}") from exc
 
+    # Require fresh runtime status for every optimizable inverter.
+    ready, missing = state.coordinator.all_optimizable_ready(
+        optimizer.inverters,
+        now=datetime.now(tz=tz),
+    )
+    if not ready:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Optimization blocked: missing or stale inverter status for {sorted(missing)}"
+            ),
+        )
+
     objective = (
         OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
         if cfg.optimization.solver.objective == "self_consumption"
@@ -104,8 +117,13 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
     if req.solver_opts:
         solver_opts.update(req.solver_opts)
 
-    soc_wh = services.soc_overrides_wh_for_solver(optimizer, req.battery_soc)
-    initial_modes = req.initial_modes or None
+    # Defaults from live coordinator state; request payload overrides these values.
+    soc_wh = state.coordinator.get_soc_overrides_wh(optimizer.inverters)
+    soc_wh.update(services.soc_overrides_wh_for_solver(optimizer, req.battery_soc))
+
+    initial_modes = state.coordinator.get_initial_modes(optimizer.inverters)
+    if req.initial_modes:
+        initial_modes.update(req.initial_modes)
 
     try:
         async with state.get_optimizer_lock():
