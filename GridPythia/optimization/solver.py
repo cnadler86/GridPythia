@@ -14,11 +14,10 @@ from dataclasses import dataclass, replace
 from platform import machine
 from typing import Any, cast
 
+# ARM libatomic preloading is handled in main.py (before any CVXPY import).
+# The message below is kept for visibility when the solver is loaded.
 if machine() in ("armv7l", "armv6l"):
-    import os
-
-    print("Detected ARM architecture, preloading libatomic for HiGHS solver...")
-    os.environ["LD_PRELOAD"] = "/usr/lib/arm-linux-gnueabihf/libatomic.so.1"
+    pass  # libatomic already loaded by main.py via ctypes.CDLL(RTLD_GLOBAL)
 
 import cvxpy as cp
 import numpy as np
@@ -469,6 +468,11 @@ class LinearOptimizer:
             self._g_import - self._g_feedin
             == self._load_param + total_p_ch - total_p_dc - total_pv_ac
         )
+
+        # Physical export cap: only PV that reaches the AC bus may be exported.
+        # This prevents synthetic import->export arbitrage loops at negative prices
+        # without introducing additional binary variables.
+        self._constraints.append(self._g_feedin <= total_pv_ac)
 
         # --- Minimum feedin from uncontrollable PV ---
         # Unbuffered PV that can't be self-consumed must be exported.
@@ -1153,6 +1157,7 @@ class LinearOptimizer:
         losses_arr = np.zeros(T, dtype=float)
         battery_wh_per_dt: dict[str, np.ndarray] = {}
         battery_soc_pct: dict[str, np.ndarray] = {}
+        battery_initial_soc_pct: dict[str, float] = {}
         inv_modes_per_dt: dict[str, np.ndarray] = {}
         inverter_plans: list[InverterPlan] = []
 
@@ -1167,6 +1172,8 @@ class LinearOptimizer:
 
             if inv.battery is not None and block.soc is not None:
                 bat = inv.battery
+                soc0_wh = float(self._soc_init_params[inv_id].value or bat.soc_wh)
+                battery_initial_soc_pct[inv_id] = float(soc0_wh * (100.0 / bat.capacity_wh))
                 soc_vals = np.maximum(np.asarray(block.soc.value, dtype=float), 0.0)
                 battery_soc_wh = np.asarray(soc_vals, dtype=np.float32)
                 battery_wh_per_dt[inv_id] = np.asarray(soc_vals, dtype=np.float32)
@@ -1211,6 +1218,7 @@ class LinearOptimizer:
             inverter_modes_per_dt=inv_modes_per_dt,
             battery_wh_per_dt=battery_wh_per_dt,
             battery_soc_percentage_per_dt=battery_soc_pct,
+            battery_initial_soc_percentage=battery_initial_soc_pct,
         )
 
         return LinearSolution(

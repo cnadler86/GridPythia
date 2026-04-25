@@ -1934,9 +1934,6 @@ class OptimizationTab(_Tab):
                         logger.exception("result_dedupe_failed")
                     if simulation_error is not None:
                         out["simulation_error"] = simulation_error
-                    # store timestamps for plotting
-                    ts = getattr(self, "_last_ts", None)
-
                     # Draw results into the right-side figure of this tab
                     try:
                         self._fig.clear()
@@ -2311,6 +2308,16 @@ class OptimizationTab(_Tab):
             return
 
         run_id = uuid.uuid4().hex[:8]
+
+        def _on_pred_fetch_done(r: Any) -> None:
+            self._prediction_cache = r
+            self._prediction_cache_sig = pred_sig
+            on_pred_done(r)
+
+        def _on_pred_fetch_error(e: Exception, tb: str) -> None:
+            self._optimization_running = False
+            self._on_error(e, tb, operation="prediction_fetch")
+
         _run_async(
             self.app.root,
             _with_context(
@@ -2319,15 +2326,8 @@ class OptimizationTab(_Tab):
                 tab="optimization",
                 operation="prediction_fetch",
             ),
-            on_done=lambda r: (
-                setattr(self, "_prediction_cache", r),
-                setattr(self, "_prediction_cache_sig", pred_sig),
-                on_pred_done(r),
-            ),
-            on_error=lambda e, tb: (
-                setattr(self, "_optimization_running", False),
-                self._on_error(e, tb, operation="prediction_fetch"),
-            ),
+            on_done=_on_pred_fetch_done,
+            on_error=_on_pred_fetch_error,
         )
 
     def _on_error(self, exc: Exception, tb: str | None, *, operation: str = "unknown") -> None:

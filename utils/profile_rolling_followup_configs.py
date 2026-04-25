@@ -21,7 +21,7 @@ from GridPythia.config import AppConfig
 from GridPythia.optimization.solver import LinearOptimizer, OptimizationObjective
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.inverterbase import InverterBase
-from profile_rolling_horizon import build_inverters, load_fixture_prediction, slice_prediction
+from utils.profile_rolling_horizon import build_inverters, load_fixture_prediction, slice_prediction
 
 DEFAULT_CONFIG = Path("config.yaml")
 DEFAULT_FIXTURE = Path("tests/optimization/fixtures/prediction_2026_04_06_48h_15m.json")

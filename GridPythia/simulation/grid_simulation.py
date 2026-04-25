@@ -39,6 +39,7 @@ class SimulationResult:
     inverter_ac_rate_per_dt: dict[str, np.ndarray] = field(default_factory=dict)
     battery_wh_per_dt: dict[str, np.ndarray] = field(default_factory=dict)
     battery_soc_percentage_per_dt: dict[str, np.ndarray] = field(default_factory=dict)
+    battery_initial_soc_percentage: dict[str, float] = field(default_factory=dict)
 
     home_appliance_load_per_dt: np.ndarray | None = None
 
@@ -101,6 +102,7 @@ class SimulationResult:
             "losses_wh_per_dt": _conv(self.losses_wh_per_dt),
             "battery_wh_per_dt": _conv(self.battery_wh_per_dt or {}),
             "battery_soc_percentage_per_dt": _conv(self.battery_soc_percentage_per_dt or {}),
+            "battery_initial_soc_percentage": _conv(self.battery_initial_soc_percentage or {}),
             "inverter_modes_per_dt": _conv(self.inverter_modes_per_dt or {}),
             "inverter_ac_rate_per_dt": _conv(self.inverter_ac_rate_per_dt or {}),
             "home_appliance_load_per_dt": _conv(self.home_appliance_load_per_dt),

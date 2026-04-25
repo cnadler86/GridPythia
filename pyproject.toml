@@ -20,6 +20,7 @@ dependencies = [
     "plotly>=5.0",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
+    "paho-mqtt>=2.1",
 ]
 
 [dependency-groups]
@@ -29,11 +30,16 @@ dev = [
     "pytest-cov",
     "matplotlib",
     "ty",
+    "ruff",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["GridPythia*"]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple/"
+default = true
 # where = ["GridPythia"]
 # include = ["*"]
 
