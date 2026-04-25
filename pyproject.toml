@@ -30,7 +30,7 @@ dev = [
     "pytest-cov",
     "matplotlib",
     "ty",
-    "ruff>=0.15.11",
+    "ruff",
 ]
 
 [tool.setuptools.packages.find]
