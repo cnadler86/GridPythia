@@ -40,10 +40,11 @@ def _make_api_response(
     base_eur_mwh: float = 50.0,
     known_until_offset_h: int = 36,
 ) -> tuple[list[tuple[datetime, float]], datetime]:
-    """Build a synthetic API response: *hours* hourly prices + known_until."""
+    """Build a synthetic API response: *hours* hours of 15-min prices + known_until."""
     prices: list[tuple[datetime, float]] = []
-    for i in range(hours):
-        dt = start + timedelta(hours=i)
+    slots = hours * 4  # 4 quarter-hours per hour
+    for i in range(slots):
+        dt = start + timedelta(minutes=15 * i)
         prices.append((dt, base_eur_mwh / 1_000_000.0))
     known_until = start + timedelta(hours=known_until_offset_h)
     return prices, known_until
@@ -202,14 +203,14 @@ class TestEpexPredictorFetch:
         assert isinstance(result, np.ndarray)
         assert result.dtype == np.float32
 
-    async def test_quarter_hour_timestamps_return_hourly_price(self):
-        """15-min timestamps within the same hour all get the same hourly price."""
+    async def test_quarter_hour_timestamps_each_get_own_bucket(self):
+        """Each 15-min slot maps to its own 900-second bucket."""
         provider = self._provider()
         ts = make_timestamps(NOW_UTC, hours=1, dt_hours=0.25)  # 4 slots
         self._mock_request(provider, NOW_UTC - timedelta(hours=2))
         result = await provider.fetch(ts)
-        # All 4 slots are within the same hour → same price
         assert len(result) == 4
+        # All from same mock price, so all equal
         assert all(v == pytest.approx(result[0], rel=1e-4) for v in result)
 
     async def test_cache_stale_after_valid_until(self):

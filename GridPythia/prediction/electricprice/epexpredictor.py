@@ -46,8 +46,8 @@ _RETRY_AFTER_FAILED_REFRESH = timedelta(minutes=15)
 
 _BASE_URL = "https://epexpredictor.batzill.com"
 
-# EPEX prices are hourly → 3600-second buckets.
-_BUCKET_SECONDS = 3600
+# The EPEXPredictor API returns 15-minute prices by default (hourly=false).
+_BUCKET_SECONDS = 900
 
 
 class EpexPredictorConfig(BaseModel):
@@ -92,7 +92,7 @@ class ElecPriceEpexPredictor(ElecPriceProvider):
         self._horizon_buffer = config.horizon_buffer
         self._base_url = config.base_url.rstrip("/")
 
-        # Hourly buckets: all 15-min timestamps within the same hour share one bucket.
+        # 15-minute buckets matching the API's native resolution.
         self._cache = TimeBucketCache(bucket_seconds=_BUCKET_SECONDS)
         self._known_until: datetime | None = None
         self._lock = asyncio.Lock()
@@ -141,7 +141,7 @@ class ElecPriceEpexPredictor(ElecPriceProvider):
             "startTs": start_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "hours": hours,
             "unit": "EUR_PER_MWH",  # we convert to EUR/Wh locally
-            "hourly": "true",  # EPEX is hourly by design (must be string for aiohttp)
+            # hourly omitted → default false → native 15-minute resolution
             "timezone": "UTC",  # always use UTC for consistent bucket arithmetic
         }
 
@@ -277,9 +277,9 @@ class ElecPriceEpexPredictor(ElecPriceProvider):
             adjusted = (raw_price + charges_wh) * (1.0 + self._vat_rate)
             new_map[b] = adjusted
 
-        # Coverage end: last full hour covered (last_api_ts starts the last hour,
-        # which covers [last_api_ts, last_api_ts + 1h)).
-        coverage_end = last_api_ts + timedelta(hours=1) - timedelta(seconds=1)
+        # Coverage end: last 15-min slot covered
+        # (last_api_ts starts the last slot, which covers [last_api_ts, last_api_ts + 15min)).
+        coverage_end = last_api_ts + timedelta(minutes=15) - timedelta(seconds=1)
 
         source_valid_until = self._compute_source_valid_until(now_utc, known_until)
         self._cache.update(
