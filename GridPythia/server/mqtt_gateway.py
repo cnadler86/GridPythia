@@ -146,6 +146,55 @@ class MqttGateway:
         state.mqtt_connected = False
         logger.info("mqtt_gateway_stopped")
 
+    # ── Plan publishing ────────────────────────────────────────────────
+
+    def publish_plans(
+        self,
+        inverter_plans: list[dict],
+        *,
+        dt_hours: float = 0.25,
+    ) -> None:
+        """Publish optimiser plan(s) via MQTT.
+
+        Each element of *inverter_plans* must be a dict with at least
+        ``device_id`` and ``steps`` keys (as returned by the API response).
+
+        Topic:   ``{prefix}/inverters/{device_id}/plan``
+        Payload: ``{device_id, published_at, dt_hours, steps: [...]}``,
+                 where each step matches GridPythia's ``InverterPlanStep`` schema.
+
+        The message is published with ``retain=True`` so that a newly
+        connecting controller immediately receives the last known plan.
+        """
+        from datetime import datetime, timezone
+
+        published_at = datetime.now(tz=timezone.utc).isoformat()
+        for plan in inverter_plans:
+            device_id = plan.get("device_id", "")
+            if not device_id:
+                continue
+            topic = f"{self._cfg.topic_prefix}/inverters/{device_id}/plan"
+            payload = {
+                "device_id": device_id,
+                "published_at": published_at,
+                "dt_hours": dt_hours,
+                "steps": plan.get("steps", []),
+            }
+            try:
+                self._client.publish(
+                    topic,
+                    json.dumps(payload),
+                    qos=1,
+                    retain=True,
+                )
+                logger.info(
+                    "mqtt_plan_published",
+                    device_id=device_id,
+                    steps=len(payload["steps"]),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("mqtt_plan_publish_failed", device_id=device_id, error=str(exc))
+
 
 # ── Async adapter used from the FastAPI lifespan ──────────────────────────
 
@@ -157,8 +206,13 @@ async def run_gateway(cfg: MqttConfig) -> None:
 
     Designed to run as a background asyncio task; the actual MQTT I/O
     runs in paho's own thread so there is no event-loop conflict.
+
+    The gateway instance is stored in ``state.mqtt_gateway`` so that other
+    parts of the application (e.g. the optimization router) can call
+    ``state.mqtt_gateway.publish_plans(...)`` to distribute schedules.
     """
     gw = MqttGateway(cfg)
+    state.mqtt_gateway = gw
     gw.start()
     try:
         # Yield control back to the event loop indefinitely.
@@ -168,3 +222,4 @@ async def run_gateway(cfg: MqttConfig) -> None:
         pass
     finally:
         gw.stop()
+        state.mqtt_gateway = None

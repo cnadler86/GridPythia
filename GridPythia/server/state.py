@@ -62,6 +62,13 @@ _retry_task: "asyncio.Task | None" = None
 # Flipped to True by the MQTT gateway when the broker connection is established.
 mqtt_connected: bool = False
 
+# The MqttGateway instance when running; None otherwise.
+# Used by the optimization router to publish plans after each solve.
+if TYPE_CHECKING:
+    from GridPythia.server.mqtt_gateway import MqttGateway
+
+mqtt_gateway: "MqttGateway | None" = None
+
 # ── Solution cache ────────────────────────────────────────────────────────
 # Avoids recomputing optimization when navigating back after closure.
 # Invalidated on config changes or when stale.

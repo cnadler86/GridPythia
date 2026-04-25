@@ -196,6 +196,13 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
     # Cache the solution for reuse when navigating back
     services.set_cached_solution(response_data)
 
+    # ── Publish plan via MQTT (if gateway is running) ─────────────────
+    if state.mqtt_gateway is not None:
+        state.mqtt_gateway.publish_plans(
+            [p.model_dump() for p in inverter_plans],
+            dt_hours=float(cfg.prediction.dt_hours),
+        )
+
     return JSONResponse(response_data)
 
 
