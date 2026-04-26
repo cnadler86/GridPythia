@@ -18,6 +18,7 @@ from GridPythia.prediction.electricprice.energycharts import ElecPriceEnergyChar
 from GridPythia.prediction.prediction import Prediction
 from GridPythia.server import services
 from GridPythia.server.models import OptimizeRequest, OptimizeStatusResponse, OptimizeSummary
+from GridPythia.simulation.devices import InverterMode
 
 logger = get_logger(__name__)
 
@@ -123,7 +124,9 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
 
     initial_modes = state.coordinator.get_initial_modes(optimizer.inverters)
     if req.initial_modes:
-        initial_modes.update(req.initial_modes)
+        initial_modes.update(
+            {inv_id: InverterMode(int(mode)) for inv_id, mode in req.initial_modes.items()}
+        )
 
     try:
         async with state.get_optimizer_lock():

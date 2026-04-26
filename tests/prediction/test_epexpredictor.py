@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import numpy as np
@@ -67,11 +68,11 @@ class TestEpexPredictorConfig:
         assert "epexpredictor.batzill.com" in cfg.base_url
 
     def test_horizon_buffer_from_int(self):
-        cfg = EpexPredictorConfig(horizon_buffer=10)
+        cfg = EpexPredictorConfig(horizon_buffer=cast(Any, 10))
         assert cfg.horizon_buffer == timedelta(hours=10)
 
     def test_horizon_buffer_from_float(self):
-        cfg = EpexPredictorConfig(horizon_buffer=6.5)
+        cfg = EpexPredictorConfig(horizon_buffer=cast(Any, 6.5))
         assert cfg.horizon_buffer == timedelta(hours=6, minutes=30)
 
     def test_immutable(self):
@@ -155,7 +156,7 @@ class TestEpexPredictorFetch:
             start, hours, base_eur_mwh, known_until_offset_h
         )
         mock = AsyncMock(return_value=(raw, known_until))
-        provider._request_prices = mock
+        cast(Any, provider)._request_prices = mock
         return mock
 
     async def test_first_call_populates_cache(self):
@@ -166,7 +167,7 @@ class TestEpexPredictorFetch:
         assert isinstance(result, np.ndarray)
         assert result.dtype == np.float32
         assert len(result) == 24
-        assert provider._request_prices.call_count == 1
+        assert cast(Any, provider)._request_prices.call_count == 1
         assert provider.last_real_ts is not None
 
     async def test_repeated_calls_use_cache(self):
@@ -176,7 +177,7 @@ class TestEpexPredictorFetch:
         await provider.fetch(ts)
         await provider.fetch(ts)
         # Cache is valid; API should be called exactly once.
-        assert provider._request_prices.call_count == 1
+        assert cast(Any, provider)._request_prices.call_count == 1
 
     async def test_price_values_with_charges_vat(self):
         """Charges + VAT are applied correctly to raw EUR/MWh values."""
@@ -188,7 +189,7 @@ class TestEpexPredictorFetch:
         )
         ts = _ts(NOW_UTC, hours=2, dt=1.0)
         raw, known_until = _make_api_response(NOW_UTC - timedelta(hours=2), 80, base_eur_mwh)
-        provider._request_prices = AsyncMock(return_value=(raw, known_until))
+        cast(Any, provider)._request_prices = AsyncMock(return_value=(raw, known_until))
         result = await provider.fetch(ts)
         charges_wh = charges_kwh / 1000.0
         raw_wh = base_eur_mwh / 1_000_000.0
@@ -230,7 +231,7 @@ class TestEpexPredictorFetch:
     async def test_api_failure_raises_when_cache_empty(self):
         provider = self._provider()
         ts = _ts(NOW_UTC, hours=2)
-        provider._request_prices = AsyncMock(side_effect=RuntimeError("network error"))
+        cast(Any, provider)._request_prices = AsyncMock(side_effect=RuntimeError("network error"))
         with pytest.raises(RuntimeError, match="EPEXPredictor refresh failed"):
             await provider.fetch(ts)
 
@@ -244,7 +245,7 @@ class TestEpexPredictorFetch:
 
         # Expire the cache and make the API fail
         provider._cache.source_valid_until = NOW_UTC - timedelta(seconds=1)
-        provider._request_prices = AsyncMock(side_effect=RuntimeError("network error"))
+        cast(Any, provider)._request_prices = AsyncMock(side_effect=RuntimeError("network error"))
         # Should NOT raise — stale cache still covers the range
         result = await provider.fetch(ts)
         assert len(result) == len(ts)
@@ -252,7 +253,7 @@ class TestEpexPredictorFetch:
     async def test_known_until_stored_after_fetch(self):
         provider = self._provider()
         ts = _ts(NOW_UTC, hours=24)
-        provider._request_prices = AsyncMock(
+        cast(Any, provider)._request_prices = AsyncMock(
             return_value=_make_api_response(NOW_UTC - timedelta(hours=2), 80)
         )
         await provider.fetch(ts)
@@ -271,7 +272,7 @@ class TestEpexPredictorFallbackChain:
         from GridPythia.prediction.electricprice.provider import ElecPriceFallbackChain
 
         primary = _make_provider()
-        primary._request_prices = AsyncMock(side_effect=RuntimeError("EPEX down"))
+        cast(Any, primary)._request_prices = AsyncMock(side_effect=RuntimeError("EPEX down"))
 
         fallback = ElecPriceFixed(price_kwh=0.30)
         chain = ElecPriceFallbackChain(primary=primary, fallback=fallback)
@@ -298,7 +299,7 @@ class TestEpexPredictorFallbackChain:
 
         primary = _make_provider()
         raw, known_until = _make_api_response(NOW_UTC - timedelta(hours=2), 80)
-        primary._request_prices = AsyncMock(return_value=(raw, known_until))
+        cast(Any, primary)._request_prices = AsyncMock(return_value=(raw, known_until))
 
         fallback = ElecPriceFixed(price_kwh=0.30)
         chain = ElecPriceFallbackChain(primary=primary, fallback=fallback)

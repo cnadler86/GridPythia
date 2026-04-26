@@ -66,7 +66,9 @@ class EpexPredictorConfig(BaseModel):
     def _ensure_timedelta(cls, v: object) -> timedelta:
         if isinstance(v, (int, float)):
             return timedelta(hours=float(v))
-        return v
+        if isinstance(v, timedelta):
+            return v
+        raise TypeError(f"horizon_buffer must be timedelta or hours number, got {type(v).__name__}")
 
 
 class ElecPriceEpexPredictor(ElecPriceProvider):

@@ -417,7 +417,7 @@ class _Tab:
         self.frame.columnconfigure(1, weight=1)
         self.frame.rowconfigure(0, weight=1)
         self._hover_cids: list[int] = []
-        self._prov_var: Optional[tk.StringVar] = None
+        self._prov_var: tk.StringVar = tk.StringVar(value="")
         self._cached_prov: Any = None
         self._last_prov_sig: str | None = None
         self._build_layout()
@@ -510,7 +510,7 @@ class _Tab:
         return self.PROVIDERS[0] if self.PROVIDERS else ""
 
     def load_defaults_from_config(self) -> None:
-        if self.PROVIDERS and self._prov_var is not None:
+        if self.PROVIDERS:
             prov = self._initial_provider()
             if prov in self.PROVIDERS:
                 self._prov_var.set(prov)
