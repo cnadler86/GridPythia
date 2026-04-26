@@ -80,11 +80,12 @@ class SimulationResult:
                 return None
             if isinstance(obj, dict):
                 return {k: _conv(v) for k, v in obj.items()}
-            if hasattr(obj, "tolist"):
-                try:
-                    return obj.tolist()
-                except Exception:
-                    logger.warning("simulation_result_tolist_failed", obj_type=type(obj).__name__)
+            try:
+                return obj.tolist()
+            except AttributeError:
+                pass
+            except Exception:
+                logger.warning("simulation_result_tolist_failed", obj_type=type(obj).__name__)
             try:
                 return list(obj)
             except Exception:

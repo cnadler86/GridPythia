@@ -49,9 +49,7 @@ class ElecPriceFallbackChain(ElecPriceProvider):
 
     @property
     def last_real_ts(self) -> datetime | None:
-        """Return the primary provider's last real timestamp when available,
-        otherwise fall back to the fallback provider's value.
-        """
+        """Return the primary provider's last real timestamp when available, otherwise fall back to the fallback provider's value."""
         return self._primary.last_real_ts or self._fallback.last_real_ts
 
     async def fetch(self, timestamps: list) -> np.ndarray:
