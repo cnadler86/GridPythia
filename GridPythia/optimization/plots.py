@@ -248,7 +248,8 @@ class SolutionPlotter:
                 name="Feed-in",
                 marker_color=_C_FEEDIN,
                 opacity=0.85,
-                hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.1f} Wh<extra>Feed-in</extra>",
+                customdata=np.asarray(result.feedin_wh_per_dt).tolist(),
+                hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{customdata:.1f} Wh<extra>Feed-in</extra>",
             ),
             row=1,
             col=1,
@@ -294,10 +295,10 @@ class SolutionPlotter:
         wh_values = (
             list(result.grid_import_wh_per_dt)
             + list(result.self_consumption_wh_per_dt)
-            + list(result.feedin_wh_per_dt)
+            + (-np.asarray(result.feedin_wh_per_dt)).tolist()
         )
         if result.losses_wh_per_dt is not None:
-            wh_values.extend(result.losses_wh_per_dt)
+            wh_values.extend((-np.asarray(result.losses_wh_per_dt)).tolist())
 
         if wh_values:
             wh_min, wh_max = min(wh_values), max(wh_values)
@@ -495,7 +496,8 @@ class SolutionPlotter:
                 name="Feed-in",
                 marker_color=_C_FEEDIN,
                 opacity=0.85,
-                hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.1f} Wh<extra>Feed-in</extra>",
+                customdata=np.asarray(result.feedin_wh_per_dt).tolist(),
+                hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{customdata:.1f} Wh<extra>Feed-in</extra>",
             ),
             row=1,
             col=1,
@@ -518,7 +520,7 @@ class SolutionPlotter:
         wh_values = (
             list(result.grid_import_wh_per_dt)
             + list(result.self_consumption_wh_per_dt)
-            + list(result.feedin_wh_per_dt)
+            + (-np.asarray(result.feedin_wh_per_dt)).tolist()
         )
 
         if wh_values:

@@ -791,9 +791,12 @@ class TestModeSwitchCosts:
 
         assert _charge_wh(sol_ch.inverter_plans[0], 0) >= _charge_wh(sol_idle.inverter_plans[0], 0) - 1e-9
 
-    def test_high_switch_cost_keeps_ac_charge_continuous(self) -> None:
-        """High switch cost should prevent the solver from dropping out of AC_CHARGE
-        for a single cheap slot, forcing continuous charging over adjacent slots.
+    def test_high_switch_cost_still_prefers_cheaper_adjacent_charge_slots(self) -> None:
+        """High switch cost must not force charging in the more expensive middle slot.
+
+        In this setup, the optimizer should still allocate charge into the cheaper
+        adjacent slots before the expensive discharge peak instead of spreading charge
+        continuously across all three pre-peak steps.
         """
         battery = Battery(
             BatteryParameters(
@@ -835,7 +838,8 @@ class TestModeSwitchCosts:
         assert plan["modes"][0] == int(AC)
         assert plan["modes"][2] == int(AC)
         assert plan["modes"][3] == int(ZFI)
-        assert plan["modes"][1] in {int(InverterMode.IDLE), int(AC)}
+        assert plan["modes"][1] == int(InverterMode.IDLE)
+        assert plan["charge_ac_wh"][1] == pytest.approx(0.0, abs=1e-6)
         assert plan["charge_ac_wh"][1] < plan["charge_ac_wh"][2] < plan["charge_ac_wh"][0]
 
     def test_high_switch_cost_extends_discharge_into_adjacent_slot(self) -> None:

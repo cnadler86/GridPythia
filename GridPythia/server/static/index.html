@@ -328,12 +328,15 @@ function renderCharts(charts) {
     CHART_DATA[tabId] = fig;
     const el = document.getElementById('chart-' + tabId);
     if (!el) continue;
+    const hasPlot = Boolean(el._plotly);
+    if (!hasPlot) el.replaceChildren();
     el.classList.remove('chart-placeholder');
     el.style.minHeight = '400px';
-    el._plotly = true;
     // Merge server layout (plotly_white) with light overrides; do NOT force dark bg
     const layout = Object.assign({ autosize: true }, fig.layout || {});
-    Plotly.react(el, fig.data || [], layout, { responsive: true, displayModeBar: false });
+    const plotFn = hasPlot ? Plotly.react : Plotly.newPlot;
+    plotFn(el, fig.data || [], layout, { responsive: true, displayModeBar: false });
+    el._plotly = true;
   }
 }
 
@@ -437,6 +440,7 @@ async function apiFetch(path, method, body) {
   const opts = { method: method || 'GET', headers: {} };
   if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const r = await fetch(path, opts);
+  if (r.status === 204) return null;
   if (!r.ok) {
     const err = await r.json().catch(() => ({ detail: r.statusText }));
     throw new Error(err.detail || r.statusText);
