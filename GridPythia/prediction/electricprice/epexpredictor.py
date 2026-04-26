@@ -7,14 +7,14 @@ Unlike EnergyCharts, this API already extends prices beyond the last real
 data point using an ML model, so no local ETS forecasting is needed.
 
 Cache validity logic:
-  Day-ahead prices are published around 13:00 UTC for the following day.
+  Day-ahead prices are published around 12:00 UTC for the following day.
 
   * If ``known_until`` (last real API data point) covers tomorrow, the cache
-    is valid until tomorrow 13:00 UTC (then fresher data supersedes ours).
-  * If we only have today's real data and it is already past 13:00 UTC,
+    is valid until tomorrow 12:00 UTC (then fresher data supersedes ours).
+  * If we only have today's real data and it is already past 12:00 UTC,
     publication was delayed → set a short retry window (15 min) so we
     re-check soon without hammering the API.
-  * Before 13:00 UTC without tomorrow's real data → valid until 13:00 UTC.
+  * Before 12:00 UTC without tomorrow's real data → valid until 12:00 UTC.
 
 Error handling is identical to EnergyCharts: errors propagate so that
 :class:`ElecPriceFallbackChain` can fall through to an alternative provider.
@@ -39,8 +39,8 @@ _HORIZON_BUFFER_DEFAULT = timedelta(hours=25)
 # Small lookback window so the cache covers recent optimization slots.
 _LOOKBACK = timedelta(hours=2)
 
-# Day-ahead prices are published around 13:00 UTC for the next delivery day.
-_DAY_AHEAD_PUB_HOUR = 13
+# Day-ahead prices are published around 12:00 UTC for the next delivery day.
+_DAY_AHEAD_PUB_HOUR = 12
 _DAY_AHEAD_PUB_MINUTE = 0
 _RETRY_AFTER_FAILED_REFRESH = timedelta(minutes=15)
 
@@ -185,7 +185,7 @@ class ElecPriceEpexPredictor(ElecPriceProvider):
         """Compute how long the newly fetched cache is valid.
 
         Mirrors the EnergyCharts publication-window logic but with the
-        EPEX publication time of ~13:00 UTC.
+        EPEX publication time of ~12:00 UTC.
         """
         tomorrow = (now_utc + timedelta(days=1)).date()
         tomorrow_start = datetime(
