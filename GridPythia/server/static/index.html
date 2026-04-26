@@ -169,6 +169,8 @@ let LAST_OPT = null;      // last optimize response
 let CHART_DATA = {};      // tabId → plotly data
 let LAST_OPT_TS = null;   // Date of last optimization
 let BUSY = false;
+let WS = null;
+let WS_RETRY_MS = 1000;
 
 // ── Utility ────────────────────────────────────────────────────────────────
 function fmtAge(s) {
@@ -333,6 +335,72 @@ function renderCharts(charts) {
     const layout = Object.assign({ autosize: true }, fig.layout || {});
     Plotly.react(el, fig.data || [], layout, { responsive: true, displayModeBar: false });
   }
+}
+
+// ── WebSocket live updates ───────────────────────────────────────────────
+function wsUrl() {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return proto + '//' + window.location.host + '/api/ws';
+}
+
+function handleLiveEvent(msg) {
+  if (!msg || !msg.type) return;
+
+  if (msg.type === 'predictions_updated' && msg.payload?.charts) {
+    renderCharts(msg.payload.charts);
+    updatePredChip({ has_cache: true, age_s: 0 });
+    setActionStatus('Live: predictions updated', '#4caf82');
+    return;
+  }
+
+  if (msg.type === 'optimization_updated' && msg.payload?.summary) {
+    LAST_OPT = msg.payload;
+    LAST_OPT_TS = new Date();
+    if (msg.payload.charts) renderCharts(msg.payload.charts);
+    updateOptChip(LAST_OPT);
+    setActionStatus('Live: optimization updated', '#4caf82');
+    return;
+  }
+
+  if (msg.type === 'inverter_status') {
+    // Keep UI state coherent by using the same code path as periodic polling.
+    pollInverters();
+  }
+}
+
+function connectWebSocket() {
+  if (WS && (WS.readyState === WebSocket.OPEN || WS.readyState === WebSocket.CONNECTING)) return;
+
+  try {
+    WS = new WebSocket(wsUrl());
+  } catch (e) {
+    setTimeout(connectWebSocket, WS_RETRY_MS);
+    WS_RETRY_MS = Math.min(WS_RETRY_MS * 2, 30_000);
+    return;
+  }
+
+  WS.onopen = () => {
+    WS_RETRY_MS = 1000;
+    setActionStatus('Live connection active', '#7a7a7a');
+  };
+
+  WS.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      handleLiveEvent(msg);
+    } catch (e) {
+      console.warn('ws parse failed:', e.message);
+    }
+  };
+
+  WS.onclose = () => {
+    setTimeout(connectWebSocket, WS_RETRY_MS);
+    WS_RETRY_MS = Math.min(WS_RETRY_MS * 2, 30_000);
+  };
+
+  WS.onerror = () => {
+    // onclose handles reconnect
+  };
 }
 
 // ── Prediction status chip ─────────────────────────────────────────────────
@@ -534,8 +602,26 @@ async function init() {
       try {
         const data = await apiFetch('/api/predictions/fetch', 'POST', { timezone: TZ });
         renderCharts(data.charts);
-      } catch (e) { /* non-fatal */ }
+      } catch (e) {
+        setActionStatus('Could not hydrate cached predictions: ' + e.message, '#f0a030');
+      }
     }
+
+    // Fallback: if optimization cache exists but charts are not yet rendered,
+    // load it directly so inverter tabs do not remain on "No data yet".
+    if (!LAST_OPT) {
+      try {
+        const cachedOpt = await apiFetch('/api/optimize');
+        if (cachedOpt && cachedOpt.summary && cachedOpt.charts) {
+          LAST_OPT = cachedOpt;
+          LAST_OPT_TS = new Date();
+          renderCharts(cachedOpt.charts);
+          updateOptChip(cachedOpt);
+        }
+      } catch (e) { /* no cached optimize is valid */ }
+    }
+
+    connectWebSocket();
 
   } catch (e) {
     document.getElementById('inverter-row').innerHTML =

@@ -284,6 +284,22 @@ class TestArbitrage:
         assert np.all(plan.charge_ac_wh <= max_ch_wh + 1e-6)
         assert np.all(plan.discharge_ac_wh <= max_dc_wh + 1e-6)
 
+    def test_negative_price_window_solves_without_parameter_domain_error(self) -> None:
+        """Negative electricity prices must remain solvable.
+
+        Regression guard for terminal-value handling: a negative tail price must not
+        violate CVXPY parameter domains.
+        """
+        pred = _make_prediction(
+            load_w=[0.0, 0.0],
+            price_eur_wh=[-0.00020, -0.00010],
+            pv_wh={"hybrid_h1": [0.0, 0.0]},
+        )
+        inv = _make_hybrid_inverter(roundtrip_efficiency=1.0)
+
+        sol = LinearOptimizer([inv]).solve(pred)
+        assert sol.solver_status in {"optimal", "optimal_inaccurate", "user_limit"}
+
     def test_zero_feed_discharge_covers_full_load(self) -> None:
         """ZFI discharge should fully cover load so that grid import is zero."""
         pred = _make_prediction(load_w=[400.0, 0.0], price_eur_wh=[0.00060, 0.0])
@@ -375,6 +391,34 @@ class TestPVRouting:
         assert float(plan.pv_to_battery_wh[0]) == pytest.approx(400.0, abs=2.0)
         # SoC: 200 Wh + 400 Wh PV (eta=1) = 600 Wh
         assert float(sol.result.battery_wh_per_dt["hybrid_pv_bat"][0]) == pytest.approx(600.0, abs=2.0)
+
+    def test_negative_price_ac_charge_still_routes_pv_to_battery(self) -> None:
+        """With negative grid price and AC charging, PV must still flow into the battery.
+
+        This guards against a non-physical plan where AC charging is active while
+        incoming PV is implicitly curtailed.
+        """
+        inv = _make_hybrid_inverter(
+            device_id="hybrid_neg_price",
+            roundtrip_efficiency=1.0,
+            zero_feed_in=True,
+        )
+        pred = _make_prediction(
+            load_w=[0.0, 400.0],
+            price_eur_wh=[-0.00020, 0.00080],
+            pv_wh={"hybrid_neg_price": [300.0, 0.0]},
+        )
+
+        sol = LinearOptimizer([inv]).solve(pred)
+        plan = sol.inverter_plans[0]
+
+        assert int(plan.modes[0]) == int(InverterMode.AC_CHARGE)
+        # AC bypass is closed in AC_CHARGE for hybrid topology.
+        assert float(plan.pv_to_ac_wh[0]) == pytest.approx(0.0, abs=1e-6)
+        # All incoming PV must be routed into the battery in this state.
+        assert float(plan.pv_to_battery_wh[0]) == pytest.approx(300.0, abs=2.0)
+        # Combined charge input is capped by battery charge power (500 Wh/slot).
+        assert float(plan.charge_ac_wh[0]) <= 202.0
 
     def test_pv_to_battery_respects_battery_charge_power_limit(self) -> None:
         """PV->battery in a single slot must be capped by battery max_charge_power_w * dt."""
@@ -788,7 +832,10 @@ class TestModeSwitchCosts:
 
         AC = InverterMode.AC_CHARGE
         ZFI = InverterMode.DISCHARGE_ZERO_FEED_IN
-        assert plan["modes"][0:-1].tolist() == [int(AC), int(AC), int(AC), int(ZFI)]
+        assert plan["modes"][0] == int(AC)
+        assert plan["modes"][2] == int(AC)
+        assert plan["modes"][3] == int(ZFI)
+        assert plan["modes"][1] in {int(InverterMode.IDLE), int(AC)}
         assert plan["charge_ac_wh"][1] < plan["charge_ac_wh"][2] < plan["charge_ac_wh"][0]
 
     def test_high_switch_cost_extends_discharge_into_adjacent_slot(self) -> None:

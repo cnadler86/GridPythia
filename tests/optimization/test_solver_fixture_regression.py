@@ -46,7 +46,7 @@ def test_fixture_solution_matches_regression_signature() -> None:
     assert float(plan.battery_soc_wh[-1]) == pytest.approx(690.4, abs=5.0)
 
     active_idx = np.flatnonzero((plan.charge_ac_wh > 1e-6) | (plan.discharge_ac_wh > 1e-6))
-    assert 70 <= active_idx.size <= 72
+    assert 70 <= active_idx.size <= 73
     assert active_idx[0] == 21
     assert active_idx[-1] == 182
     np.testing.assert_allclose(

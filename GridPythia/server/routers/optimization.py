@@ -214,6 +214,8 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
     # Cache the solution for reuse when navigating back
     services.set_cached_solution(response_data)
 
+    await state.ws_hub.broadcast({"type": "optimization_updated", "payload": response_data})
+
     # ── Publish plan via MQTT (if gateway is running) ─────────────────
     if state.mqtt_gateway is not None:
         state.mqtt_gateway.publish_plans(

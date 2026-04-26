@@ -813,9 +813,10 @@ class LinearOptimizer:
             if inv.battery is not None:
                 pv_to_bat = cp.Variable(T, nonneg=True, name=f"pv_to_bat_{inv_id}")
                 pv_ac_buffered = cp.Variable(T, nonneg=True, name=f"pv_ac_buf_{inv_id}")
-                self._constraints.append(
-                    pv_ac + pv_to_bat <= pv_pred
-                )  # Curtailment allowed when AC and battery are saturated
+                # Physical PV continuity for hybrid inverters:
+                # incoming PV cannot vanish; it must be routed either to AC or battery.
+                # In IDLE / AC_CHARGE, pv_ac is mode-gated to 0, so PV flows to battery.
+                self._constraints.append(pv_ac + pv_to_bat == pv_pred)
                 # Buffered PV cannot exceed total PV on AC.
                 self._constraints.append(pv_ac_buffered <= pv_ac)
                 if mode_dc_activity is not None:
@@ -1035,7 +1036,9 @@ class LinearOptimizer:
         mean_eta_d = float(np.mean(eta_d_values))
         N = min(prep.T, 6)
         mean_price = float(np.mean(prep.price[-N:]))
-        return mean_price * mean_eta_d
+        # Keep terminal value non-negative so negative end-of-horizon price windows
+        # don't violate the nonneg CVXPY parameter domain.
+        return max(0.0, mean_price * mean_eta_d)
 
     def _terminal_reward_expr(self) -> cp.Expression | float:
         if isinstance(self._terminal_soc_sum, (int, float)):

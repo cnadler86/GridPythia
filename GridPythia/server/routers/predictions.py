@@ -166,6 +166,17 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
     services.set_cached_pdata(pdata, forecast_from)
     charts = services.make_prediction_figures(pdata, forecast_from)
 
+    await state.ws_hub.broadcast(
+        {
+            "type": "predictions_updated",
+            "payload": {
+                "charts": charts,
+                "from_cache": False,
+                "errors": errors,
+            },
+        }
+    )
+
     # ── Start background retry for any failed providers ───────────────
     if errors:
         failed_ids = list(errors.keys())
