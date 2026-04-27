@@ -100,29 +100,29 @@ class TestComputeSourceValidUntil:
         return _make_provider()
 
     def test_before_publication_no_next_day(self):
-        """Before 13:00 UTC without tomorrow's data → valid until today 13:00 UTC."""
+        """Before 12:00 UTC without tomorrow's data → valid until today 12:00 UTC."""
         provider = self._provider()
         now = datetime(2025, 6, 15, 10, 0, tzinfo=timezone.utc)
         # known_until = today 23:00 UTC (today's real data only)
         known_until = datetime(2025, 6, 15, 23, 0, tzinfo=timezone.utc)
         result = provider._compute_source_valid_until(now, known_until)
-        expected = datetime(2025, 6, 15, 13, 0, tzinfo=timezone.utc)
+        expected = datetime(2025, 6, 15, 12, 0, tzinfo=timezone.utc)
         assert result == expected
 
     def test_after_publication_with_next_day(self):
-        """After 13:00 UTC with tomorrow's real data → valid until tomorrow 13:00 UTC."""
+        """After 12:00 UTC with tomorrow's real data → valid until tomorrow 12:00 UTC."""
         provider = self._provider()
         now = datetime(2025, 6, 15, 14, 0, tzinfo=timezone.utc)
         # known_until = tomorrow (next-day real prices available)
-        known_until = datetime(2025, 6, 16, 12, 0, tzinfo=timezone.utc)
+        known_until = datetime(2025, 6, 16, 11, 0, tzinfo=timezone.utc)
         result = provider._compute_source_valid_until(now, known_until)
-        expected = datetime(2025, 6, 16, 13, 0, tzinfo=timezone.utc)
+        expected = datetime(2025, 6, 16, 12, 0, tzinfo=timezone.utc)
         assert result == expected
 
     def test_after_publication_no_next_day_short_retry(self):
-        """After 13:00 UTC without tomorrow's data → short retry (~15 min)."""
+        """After 12:00 UTC without tomorrow's data → short retry (~15 min)."""
         provider = self._provider()
-        now = datetime(2025, 6, 15, 14, 30, tzinfo=timezone.utc)
+        now = datetime(2025, 6, 15, 13, 30, tzinfo=timezone.utc)
         known_until = datetime(2025, 6, 15, 23, 0, tzinfo=timezone.utc)
         result = provider._compute_source_valid_until(now, known_until)
         assert result == now + _RETRY_AFTER_FAILED_REFRESH
@@ -133,7 +133,7 @@ class TestComputeSourceValidUntil:
         now = datetime(2025, 6, 15, 13, 30, tzinfo=timezone.utc)
         known_until = datetime(2025, 6, 16, 0, 0, tzinfo=timezone.utc)  # exactly tomorrow
         result = provider._compute_source_valid_until(now, known_until)
-        expected = datetime(2025, 6, 16, 13, 0, tzinfo=timezone.utc)
+        expected = datetime(2025, 6, 16, 12, 0, tzinfo=timezone.utc)
         assert result == expected
 
 
