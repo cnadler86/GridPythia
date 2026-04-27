@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from structlog import get_logger
 
 import GridPythia.server.state as state
@@ -276,12 +276,12 @@ async def optimize_status() -> OptimizeStatusResponse:
 
 
 @router.get("/optimize")
-async def get_cached_optimize() -> JSONResponse:
+async def get_cached_optimize() -> Response:
     """Return the cached optimization result if available.
 
     Returns 204 (No Content) if no cache exists or cache is stale.
     """
     cached = services.get_cached_solution()
     if cached is None:
-        return JSONResponse({"error": "No cached solution available"}, status_code=204)
+        return Response(status_code=204)
     return JSONResponse(cached)
