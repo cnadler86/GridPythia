@@ -417,6 +417,7 @@ class _Tab:
         self.frame.columnconfigure(1, weight=1)
         self.frame.rowconfigure(0, weight=1)
         self._hover_cids: list[int] = []
+        self._prov_var: tk.StringVar = tk.StringVar(value="")
         self._cached_prov: Any = None
         self._last_prov_sig: str | None = None
         self._build_layout()
@@ -509,7 +510,7 @@ class _Tab:
         return self.PROVIDERS[0] if self.PROVIDERS else ""
 
     def load_defaults_from_config(self) -> None:
-        if self.PROVIDERS and hasattr(self, "_prov_var"):
+        if self.PROVIDERS:
             prov = self._initial_provider()
             if prov in self.PROVIDERS:
                 self._prov_var.set(prov)
@@ -954,9 +955,7 @@ class PVForecastTab(_Tab):
         hz_text = self._horizon.get().strip()
         userhorizon = _csv(hz_text) if hz_text else None
         # Determine inverter_id with precedence: GUI field -> YAML -> optimization inverter -> 'inverter1'
-        gui_val = None
-        if hasattr(self, "_plane_inverter_id"):
-            gui_val = self._plane_inverter_id.get().strip()
+        gui_val = self._plane_inverter_id.get().strip()
 
         yaml_val = self.app.cfg_text(
             "prediction", "pvforecast", "plane", "inverter_id", default=""
@@ -1948,14 +1947,12 @@ class OptimizationTab(_Tab):
                         elif self._last_ts and len(self._last_ts) >= n:
                             x_dt = list(self._last_ts[:n])
                         # 3. Fallback: aus res (SimulationResult) falls vorhanden
-                        elif (
-                            hasattr(res, "timestamps")
-                            and res.timestamps
-                            and len(res.timestamps) >= n
-                        ):
-                            x_dt = list(res.timestamps[:n])
-                        # 4. Notfalls: Index
                         else:
+                            res_timestamps = getattr(res, "timestamps", None)
+                            if res_timestamps and len(res_timestamps) >= n:
+                                x_dt = list(res_timestamps[:n])
+                        # 4. Notfalls: Index
+                        if x_dt is None:
                             x_dt = None
 
                         if x_dt is not None:
@@ -2574,8 +2571,7 @@ class App:
         # Optimization is triggered explicitly from the Optimization tab button.
         for tab in self.tabs:
             if isinstance(tab, OptimizationTab):
-                if hasattr(tab, "_status"):
-                    tab._status.set("Skipped by Fetch All · use 'Run Optimization'")
+                tab._status.set("Skipped by Fetch All · use 'Run Optimization'")
                 continue
             tab.fetch()
 

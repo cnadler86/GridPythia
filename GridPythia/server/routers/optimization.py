@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from structlog import get_logger
 
 import GridPythia.server.state as state
@@ -18,6 +18,7 @@ from GridPythia.prediction.electricprice.energycharts import ElecPriceEnergyChar
 from GridPythia.prediction.prediction import Prediction
 from GridPythia.server import services
 from GridPythia.server.models import OptimizeRequest, OptimizeStatusResponse, OptimizeSummary
+from GridPythia.simulation.devices import InverterMode
 
 logger = get_logger(__name__)
 
@@ -65,27 +66,49 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
         pdata, forecast_from = cached
         logger.info("optimize_using_cached_pdata")
     else:
+        stale_cached = services.get_cached_pdata_any_age()
+
         try:
             setup = services.get_providers(cfg, raw_yaml)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Provider build error: {exc}") from exc
-
-        pred = Prediction(setup)
-        try:
-            pdata = await pred.fetch(
-                start=datetime.now(tz=tz),
-                hours=float(cfg.prediction.horizon),
-                dt_hours=float(cfg.prediction.dt_hours),
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Prediction fetch failed: {exc}") from exc
-
-        forecast_from = (
-            setup.electricprice.last_real_ts
-            if isinstance(setup.electricprice, ElecPriceEnergyCharts)
-            else None
-        )
-        services.set_cached_pdata(pdata, forecast_from)
+            if stale_cached is not None:
+                pdata, forecast_from = stale_cached
+                age_s = services.get_cached_pdata_age_s()
+                logger.warning(
+                    "optimize_using_stale_cached_pdata",
+                    reason=f"provider_build_error: {exc}",
+                    cache_age_s=(round(age_s, 1) if age_s is not None else None),
+                )
+            else:
+                raise HTTPException(status_code=500, detail=f"Provider build error: {exc}") from exc
+        else:
+            pred = Prediction(setup)
+            try:
+                pdata = await pred.fetch(
+                    start=datetime.now(tz=tz),
+                    hours=float(cfg.prediction.horizon),
+                    dt_hours=float(cfg.prediction.dt_hours),
+                )
+            except Exception as exc:
+                if stale_cached is not None:
+                    pdata, forecast_from = stale_cached
+                    age_s = services.get_cached_pdata_age_s()
+                    logger.warning(
+                        "optimize_using_stale_cached_pdata",
+                        reason=f"prediction_fetch_error: {exc}",
+                        cache_age_s=(round(age_s, 1) if age_s is not None else None),
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=502, detail=f"Prediction fetch failed: {exc}"
+                    ) from exc
+            else:
+                forecast_from = (
+                    setup.electricprice.last_real_ts
+                    if isinstance(setup.electricprice, ElecPriceEnergyCharts)
+                    else None
+                )
+                services.set_cached_pdata(pdata, forecast_from)
 
     # ── Optimizer ─────────────────────────────────────────────────────
     try:
@@ -120,10 +143,13 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
     # Defaults from live coordinator state; request payload overrides these values.
     soc_wh = state.coordinator.get_soc_overrides_wh(optimizer.inverters)
     soc_wh.update(services.soc_overrides_wh_for_solver(optimizer, req.battery_soc))
+    soc_wh = services.cap_runtime_soc_wh_for_solver(optimizer, soc_wh)
 
     initial_modes = state.coordinator.get_initial_modes(optimizer.inverters)
     if req.initial_modes:
-        initial_modes.update(req.initial_modes)
+        initial_modes.update(
+            {inv_id: InverterMode(int(mode)) for inv_id, mode in req.initial_modes.items()}
+        )
 
     try:
         async with state.get_optimizer_lock():
@@ -214,6 +240,8 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
     # Cache the solution for reuse when navigating back
     services.set_cached_solution(response_data)
 
+    await state.ws_hub.broadcast({"type": "optimization_updated", "payload": response_data})
+
     # ── Publish plan via MQTT (if gateway is running) ─────────────────
     if state.mqtt_gateway is not None:
         state.mqtt_gateway.publish_plans(
@@ -248,12 +276,12 @@ async def optimize_status() -> OptimizeStatusResponse:
 
 
 @router.get("/optimize")
-async def get_cached_optimize() -> JSONResponse:
+async def get_cached_optimize() -> Response:
     """Return the cached optimization result if available.
 
     Returns 204 (No Content) if no cache exists or cache is stale.
     """
     cached = services.get_cached_solution()
     if cached is None:
-        return JSONResponse({"error": "No cached solution available"}, status_code=204)
+        return Response(status_code=204)
     return JSONResponse(cached)

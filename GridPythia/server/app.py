@@ -16,6 +16,7 @@ from GridPythia.server.routers.config import router as config_router
 from GridPythia.server.routers.inverters import router as inverters_router
 from GridPythia.server.routers.optimization import router as optimization_router
 from GridPythia.server.routers.predictions import router as predictions_router
+from GridPythia.server.routers.realtime import router as realtime_router
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -24,6 +25,7 @@ _STATIC_DIR = Path(__file__).parent / "static"
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Start background tasks on startup; cancel them on shutdown."""
     mqtt_task: asyncio.Task | None = None
+    scheduler_task: asyncio.Task | None = None
 
     try:
         cfg, _ = services.load_config()
@@ -35,6 +37,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         mqtt_task = asyncio.create_task(run_gateway(cfg.server.mqtt), name="mqtt-gateway")
 
+    from GridPythia.server.scheduler import run_scheduler
+
+    scheduler_task = asyncio.create_task(run_scheduler(), name="server-scheduler")
+
     try:
         yield
     finally:
@@ -42,6 +48,12 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             mqtt_task.cancel()
             try:
                 await mqtt_task
+            except asyncio.CancelledError:
+                pass
+        if scheduler_task is not None and not scheduler_task.done():
+            scheduler_task.cancel()
+            try:
+                await scheduler_task
             except asyncio.CancelledError:
                 pass
         state.mqtt_connected = False
@@ -75,6 +87,7 @@ def create_app(config_path: Path) -> FastAPI:
     app.include_router(predictions_router, prefix="/api/predictions")
     app.include_router(inverters_router, prefix="/api")
     app.include_router(optimization_router, prefix="/api")
+    app.include_router(realtime_router, prefix="/api")
 
     # Static frontend – mounted last so all /api/* routes take precedence.
     app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")

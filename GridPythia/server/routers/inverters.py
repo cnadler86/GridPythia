@@ -55,7 +55,7 @@ async def report_inverter_status(
     )
 
     max_age = cfg.server.inverter_status_max_age_s
-    return InverterStatusResponse(
+    response = InverterStatusResponse(
         device_id=inv_state.device_id,
         soc=inv_state.soc,
         mode=inv_state.mode.value,
@@ -64,6 +64,8 @@ async def report_inverter_status(
         age_s=round(inv_state.age_s(), 1),
         is_fresh=inv_state.is_fresh(max_age),
     )
+    await state.ws_hub.broadcast({"type": "inverter_status", "payload": response.model_dump()})
+    return response
 
 
 @router.get("/status", response_model=list[InverterStatusResponse])

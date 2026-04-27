@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from fastapi import WebSocket
+
 if TYPE_CHECKING:
     from GridPythia.optimization.solver import LinearOptimizer
     from GridPythia.prediction.prediction import PredictionData, PredictionSetup
@@ -80,3 +82,41 @@ SOLUTION_CACHE_TTL_S: float = 3600.0  # 1 hour
 # Tracks real-time inverter states (SoC, mode).  max_age_s is updated from
 # the ServerConfig when the config is first loaded.
 coordinator: InverterCoordinator = InverterCoordinator()
+
+
+class DashboardWebSocketHub:
+    """Track dashboard websocket clients and broadcast JSON events."""
+
+    def __init__(self) -> None:
+        self._clients: set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        async with self._lock:
+            self._clients.add(ws)
+
+    async def disconnect(self, ws: WebSocket) -> None:
+        async with self._lock:
+            self._clients.discard(ws)
+
+    async def broadcast(self, event: dict) -> None:
+        async with self._lock:
+            targets = list(self._clients)
+
+        stale: list[WebSocket] = []
+        for ws in targets:
+            try:
+                await ws.send_json(event)
+            except Exception:
+                stale.append(ws)
+
+        if not stale:
+            return
+
+        async with self._lock:
+            for ws in stale:
+                self._clients.discard(ws)
+
+
+ws_hub = DashboardWebSocketHub()

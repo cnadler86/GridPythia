@@ -245,6 +245,20 @@ def get_cached_pdata() -> tuple[PredictionData, datetime | None] | None:
     return state.pdata_cache, state.pdata_forecast_from
 
 
+def get_cached_pdata_any_age() -> tuple[PredictionData, datetime | None] | None:
+    """Return cached ``(pdata, forecast_from)`` regardless of TTL freshness."""
+    if state.pdata_cache is None or state.pdata_cache_ts is None:
+        return None
+    return state.pdata_cache, state.pdata_forecast_from
+
+
+def get_cached_pdata_age_s() -> float | None:
+    """Return age of current prediction cache in seconds, or None when absent."""
+    if state.pdata_cache_ts is None:
+        return None
+    return (datetime.now() - state.pdata_cache_ts).total_seconds()
+
+
 def set_cached_pdata(pdata: PredictionData, forecast_from: datetime | None) -> None:
     state.pdata_cache = pdata
     state.pdata_cache_ts = datetime.now()
@@ -298,6 +312,29 @@ def soc_overrides_wh_for_solver(
         )
         result[inv.device_id] = (pct / 100.0) * float(inv.battery.capacity_wh)
     return result
+
+
+def cap_runtime_soc_wh_for_solver(
+    optimizer: LinearOptimizer,
+    runtime_soc_wh: dict[str, float],
+) -> dict[str, float]:
+    """Clamp runtime SoC overrides (Wh) to each inverter battery limits.
+
+    Accepts a mapping keyed by inverter device-id and returns a new mapping
+    containing only inverters with batteries, clipped to [min_soc_wh, max_soc_wh].
+    """
+    if not runtime_soc_wh:
+        return {}
+
+    capped: dict[str, float] = {}
+    for inv in optimizer.inverters:
+        if inv.battery is None:
+            continue
+        raw = runtime_soc_wh.get(inv.device_id)
+        if raw is None:
+            continue
+        capped[inv.device_id] = float(np.clip(raw, inv.battery.min_soc_wh, inv.battery.max_soc_wh))
+    return capped
 
 
 # ── Chart builders ────────────────────────────────────────────────────────

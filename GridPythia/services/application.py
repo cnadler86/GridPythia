@@ -105,6 +105,7 @@ class GridPythiaService:
     _optimizer: LinearOptimizer | None = field(default=None, init=False, repr=False)
     _inverters: list[InverterBase] = field(default_factory=list, init=False, repr=False)
     _config_mtime: float = field(default=0.0, init=False, repr=False)
+    _config_loaded: bool = field(default=False, init=False, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -128,12 +129,13 @@ class GridPythiaService:
         import yaml
 
         mtime = self._get_config_mtime()
-        if mtime == self._config_mtime and hasattr(self, "config"):
+        if mtime == self._config_mtime and self._config_loaded:
             return False
 
         self.raw_yaml = yaml.safe_load(self.config_path.read_text(encoding="utf-8")) or {}
         self.config = AppConfig.from_dict(self.raw_yaml)
         self._config_mtime = mtime
+        self._config_loaded = True
         self._providers = None  # Invalidate cached providers
         self._optimizer = None  # Invalidate cached optimizer
         logger.info("config_reloaded", path=str(self.config_path))
