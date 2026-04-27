@@ -160,7 +160,9 @@ class LinearOptimizer:
                 raw_mode if isinstance(raw_mode, InverterMode) else InverterMode(int(raw_mode))
             )
 
-        warm_start_plan = self._build_warm_start_plan(self._compute_roll_steps(prediction))
+        roll_steps = self._compute_roll_steps(prediction)
+        self._log.debug("optimizer_roll_horizon", shift_steps=roll_steps, horizon_steps=prep.T)
+        warm_start_plan = self._build_warm_start_plan(roll_steps)
         self._update_runtime_parameters(prep, normalized_initial_modes, soc=soc)
         self._apply_warm_start_values(prep, warm_start_plan)
 

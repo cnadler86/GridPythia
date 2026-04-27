@@ -300,6 +300,29 @@ def soc_overrides_wh_for_solver(
     return result
 
 
+def cap_runtime_soc_wh_for_solver(
+    optimizer: LinearOptimizer,
+    runtime_soc_wh: dict[str, float],
+) -> dict[str, float]:
+    """Clamp runtime SoC overrides (Wh) to each inverter battery limits.
+
+    Accepts a mapping keyed by inverter device-id and returns a new mapping
+    containing only inverters with batteries, clipped to [min_soc_wh, max_soc_wh].
+    """
+    if not runtime_soc_wh:
+        return {}
+
+    capped: dict[str, float] = {}
+    for inv in optimizer.inverters:
+        if inv.battery is None:
+            continue
+        raw = runtime_soc_wh.get(inv.device_id)
+        if raw is None:
+            continue
+        capped[inv.device_id] = float(np.clip(raw, inv.battery.min_soc_wh, inv.battery.max_soc_wh))
+    return capped
+
+
 # ── Chart builders ────────────────────────────────────────────────────────
 
 

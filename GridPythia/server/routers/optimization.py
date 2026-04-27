@@ -121,6 +121,7 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
     # Defaults from live coordinator state; request payload overrides these values.
     soc_wh = state.coordinator.get_soc_overrides_wh(optimizer.inverters)
     soc_wh.update(services.soc_overrides_wh_for_solver(optimizer, req.battery_soc))
+    soc_wh = services.cap_runtime_soc_wh_for_solver(optimizer, soc_wh)
 
     initial_modes = state.coordinator.get_initial_modes(optimizer.inverters)
     if req.initial_modes:
