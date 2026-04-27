@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 import GridPythia.server.state as state
 from GridPythia.server import services
+from GridPythia.server.routers.appliance import router as appliance_router
 from GridPythia.server.routers.config import router as config_router
 from GridPythia.server.routers.inverters import router as inverters_router
 from GridPythia.server.routers.optimization import router as optimization_router
@@ -88,6 +89,7 @@ def create_app(config_path: Path) -> FastAPI:
     app.include_router(inverters_router, prefix="/api")
     app.include_router(optimization_router, prefix="/api")
     app.include_router(realtime_router, prefix="/api")
+    app.include_router(appliance_router, prefix="/api")
 
     # Static frontend – mounted last so all /api/* routes take precedence.
     app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")

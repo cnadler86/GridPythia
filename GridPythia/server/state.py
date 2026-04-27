@@ -83,6 +83,11 @@ SOLUTION_CACHE_TTL_S: float = 3600.0  # 1 hour
 # the ServerConfig when the config is first loaded.
 coordinator: InverterCoordinator = InverterCoordinator()
 
+# ── Appliance load forecasts ──────────────────────────────────────────────
+# Maps appliance_id → list of raw forecast slots [{"time": ISO-str, "load_wh": float}].
+# Updated by the MQTT gateway (retained topic) or via the HTTP appliance endpoint.
+appliance_forecasts: dict[str, list[dict]] = {}
+
 
 class DashboardWebSocketHub:
     """Track dashboard websocket clients and broadcast JSON events."""

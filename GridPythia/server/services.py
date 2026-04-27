@@ -7,6 +7,7 @@ module rather than embedding logic inline.
 
 from __future__ import annotations
 
+import bisect
 import json
 from datetime import datetime
 from pathlib import Path
@@ -360,7 +361,13 @@ def make_prediction_figures(
         )
     if pdata.feedintariff is not None:
         figs["tab-feedin"] = fig_to_dict(FeedInTariffPlotter().plot(pdata.feedintariff, ts))
-    figs["tab-load"] = fig_to_dict(LoadPlotter().plot(pdata.load_wh, ts))
+    figs["tab-load"] = fig_to_dict(
+        LoadPlotter().plot(
+            pdata.base_load_wh,
+            ts,
+            appliance_load_by_id=pdata.appliance_load_by_id,
+        )
+    )
     if pdata.pv_by_inverter:
         figs["tab-pv"] = fig_to_dict(
             PVForecastPlotter().plot(pdata.pv_by_inverter, ts, dt_hours=pdata.dt_hours)
@@ -368,6 +375,96 @@ def make_prediction_figures(
     if pdata.weather_by_channel:
         figs["tab-weather"] = fig_to_dict(WeatherPlotter().plot(pdata.weather_by_channel, ts))
     return figs
+
+
+# ── Appliance load helpers ─────────────────────────────────────────────────
+
+
+def snap_appliance_forecasts_to_grid(
+    forecasts: dict[str, list[dict]],
+    timestamps: list,
+    dt_hours: float,
+) -> dict[str, np.ndarray]:
+    """Snap raw appliance forecast slots to the prediction time grid.
+
+    For each slot, the nearest prediction timestamp within ``dt_hours / 2`` is
+    found via binary search.  Energy (Wh) from slots that fall outside the
+    horizon or before *now* is silently dropped.  Multiple slots mapping to the
+    same grid point are summed.
+    """
+    from datetime import timezone as _tz
+
+    if not timestamps:
+        return {}
+
+    half_dt_s = dt_hours * 3600.0 / 2.0
+    now = datetime.now(tz=_tz.utc)
+    ts_epochs = [ts.timestamp() for ts in timestamps]
+
+    result: dict[str, np.ndarray] = {}
+    for appliance_id, slots in forecasts.items():
+        arr = np.zeros(len(timestamps), dtype=np.float32)
+        for slot in slots:
+            try:
+                t_raw = slot["time"]
+                wh = float(slot["load_wh"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            try:
+                t = datetime.fromisoformat(t_raw)
+            except ValueError:
+                continue
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=_tz.utc)
+            else:
+                t = t.astimezone(_tz.utc)
+            if t < now:
+                continue
+            t_epoch = t.timestamp()
+            idx = bisect.bisect_left(ts_epochs, t_epoch)
+            if idx == 0:
+                nearest = 0
+            elif idx >= len(ts_epochs):
+                nearest = len(ts_epochs) - 1
+            else:
+                nearest = (
+                    idx
+                    if abs(ts_epochs[idx] - t_epoch) < abs(ts_epochs[idx - 1] - t_epoch)
+                    else idx - 1
+                )
+            if abs(ts_epochs[nearest] - t_epoch) <= half_dt_s:
+                arr[nearest] += wh
+        result[appliance_id] = arr
+    return result
+
+
+def apply_appliance_loads(pdata: "PredictionData") -> "PredictionData":
+    """Return a new :class:`PredictionData` with active appliance forecasts injected.
+
+    When no appliance forecasts are registered the original *pdata* is returned
+    unchanged (zero-copy fast path).
+    """
+    if not state.appliance_forecasts:
+        return pdata
+    snapped = snap_appliance_forecasts_to_grid(
+        state.appliance_forecasts,
+        pdata.timestamps,
+        pdata.dt_hours,
+    )
+    snapped = {k: v for k, v in snapped.items() if v.any()}
+    if not snapped:
+        return pdata
+    return PredictionData(
+        requested_start=pdata.requested_start,
+        timestamps=pdata.timestamps,
+        dt_hours=pdata.dt_hours,
+        load_wh=pdata.base_load_wh,
+        electricprice_eur_wh=pdata.electricprice,
+        feedintariff_eur_wh=pdata.feedintariff,
+        pv_by_inverter=pdata.pv_by_inverter,
+        weather_by_channel=pdata.weather_by_channel,
+        appliance_load_by_id=snapped,
+    )
 
 
 # ── Inverter plan serialisation ───────────────────────────────────────────

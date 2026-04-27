@@ -110,6 +110,9 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
                 )
                 services.set_cached_pdata(pdata, forecast_from)
 
+    # Apply active appliance load forecasts to pdata before solving
+    pdata = services.apply_appliance_loads(pdata)
+
     # ── Optimizer ─────────────────────────────────────────────────────
     try:
         optimizer = services.get_optimizer(cfg)

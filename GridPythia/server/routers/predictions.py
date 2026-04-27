@@ -122,6 +122,7 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
     cached = services.get_cached_pdata()
     if cached is not None:
         pdata, forecast_from = cached
+        pdata = services.apply_appliance_loads(pdata)
         charts = services.make_prediction_figures(pdata, forecast_from)
         logger.info("predictions_served_from_cache", charts=list(charts.keys()))
         return JSONResponse({"charts": charts, "from_cache": True})
@@ -132,6 +133,7 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
         if stale_cached is None:
             return None
         pdata, forecast_from = stale_cached
+        pdata = services.apply_appliance_loads(pdata)
         charts = services.make_prediction_figures(pdata, forecast_from)
         age_s = services.get_cached_pdata_age_s()
         logger.warning(
@@ -201,6 +203,7 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
         forecast_from = setup.electricprice.last_real_ts
 
     services.set_cached_pdata(pdata, forecast_from)
+    pdata = services.apply_appliance_loads(pdata)
     charts = services.make_prediction_figures(pdata, forecast_from)
 
     await state.ws_hub.broadcast(

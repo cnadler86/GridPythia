@@ -145,6 +145,34 @@ class InverterPlanResponse(BaseModel):
     steps: list[InverterPlanStep]
 
 
+# ── Appliance load forecast ───────────────────────────────────────────────
+
+
+class ApplianceForecastSlot(BaseModel):
+    """One energy-demand slot from a home appliance."""
+
+    time: str = Field(..., description="ISO 8601 datetime (timezone-aware) for this slot")
+    load_wh: float = Field(..., ge=0.0, description="Expected energy demand in Wh for this slot")
+
+
+class ApplianceForecastRequest(BaseModel):
+    """List of forecast slots submitted by a home appliance."""
+
+    slots: list[ApplianceForecastSlot] = Field(
+        ...,
+        description="Ordered list of (time, load_wh) pairs; may span multiple time steps",
+    )
+
+
+class ApplianceForecastInfo(BaseModel):
+    """Summary of one appliance's active forecast."""
+
+    appliance_id: str
+    slot_count: int
+    first_slot: str | None = None
+    last_slot: str | None = None
+
+
 class OptimizeSummary(BaseModel):
     """Cost / savings numbers and solver metadata."""
 
