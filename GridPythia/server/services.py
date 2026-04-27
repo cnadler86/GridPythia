@@ -245,6 +245,20 @@ def get_cached_pdata() -> tuple[PredictionData, datetime | None] | None:
     return state.pdata_cache, state.pdata_forecast_from
 
 
+def get_cached_pdata_any_age() -> tuple[PredictionData, datetime | None] | None:
+    """Return cached ``(pdata, forecast_from)`` regardless of TTL freshness."""
+    if state.pdata_cache is None or state.pdata_cache_ts is None:
+        return None
+    return state.pdata_cache, state.pdata_forecast_from
+
+
+def get_cached_pdata_age_s() -> float | None:
+    """Return age of current prediction cache in seconds, or None when absent."""
+    if state.pdata_cache_ts is None:
+        return None
+    return (datetime.now() - state.pdata_cache_ts).total_seconds()
+
+
 def set_cached_pdata(pdata: PredictionData, forecast_from: datetime | None) -> None:
     state.pdata_cache = pdata
     state.pdata_cache_ts = datetime.now()

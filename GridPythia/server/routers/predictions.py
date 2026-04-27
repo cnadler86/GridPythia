@@ -126,10 +126,35 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
         logger.info("predictions_served_from_cache", charts=list(charts.keys()))
         return JSONResponse({"charts": charts, "from_cache": True})
 
+    stale_cached = services.get_cached_pdata_any_age()
+
+    def _stale_fallback(reason: str) -> JSONResponse | None:
+        if stale_cached is None:
+            return None
+        pdata, forecast_from = stale_cached
+        charts = services.make_prediction_figures(pdata, forecast_from)
+        age_s = services.get_cached_pdata_age_s()
+        logger.warning(
+            "predictions_stale_cache_fallback",
+            reason=reason,
+            cache_age_s=(round(age_s, 1) if age_s is not None else None),
+        )
+        return JSONResponse(
+            {
+                "charts": charts,
+                "from_cache": True,
+                "stale_cache": True,
+                "stale_age_s": (round(age_s, 1) if age_s is not None else None),
+            }
+        )
+
     # ── Slow path: fetch via persistent provider singletons ───────────
     try:
         cfg, raw_yaml = services.load_config()
     except Exception as exc:
+        fallback = _stale_fallback(f"config_error: {exc}")
+        if fallback is not None:
+            return fallback
         raise HTTPException(status_code=500, detail=f"Config error: {exc}") from exc
 
     try:
@@ -141,19 +166,31 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
     try:
         setup = services.get_providers(cfg, raw_yaml)
     except Exception as exc:
+        fallback = _stale_fallback(f"provider_build_error: {exc}")
+        if fallback is not None:
+            return fallback
         raise HTTPException(status_code=500, detail=f"Provider build error: {exc}") from exc
 
     pred = Prediction(setup)
-    pdata, errors = await pred.fetch_partial(
-        start=datetime.now(tz=tz),
-        hours=float(cfg.prediction.horizon),
-        dt_hours=float(cfg.prediction.dt_hours),
-    )
+    try:
+        pdata, errors = await pred.fetch_partial(
+            start=datetime.now(tz=tz),
+            hours=float(cfg.prediction.horizon),
+            dt_hours=float(cfg.prediction.dt_hours),
+        )
+    except Exception as exc:  # noqa: BLE001
+        fallback = _stale_fallback(f"prediction_fetch_error: {exc}")
+        if fallback is not None:
+            return fallback
+        raise HTTPException(status_code=502, detail=f"Prediction fetch failed: {exc}") from exc
 
     # All providers failed → load_wh would be zeros; treat as hard error only
     # when *all* core providers failed (no useful data at all).
     core_failed = {"electricprice", "feedintariff", "load"}
     if errors.keys() >= core_failed:
+        fallback = _stale_fallback(f"all_core_failed: {errors}")
+        if fallback is not None:
+            return fallback
         raise HTTPException(
             status_code=502,
             detail=f"All core prediction providers failed: {errors}",

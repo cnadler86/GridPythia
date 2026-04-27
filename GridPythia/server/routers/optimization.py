@@ -66,27 +66,49 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
         pdata, forecast_from = cached
         logger.info("optimize_using_cached_pdata")
     else:
+        stale_cached = services.get_cached_pdata_any_age()
+
         try:
             setup = services.get_providers(cfg, raw_yaml)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Provider build error: {exc}") from exc
-
-        pred = Prediction(setup)
-        try:
-            pdata = await pred.fetch(
-                start=datetime.now(tz=tz),
-                hours=float(cfg.prediction.horizon),
-                dt_hours=float(cfg.prediction.dt_hours),
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Prediction fetch failed: {exc}") from exc
-
-        forecast_from = (
-            setup.electricprice.last_real_ts
-            if isinstance(setup.electricprice, ElecPriceEnergyCharts)
-            else None
-        )
-        services.set_cached_pdata(pdata, forecast_from)
+            if stale_cached is not None:
+                pdata, forecast_from = stale_cached
+                age_s = services.get_cached_pdata_age_s()
+                logger.warning(
+                    "optimize_using_stale_cached_pdata",
+                    reason=f"provider_build_error: {exc}",
+                    cache_age_s=(round(age_s, 1) if age_s is not None else None),
+                )
+            else:
+                raise HTTPException(status_code=500, detail=f"Provider build error: {exc}") from exc
+        else:
+            pred = Prediction(setup)
+            try:
+                pdata = await pred.fetch(
+                    start=datetime.now(tz=tz),
+                    hours=float(cfg.prediction.horizon),
+                    dt_hours=float(cfg.prediction.dt_hours),
+                )
+            except Exception as exc:
+                if stale_cached is not None:
+                    pdata, forecast_from = stale_cached
+                    age_s = services.get_cached_pdata_age_s()
+                    logger.warning(
+                        "optimize_using_stale_cached_pdata",
+                        reason=f"prediction_fetch_error: {exc}",
+                        cache_age_s=(round(age_s, 1) if age_s is not None else None),
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=502, detail=f"Prediction fetch failed: {exc}"
+                    ) from exc
+            else:
+                forecast_from = (
+                    setup.electricprice.last_real_ts
+                    if isinstance(setup.electricprice, ElecPriceEnergyCharts)
+                    else None
+                )
+                services.set_cached_pdata(pdata, forecast_from)
 
     # ── Optimizer ─────────────────────────────────────────────────────
     try:
