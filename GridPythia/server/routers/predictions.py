@@ -71,7 +71,8 @@ async def _retry_failed_providers(
             forecast_from: datetime | None = None
             if setup.electricprice is not None:
                 forecast_from = setup.electricprice.last_real_ts
-            services.set_cached_pdata(pdata, forecast_from)
+            # Mark as fallback if some providers are still failing, fresh otherwise.
+            services.set_cached_pdata(pdata, forecast_from, is_fallback=bool(errors))
             logger.info("prediction_retry_recovered", recovered=recovered)
 
         remaining = still_failing
@@ -89,13 +90,15 @@ async def predictions_status() -> PredictionsStatusResponse:
     if state.pdata_cache is None or state.pdata_cache_ts is None:
         return PredictionsStatusResponse(has_cache=False, ttl_s=state.PDATA_CACHE_TTL_S)
     age = (datetime.now(timezone.utc) - state.pdata_cache_ts).total_seconds()
+    ttl = state.PDATA_FALLBACK_CACHE_TTL_S if state.pdata_is_fallback else state.PDATA_CACHE_TTL_S
     return PredictionsStatusResponse(
-        has_cache=age < state.PDATA_CACHE_TTL_S,
+        has_cache=age < ttl,
         age_s=round(age, 1),
-        ttl_s=state.PDATA_CACHE_TTL_S,
+        ttl_s=ttl,
         forecast_from=(
             state.pdata_forecast_from.isoformat() if state.pdata_forecast_from else None
         ),
+        is_fallback=state.pdata_is_fallback,
     )
 
 
@@ -202,7 +205,9 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
     if setup.electricprice is not None:
         forecast_from = setup.electricprice.last_real_ts
 
-    services.set_cached_pdata(pdata, forecast_from)
+    # Partial results (some providers failed) get a short TTL so the next
+    # successful fetch can overwrite them quickly.
+    services.set_cached_pdata(pdata, forecast_from, is_fallback=bool(errors))
     pdata = services.apply_appliance_loads(pdata)
     charts = services.make_prediction_figures(pdata, forecast_from)
 

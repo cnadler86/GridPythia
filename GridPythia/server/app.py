@@ -38,9 +38,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         mqtt_task = asyncio.create_task(run_gateway(cfg.server.mqtt), name="mqtt-gateway")
 
-    from GridPythia.server.scheduler import run_scheduler
+    from GridPythia.server.scheduler import run_scheduler, run_startup_fetch
 
     scheduler_task = asyncio.create_task(run_scheduler(), name="server-scheduler")
+    asyncio.create_task(run_startup_fetch(), name="startup-prediction-fetch")
 
     try:
         yield

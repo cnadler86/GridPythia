@@ -52,7 +52,9 @@ def get_optimizer_lock() -> asyncio.Lock:
 pdata_cache: "PredictionData | None" = None
 pdata_cache_ts: datetime | None = None
 pdata_forecast_from: datetime | None = None  # last real EnergyCharts timestamp
-PDATA_CACHE_TTL_S: float = 300.0  # 5 minutes
+pdata_is_fallback: bool = False  # True when cache holds a partial/error result
+PDATA_CACHE_TTL_S: float = 300.0  # 5 minutes – for complete (no-error) fetches
+PDATA_FALLBACK_CACHE_TTL_S: float = 60.0  # 1 minute – for partial/fallback results
 
 # ── Partial-fetch retry state ─────────────────────────────────────────────
 # Maps provider name → next retry datetime when that provider failed on the last fetch.

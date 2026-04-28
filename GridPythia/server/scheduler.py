@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from structlog import get_logger
 
+import GridPythia.server.state as state
 from GridPythia.coordination import next_optimization_slot
 from GridPythia.server import services
 from GridPythia.server.models import FetchRequest, OptimizeRequest
@@ -19,6 +21,95 @@ from GridPythia.server.routers.optimization import optimize
 from GridPythia.server.routers.predictions import fetch_predictions
 
 logger = get_logger(__name__)
+
+# Exponential-backoff delays for the startup fetch (seconds).
+# First entry is 0 → immediate first attempt; subsequent entries add wait time.
+_STARTUP_BACKOFF_DELAYS_S = [0, 5, 10, 20, 40, 60, 120, 240, 480]
+
+
+async def run_startup_fetch() -> None:
+    """Fetch all prediction channels on server startup with exponential backoff.
+
+    Runs immediately on first attempt.  If the fetch fails (all core providers
+    down) or returns only partial data, it retries using the backoff sequence
+    above until either a complete (error-free) result is obtained or all
+    attempts are exhausted.
+
+    A *partial* result (some providers failed) is stored in the cache with the
+    short fallback TTL so the periodic scheduler can replace it quickly on the
+    next successful cycle.  A *complete* result uses the normal TTL.
+
+    Stops early if another task (e.g. a manual /api/predictions/fetch) already
+    populated a fresh, non-fallback cache.
+    """
+    from GridPythia.prediction.prediction import Prediction
+
+    for attempt, delay in enumerate(_STARTUP_BACKOFF_DELAYS_S):
+        if delay > 0:
+            logger.info("startup_fetch_retry_wait", delay_s=delay, attempt=attempt)
+            await asyncio.sleep(delay)
+
+        # Yield if a full (non-fallback) cache was set by another task in the meantime.
+        if services.get_cached_pdata() is not None and not state.pdata_is_fallback:
+            logger.info("startup_fetch_superseded_by_fresh_cache", attempt=attempt)
+            return
+
+        try:
+            cfg, raw_yaml = services.load_config()
+        except Exception as exc:
+            logger.warning("startup_fetch_config_error", attempt=attempt, error=str(exc))
+            continue
+
+        try:
+            tz = ZoneInfo(cfg.server.timezone or "UTC")
+        except Exception:
+            tz = ZoneInfo("UTC")
+
+        try:
+            setup = services.get_providers(cfg, raw_yaml)
+        except Exception as exc:
+            logger.warning("startup_fetch_provider_error", attempt=attempt, error=str(exc))
+            continue
+
+        pred = Prediction(setup)
+        try:
+            pdata, errors = await pred.fetch_partial(
+                start=datetime.now(tz=tz),
+                hours=float(cfg.prediction.horizon),
+                dt_hours=float(cfg.prediction.dt_hours),
+            )
+        except Exception as exc:
+            logger.warning("startup_fetch_failed", attempt=attempt, error=str(exc))
+            continue
+
+        # If all core providers failed there is nothing useful to cache – retry.
+        core_failed = {"electricprice", "feedintariff", "load"}
+        if errors.keys() >= core_failed:
+            logger.warning(
+                "startup_fetch_all_core_failed",
+                attempt=attempt,
+                errors=list(errors.keys()),
+            )
+            continue
+
+        forecast_from = getattr(setup.electricprice, "last_real_ts", None)
+        is_fallback = bool(errors)
+        services.set_cached_pdata(pdata, forecast_from, is_fallback=is_fallback)
+
+        if not errors:
+            logger.info("startup_fetch_success", attempt=attempt)
+            return
+
+        logger.warning(
+            "startup_fetch_partial_success",
+            attempt=attempt,
+            failed=list(errors.keys()),
+        )
+
+    logger.error(
+        "startup_fetch_exhausted_retries",
+        max_attempts=len(_STARTUP_BACKOFF_DELAYS_S),
+    )
 
 
 async def run_scheduler() -> None:

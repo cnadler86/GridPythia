@@ -116,6 +116,8 @@ class PredictionsStatusResponse(BaseModel):
     age_s: float | None = None
     ttl_s: float
     forecast_from: str | None = None
+    is_fallback: bool = False
+    """True when the cached data comes from a partial fetch (some providers failed)."""
 
 
 # ── Optimization status response ──────────────────────────────────────────
