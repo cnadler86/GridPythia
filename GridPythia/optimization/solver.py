@@ -146,6 +146,23 @@ class LinearOptimizer:
                          parity report to the returned solution.
         """
         effective_objective = objective if objective is not None else self._objective
+
+        # Guard: any inverter with has_pv=True must have its id present in
+        # pv_by_inverter.  A missing key would silently produce an all-zero PV
+        # parameter, causing the solver to plan as if there is no solar
+        # generation.  Callers must ensure PV data is available before calling.
+        pv_missing = [
+            inv.device_id
+            for inv in self.inverters
+            if inv.parameters.has_pv and inv.device_id not in prediction.pv_by_inverter
+        ]
+        if pv_missing:
+            raise ValueError(
+                f"PV forecast data missing for inverter(s) {pv_missing}. "
+                "Solve aborted to avoid optimizing with no solar generation. "
+                "Pass a PredictionData that includes pv_by_inverter entries for all has_pv inverters."
+            )
+
         prep = self._prepare_inputs(prediction)
         self._ensure_compiled_layout(prep)
 

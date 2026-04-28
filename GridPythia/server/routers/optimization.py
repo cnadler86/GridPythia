@@ -138,6 +138,41 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
         else OptimizationObjective.MINIMIZE_COST
     )
 
+    # ── PV data integrity guard ───────────────────────────────────────
+    # Each inverter configured with has_pv=True must have its key present in
+    # pdata.pv_by_inverter.  A *missing* key means the PV provider failed and
+    # silently fell back to zeros – the solver would plan as if there is no
+    # solar generation at all, leading to wasteful AC charging.
+    # A key present with all-zero values is OK (legitimate cloudy day).
+    pv_missing = [
+        inv.device_id
+        for inv in optimizer.inverters
+        if inv.parameters.has_pv and inv.device_id not in pdata.pv_by_inverter
+    ]
+    if pv_missing:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"PV forecast missing for inverter(s) {pv_missing}. "
+                "Refusing to optimize without PV data to avoid planning as if there is no solar "
+                "generation. Fix the PV provider or wait for the retry task to recover."
+            ),
+        )
+
+    # Warn when PV key is present but entirely zero during potential solar hours.
+    # This is allowed (overcast day) but worth logging so it can be inspected.
+    _now_local = datetime.now(tz=tz)
+    if 7 <= _now_local.hour < 20:
+        for inv in optimizer.inverters:
+            if inv.parameters.has_pv:
+                pv_arr = pdata.pv_by_inverter.get(inv.device_id)
+                if pv_arr is not None and float(pv_arr.sum()) == 0.0:
+                    logger.warning(
+                        "optimize_pv_all_zero_in_solar_hours",
+                        inverter_id=inv.device_id,
+                        local_hour=_now_local.hour,
+                    )
+
     # Merge solver_opts: config defaults → per-request overrides
     solver_opts = dict(cfg.optimization.solver.solver_opts)
     if req.solver_opts:
