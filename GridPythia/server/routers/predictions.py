@@ -7,7 +7,7 @@ GET  /api/predictions/status – cache status (age, TTL, forecast_from).
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException
@@ -88,7 +88,7 @@ async def predictions_status() -> PredictionsStatusResponse:
     """Return the current state of the server-side prediction cache."""
     if state.pdata_cache is None or state.pdata_cache_ts is None:
         return PredictionsStatusResponse(has_cache=False, ttl_s=state.PDATA_CACHE_TTL_S)
-    age = (datetime.now() - state.pdata_cache_ts).total_seconds()
+    age = (datetime.now(timezone.utc) - state.pdata_cache_ts).total_seconds()
     return PredictionsStatusResponse(
         has_cache=age < state.PDATA_CACHE_TTL_S,
         age_s=round(age, 1),

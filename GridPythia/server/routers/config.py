@@ -70,4 +70,5 @@ async def get_app_config() -> AppConfigResponse:
         optimization_interval_min=cfg.server.scheduler.optimization_interval_minutes,
         inverter_status_max_age_s=cfg.server.inverter_status_max_age_s,
         mqtt_enabled=cfg.server.mqtt.enabled,
+        server_timezone=cfg.server.timezone,
     )

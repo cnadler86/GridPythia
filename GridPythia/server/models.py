@@ -97,6 +97,7 @@ class AppConfigResponse(BaseModel):
     optimization_interval_min: int = 15
     inverter_status_max_age_s: float = 300.0
     mqtt_enabled: bool = False
+    server_timezone: str = "UTC"
 
 
 # ── Prediction status response ────────────────────────────────────────────
@@ -120,6 +121,7 @@ class OptimizeStatusResponse(BaseModel):
     has_cache: bool
     age_s: float | None = None
     ttl_s: float
+    solved_at: str | None = None
 
 
 # ── Optimization response ─────────────────────────────────────────────────
@@ -185,3 +187,4 @@ class OptimizeSummary(BaseModel):
     naive_net_cost_eur: float
     savings_eur: float
     parity_ok: bool | None = None
+    solved_at: str | None = None

@@ -32,6 +32,7 @@ async def run_scheduler() -> None:
         try:
             cfg, _ = services.load_config()
             interval_min = int(cfg.server.scheduler.optimization_interval_minutes)
+            server_tz = cfg.server.timezone or "UTC"
             now = datetime.now(tz=timezone.utc)
             slot = next_optimization_slot(now, interval_min)
             sleep_s = max(0.5, (slot - now).total_seconds())
@@ -46,7 +47,7 @@ async def run_scheduler() -> None:
             logger.info("scheduler_slot_reached", slot=slot.isoformat(), interval_min=interval_min)
 
             try:
-                await fetch_predictions(FetchRequest(timezone="UTC"))
+                await fetch_predictions(FetchRequest(timezone=server_tz))
             except HTTPException as exc:
                 logger.warning(
                     "scheduler_prediction_refresh_failed",
@@ -56,7 +57,7 @@ async def run_scheduler() -> None:
                 continue
 
             try:
-                await optimize(OptimizeRequest(timezone="UTC"))
+                await optimize(OptimizeRequest(timezone=server_tz))
             except HTTPException as exc:
                 logger.warning(
                     "scheduler_optimization_failed",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
@@ -217,6 +217,7 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
         naive_net_cost_eur=round(float(naive_net_cost), 4),
         savings_eur=round(float(savings), 4),
         parity_ok=parity_ok,
+        solved_at=datetime.now(timezone.utc).isoformat(),
     )
 
     parity_warn = " ⚠ parity" if parity_ok is False else ""
@@ -270,12 +271,15 @@ async def optimize_status() -> OptimizeStatusResponse:
         return OptimizeStatusResponse(has_cache=False, age_s=None, ttl_s=state.SOLUTION_CACHE_TTL_S)
 
     age_s = (
-        (datetime.now() - state.solution_cache_ts).total_seconds()
+        (datetime.now(timezone.utc) - state.solution_cache_ts).total_seconds()
         if state.solution_cache_ts is not None
         else None
     )
+    solved_at = state.solution_cache_ts.isoformat() if state.solution_cache_ts is not None else None
 
-    return OptimizeStatusResponse(has_cache=True, age_s=age_s, ttl_s=state.SOLUTION_CACHE_TTL_S)
+    return OptimizeStatusResponse(
+        has_cache=True, age_s=age_s, ttl_s=state.SOLUTION_CACHE_TTL_S, solved_at=solved_at
+    )
 
 
 @router.get("/optimize")

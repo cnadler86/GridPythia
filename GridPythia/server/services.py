@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import bisect
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -240,7 +240,7 @@ def get_cached_pdata() -> tuple[PredictionData, datetime | None] | None:
     """Return ``(pdata, forecast_from)`` when the cache is still fresh, else ``None``."""
     if state.pdata_cache is None or state.pdata_cache_ts is None:
         return None
-    age = (datetime.now() - state.pdata_cache_ts).total_seconds()
+    age = (datetime.now(timezone.utc) - state.pdata_cache_ts).total_seconds()
     if age >= state.PDATA_CACHE_TTL_S:
         return None
     return state.pdata_cache, state.pdata_forecast_from
@@ -257,12 +257,12 @@ def get_cached_pdata_age_s() -> float | None:
     """Return age of current prediction cache in seconds, or None when absent."""
     if state.pdata_cache_ts is None:
         return None
-    return (datetime.now() - state.pdata_cache_ts).total_seconds()
+    return (datetime.now(timezone.utc) - state.pdata_cache_ts).total_seconds()
 
 
 def set_cached_pdata(pdata: PredictionData, forecast_from: datetime | None) -> None:
     state.pdata_cache = pdata
-    state.pdata_cache_ts = datetime.now()
+    state.pdata_cache_ts = datetime.now(timezone.utc)
     state.pdata_forecast_from = forecast_from
 
 
@@ -273,7 +273,7 @@ def get_cached_solution() -> dict | None:
     """Return cached solution when fresh, else None."""
     if state.solution_cache is None or state.solution_cache_ts is None:
         return None
-    age = (datetime.now() - state.solution_cache_ts).total_seconds()
+    age = (datetime.now(timezone.utc) - state.solution_cache_ts).total_seconds()
     if age >= state.SOLUTION_CACHE_TTL_S:
         return None
     return state.solution_cache
@@ -282,7 +282,7 @@ def get_cached_solution() -> dict | None:
 def set_cached_solution(solution_dict: dict) -> None:
     """Store solution JSON and timestamp."""
     state.solution_cache = solution_dict
-    state.solution_cache_ts = datetime.now()
+    state.solution_cache_ts = datetime.now(timezone.utc)
 
 
 # ── SoC override mapping ──────────────────────────────────────────────────

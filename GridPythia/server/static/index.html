@@ -136,6 +136,7 @@
   <span id="chip-pred" class="gp-status-chip">Predictions: —</span>
   <span id="chip-opt"  class="gp-status-chip">Optimization: —</span>
   <span id="next-slot" class="ms-auto">Next slot: <strong id="countdown">—</strong></span>
+  <span id="server-clock" style="font-size:.75rem;color:#bbb;white-space:nowrap">—</span>
   <span id="mqtt-status"><span class="mqtt-dot" id="mqtt-dot"></span>MQTT</span>
   <span id="spinner-global" class="spinner-sm" style="display:none"></span>
 </header>
@@ -162,12 +163,11 @@
 'use strict';
 
 // ── Globals ────────────────────────────────────────────────────────────────
-const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+let TZ = 'UTC';           // server timezone – updated from /api/config
 let CFG = null;           // AppConfigResponse
 let TABS = [];            // [{id, label}]
 let LAST_OPT = null;      // last optimize response
 let CHART_DATA = {};      // tabId → plotly data
-let LAST_OPT_TS = null;   // Date of last optimization
 let BUSY = false;
 let WS = null;
 let WS_RETRY_MS = 1000;
@@ -178,6 +178,34 @@ function fmtAge(s) {
   if (s < 60)   return Math.round(s) + 's ago';
   if (s < 3600) return Math.round(s / 60) + 'min ago';
   return Math.round(s / 3600) + 'h ago';
+}
+
+function fmtTimestamp(isoStr) {
+  if (!isoStr) return '—';
+  try {
+    return new Date(isoStr).toLocaleString('de-DE', {
+      timeZone: TZ,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  } catch (e) {
+    return isoStr;
+  }
+}
+
+// ── Server clock ─────────────────────────────────────────────────────────────
+function updateServerClock() {
+  const el = document.getElementById('server-clock');
+  if (!el) return;
+  try {
+    const now = new Date().toLocaleString('de-DE', {
+      timeZone: TZ,
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    el.textContent = now + ' (' + TZ + ')';
+  } catch (e) {
+    el.textContent = new Date().toLocaleTimeString();
+  }
 }
 
 function setSpinner(on) {
@@ -358,7 +386,6 @@ function handleLiveEvent(msg) {
 
   if (msg.type === 'optimization_updated' && msg.payload?.summary) {
     LAST_OPT = msg.payload;
-    LAST_OPT_TS = new Date();
     if (msg.payload.charts) renderCharts(msg.payload.charts);
     updateOptChip(LAST_OPT);
     setActionStatus('Live: optimization updated', '#4caf82');
@@ -431,8 +458,8 @@ function updateOptChip(opt) {
   const statusOk = opt.summary.solver_status === 'optimal' || opt.summary.solver_status === 'optimal_inaccurate';
   chip.className = 'gp-status-chip ' + (statusOk ? 'ok' : 'warn');
   chip.textContent = 'Opt: ' + opt.summary.solver_status + ' · ' + (savings >= 0 ? '+' : '') + savings.toFixed(3) + ' EUR';
-  const ago = LAST_OPT_TS ? fmtAge((Date.now() - LAST_OPT_TS.getTime()) / 1000) : '—';
-  info.textContent = 'Last optimization: ' + ago + ' · ' + opt.summary.objective + ' · savings ' + savings.toFixed(3) + ' EUR';
+  const solvedAt = opt.summary.solved_at ? fmtTimestamp(opt.summary.solved_at) : '—';
+  info.textContent = 'Last optimization: ' + solvedAt + ' · ' + opt.summary.objective + ' · savings ' + savings.toFixed(3) + ' EUR';
 }
 
 // ── API helpers ────────────────────────────────────────────────────────────
@@ -496,7 +523,6 @@ async function pollOptStatus() {
       // Cache is fresh but we haven't loaded it yet; fetch and render it
       const data = await apiFetch('/api/optimize');
       LAST_OPT = data;
-      LAST_OPT_TS = new Date();
       renderCharts(data.charts);
       updateOptChip(data);
     }
@@ -539,7 +565,6 @@ async function triggerOptimize() {
     setActionStatus('Optimizing…', '#aaa');
     const data = await apiFetch('/api/optimize', 'POST', { timezone: TZ });
     LAST_OPT = data;
-    LAST_OPT_TS = new Date();
     renderCharts(data.charts);
     updateOptChip(data);
     setActionStatus(data.status || 'Optimization done ✓', '#4caf82');
@@ -592,6 +617,7 @@ async function schedulerTick() {
 async function init() {
   try {
     CFG = await apiFetch('/api/config');
+    TZ = CFG.server_timezone || 'UTC';  // use server timezone for all display + API calls
     buildInverterCards(CFG.inverters);
     buildTabs();
 
@@ -618,7 +644,6 @@ async function init() {
         const cachedOpt = await apiFetch('/api/optimize');
         if (cachedOpt && cachedOpt.summary && cachedOpt.charts) {
           LAST_OPT = cachedOpt;
-          LAST_OPT_TS = new Date();
           renderCharts(cachedOpt.charts);
           updateOptChip(cachedOpt);
         }
@@ -634,17 +659,16 @@ async function init() {
   }
 
   // ── Timers ────────────────────────────────────────────────────────────────
-  setInterval(updateCountdown,  1_000);    // countdown every second
-  setInterval(pollInverters,   30_000);   // inverter status every 30s
-  setInterval(pollPredStatus,  60_000);   // pred cache status every 60s
-  setInterval(pollOptStatus,   60_000);   // opt cache status every 60s
-  setInterval(pollMqttStatus,  30_000);   // MQTT status every 30s
-  setInterval(schedulerTick,    5_000);   // check for slot boundary every 5s
-
-  // Also update opt chip age every minute
-  setInterval(() => updateOptChip(LAST_OPT), 60_000);
+  setInterval(updateCountdown,   1_000);    // countdown every second
+  setInterval(updateServerClock, 1_000);    // server clock every second
+  setInterval(pollInverters,    30_000);   // inverter status every 30s
+  setInterval(pollPredStatus,   60_000);   // pred cache status every 60s
+  setInterval(pollOptStatus,    60_000);   // opt cache status every 60s
+  setInterval(pollMqttStatus,   30_000);   // MQTT status every 30s
+  setInterval(schedulerTick,     5_000);   // check for slot boundary every 5s
 
   updateCountdown();
+  updateServerClock();
 }
 
 document.addEventListener('DOMContentLoaded', init);
