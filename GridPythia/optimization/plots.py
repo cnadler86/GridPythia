@@ -402,7 +402,16 @@ class SolutionPlotter:
             },
             height=max(500, 220 * n_rows),
         )
-        fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8")
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor="#e8e8e8",
+            minor={
+                "dtick": 3_600_000,
+                "showgrid": True,
+                "gridcolor": "rgba(200,200,200,0.35)",
+                "ticks": "",
+            },
+        )
         fig.update_yaxes(showgrid=True, gridcolor="#e8e8e8")
         return fig
 
@@ -676,6 +685,15 @@ class SolutionPlotter:
             "height": 700,
         }
         fig.update_layout(**layout_params)
-        fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8")
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor="#e8e8e8",
+            minor={
+                "dtick": 3_600_000,
+                "showgrid": True,
+                "gridcolor": "rgba(200,200,200,0.35)",
+                "ticks": "",
+            },
+        )
         fig.update_yaxes(showgrid=True, gridcolor="#e8e8e8")
         return fig

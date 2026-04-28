@@ -90,7 +90,13 @@ class AppConfigResponse(BaseModel):
 
     batteries: list[BatteryInfo]
     inverters: list[InverterInfo]
-    has_weather: bool
+    visible_prediction_tabs: list[str]
+    """Ordered list of prediction tab IDs the frontend should build.
+
+    Tabs backed by a trivial fixed/constant provider are omitted by the
+    backend so the frontend never needs to know about provider types.
+    Example: ['tab-elecprice', 'tab-load', 'tab-pv']
+    """
     horizon_h: float
     dt_min: int
     objective: str

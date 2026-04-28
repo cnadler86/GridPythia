@@ -60,10 +60,24 @@ async def get_app_config() -> AppConfigResponse:
         )
         for inv in cfg.optimization.inverters
     ]
+    # ── Determine which prediction tabs carry non-trivial data ───────────
+    # A provider is considered "trivial" when it produces a constant flat
+    # series (currently only the "Fixed" providers).  All such tabs are
+    # omitted from the list so the frontend never has to know about providers.
+    pred_tabs: list[str] = []
+    if cfg.prediction.electricprice.provider != "Fixed":
+        pred_tabs.append("tab-elecprice")
+    if cfg.prediction.feedintariff.provider != "Fixed":
+        pred_tabs.append("tab-feedin")
+    pred_tabs.append("tab-load")  # CSV-based, always meaningful
+    pred_tabs.append("tab-pv")  # live forecast, always meaningful
+    if "weather" in raw_yaml.get("prediction", {}):
+        pred_tabs.append("tab-weather")
+
     return AppConfigResponse(
         batteries=batteries,
         inverters=inverters,
-        has_weather="weather" in raw_yaml.get("prediction", {}),
+        visible_prediction_tabs=pred_tabs,
         horizon_h=float(cfg.prediction.horizon),
         dt_min=int(cfg.prediction.dt_hours * 60),
         objective=cfg.optimization.solver.objective,
