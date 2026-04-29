@@ -11,7 +11,6 @@ dependencies = [
     "pydantic>=2.0",
     "aiohttp>=3.9",
     "open-meteo-solar-forecast>=0.1.29",
-    "statsmodels",
     "cvxpy-base>=1.8",
     "highspy>=1.13",
     "holidays>=0.93",
@@ -31,17 +30,13 @@ dev = [
     "matplotlib",
     "ty",
     "ruff",
+    "pympler",
+    "psutil",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["GridPythia*"]
-
-[[tool.uv.index]]
-url = "https://pypi.org/simple/"
-default = true
-# where = ["GridPythia"]
-# include = ["*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -68,7 +68,6 @@ _MODULES_TO_PROBE = [
     # Numerical stack
     "numpy",
     "scipy",
-    "statsmodels",
     # Optimization
     "cvxpy",
     "highspy",
