@@ -40,7 +40,16 @@ def apply_default_layout(
         xaxis_title=xaxis_title or None,
         yaxis_title=yaxis_title or None,
     )
-    fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8")
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="#e8e8e8",
+        minor={
+            "dtick": 3_600_000,
+            "showgrid": True,
+            "gridcolor": "rgba(200,200,200,0.35)",
+            "ticks": "",
+        },
+    )
     fig.update_yaxes(showgrid=True, gridcolor="#e8e8e8")
 
 

@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 import GridPythia.server.state as state
 from GridPythia.server import services
+from GridPythia.server.routers.appliance import router as appliance_router
 from GridPythia.server.routers.config import router as config_router
 from GridPythia.server.routers.inverters import router as inverters_router
 from GridPythia.server.routers.optimization import router as optimization_router
@@ -37,9 +38,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         mqtt_task = asyncio.create_task(run_gateway(cfg.server.mqtt), name="mqtt-gateway")
 
-    from GridPythia.server.scheduler import run_scheduler
+    from GridPythia.server.scheduler import run_scheduler, run_startup_fetch
 
     scheduler_task = asyncio.create_task(run_scheduler(), name="server-scheduler")
+    asyncio.create_task(run_startup_fetch(), name="startup-prediction-fetch")
 
     try:
         yield
@@ -88,6 +90,7 @@ def create_app(config_path: Path) -> FastAPI:
     app.include_router(inverters_router, prefix="/api")
     app.include_router(optimization_router, prefix="/api")
     app.include_router(realtime_router, prefix="/api")
+    app.include_router(appliance_router, prefix="/api")
 
     # Static frontend – mounted last so all /api/* routes take precedence.
     app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")

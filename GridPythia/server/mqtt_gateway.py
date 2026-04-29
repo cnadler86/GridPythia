@@ -42,6 +42,9 @@ logger = get_logger(__name__)
 # Matches: {prefix}/inverters/{device_id}/status
 _TOPIC_RE = re.compile(r"^(.+)/inverters/([^/]+)/status$")
 
+# Matches: {prefix}/appliance_load/forecast/{appliance_id}
+_APPLIANCE_TOPIC_RE = re.compile(r"^(.+)/appliance_load/forecast/([^/]+)$")
+
 
 def _parse_broker(broker_url: str) -> tuple[str, int]:
     """Return (hostname, port) from a broker URL like ``mqtt://localhost:1883``."""
@@ -61,6 +64,7 @@ class MqttGateway:
         self._host = host
         self._port = port
         self._subscribe_topic = f"{cfg.topic_prefix}/inverters/+/status"
+        self._appliance_topic = f"{cfg.topic_prefix}/appliance_load/forecast/+"
 
         self._client = mqtt.Client(
             client_id=cfg.client_id,
@@ -85,6 +89,7 @@ class MqttGateway:
             state.mqtt_connected = True
             logger.info("mqtt_connected", broker=self._cfg.broker, topic=self._subscribe_topic)
             client.subscribe(self._subscribe_topic, qos=0)
+            client.subscribe(self._appliance_topic, qos=0)
         else:
             state.mqtt_connected = False
             logger.warning("mqtt_connect_refused", reason=str(reason_code))
@@ -98,6 +103,33 @@ class MqttGateway:
 
     def _on_message(self, client, userdata, msg: mqtt.MQTTMessage) -> None:
         topic_str = msg.topic
+
+        # ─ Appliance load forecast ──────────────────────────────────────────
+        ma = _APPLIANCE_TOPIC_RE.match(topic_str)
+        if ma and ma.group(1) == self._cfg.topic_prefix:
+            appliance_id = ma.group(2)
+            try:
+                payload = json.loads(msg.payload) if msg.payload else []
+            except (json.JSONDecodeError, ValueError) as exc:
+                logger.warning("mqtt_appliance_bad_payload", topic=topic_str, error=str(exc))
+                return
+            if not isinstance(payload, list):
+                logger.warning("mqtt_appliance_not_list", topic=topic_str)
+                return
+            if payload:
+                state.appliance_forecasts[appliance_id] = payload
+                logger.info(
+                    "mqtt_appliance_forecast_updated",
+                    appliance_id=appliance_id,
+                    slots=len(payload),
+                )
+            else:
+                # Empty payload = clear the retained forecast
+                state.appliance_forecasts.pop(appliance_id, None)
+                logger.info("mqtt_appliance_forecast_cleared", appliance_id=appliance_id)
+            return
+
+        # ─ Inverter status ───────────────────────────────────────────────
         m = _TOPIC_RE.match(topic_str)
         if not m or m.group(1) != self._cfg.topic_prefix:
             return

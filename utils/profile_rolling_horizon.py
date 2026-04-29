@@ -91,10 +91,17 @@ def load_fixture_prediction(path: Path) -> PredictionData:
     steps = min(len(timestamps), len(load_wh))
 
     pv_by_inverter: dict[str, np.ndarray] = {}
-    for key, value in payload.items():
-        if key.startswith("pv_") and key.endswith("_wh") and isinstance(value, list):
-            inv_id = key[len("pv_") : -len("_wh")]
-            pv_by_inverter[inv_id] = np.asarray(value[:steps], dtype=np.float32)
+    # New format: {"pv_by_inverter": {"SF800Pro": [...]}}
+    if isinstance(payload.get("pv_by_inverter"), dict):
+        for inv_id, value in payload["pv_by_inverter"].items():
+            if isinstance(value, list):
+                pv_by_inverter[str(inv_id)] = np.asarray(value[:steps], dtype=np.float32)
+    else:
+        # Legacy flat format: {"pv_SF800Pro_wh": [...]}
+        for key, value in payload.items():
+            if key.startswith("pv_") and key.endswith("_wh") and isinstance(value, list):
+                inv_id = key[len("pv_") : -len("_wh")]
+                pv_by_inverter[inv_id] = np.asarray(value[:steps], dtype=np.float32)
 
     return PredictionData(
         timestamps=timestamps[:steps],
@@ -191,19 +198,21 @@ def parse_highs_start_stats(log_path: Path) -> StartMipStats:
     )
 
 
-def run_profile(
-    config_path: Path, fixture_path: Path, roll_shift_hours: float, output_dir: Path
-) -> None:
-    app_cfg = AppConfig.from_yaml_file(config_path)
-    pred = load_fixture_prediction(fixture_path)
-    inverters = build_inverters(app_cfg.optimization)
+def run_rolling_horizon(
+    inverters: list[InverterBase],
+    pred: PredictionData,
+    *,
+    roll_shift_hours: float = DEFAULT_ROLL_SHIFT_HOURS,
+    base_opts: dict | None = None,
+    objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
+    output_dir: Path | None = None,
+) -> list[RollStats]:
+    """Execute a rolling-horizon solve sequence and return per-roll statistics.
 
-    objective = (
-        OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
-        if app_cfg.optimization.solver.objective == "self_consumption"
-        else OptimizationObjective.MINIMIZE_COST
-    )
-
+    This is the shared engine used by both the CLI profiler (``run_profile``) and
+    the automated performance tests.  Pass ``output_dir`` to write per-roll HiGHS
+    log files; omit it (or pass ``None``) to skip log writing (faster, for tests).
+    """
     dt = float(pred.dt_hours)
     roll_shift_steps = max(1, int(round(roll_shift_hours / dt)))
     if pred.steps <= roll_shift_steps + 1:
@@ -212,35 +221,15 @@ def run_profile(
         )
 
     window_steps = pred.steps - roll_shift_steps
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    base_opts = dict(app_cfg.optimization.solver.solver_opts)
-    base_opts.update(
-        {
-            "verbose": True,
-            "warm_start": True,
-            "output_flag": True,
-            "log_to_console": True,
-            # Keep logs parseable and compact for each roll.
-            "mip_min_logging_interval": 0.0,
-        }
-    )
+    effective_opts: dict = dict(base_opts) if base_opts else {}
 
     optimizer: LinearOptimizer | None = None
     current_modes: dict[str, InverterMode] | None = None
     current_soc: dict[str, float] | None = None
     rows: list[RollStats] = []
-
-    print(f"Fixture file: {fixture_path}")
-    print(f"Fixture steps: {pred.steps}, dt_hours: {pred.dt_hours}")
-    print(f"Total roll span: {roll_shift_hours} h -> {roll_shift_steps} steps")
-    print(f"Window length per solve: {window_steps} steps ({window_steps * dt:.2f} h)")
-    print(
-        f"Window start index per roll: 0..{roll_shift_steps - 1} (increments by 1 step each roll)"
-    )
-    print(f"Objective: {objective.value}")
-    print("Solver verbose enabled: yes")
-    print()
 
     for roll in range(roll_shift_steps):
         pred_window = slice_prediction(pred, start_idx=roll, length=window_steps)
@@ -249,22 +238,25 @@ def run_profile(
             optimizer = LinearOptimizer(
                 inverters=inverters,
                 objective=objective,
-                solver_opts=base_opts,
+                solver_opts=effective_opts,
             )
 
-        log_file = output_dir / f"roll_{roll + 1:03d}.log"
+        per_roll_opts: dict = {}
+        if output_dir is not None:
+            log_file = output_dir / f"roll_{roll + 1:03d}.log"
+            per_roll_opts["log_file"] = str(log_file)
+        else:
+            log_file = None
 
         t0 = time.perf_counter()
         sol = optimizer.solve(
             pred_window,
             soc=current_soc,
             initial_modes=current_modes,
-            solver_opts={"log_file": str(log_file)},
+            solver_opts=per_roll_opts or None,
         )
         wall_s = time.perf_counter() - t0
 
-        # Next roll starts one timestep later. Seed initial state from t+1 when available,
-        # otherwise fall back to t for very short horizons.
         current_modes = {
             plan.device_id: InverterMode(
                 int(plan.modes[1] if plan.modes.size > 1 else plan.modes[0])
@@ -279,7 +271,18 @@ def run_profile(
             and len(soc_trace) > 0
         } or None
 
-        start_mip = parse_highs_start_stats(log_file)
+        start_mip = (
+            parse_highs_start_stats(log_file)
+            if log_file is not None
+            else StartMipStats(
+                first_best_bound=None,
+                first_best_sol=None,
+                first_gap_pct=None,
+                root_best_bound=None,
+                root_best_sol=None,
+                root_gap_pct=None,
+            )
+        )
         objective_value = (
             float(sol.result.total_cost)
             if objective == OptimizationObjective.MINIMIZE_COST
@@ -296,6 +299,57 @@ def run_profile(
                 start_mip=start_mip,
             )
         )
+
+    return rows
+
+
+def run_profile(
+    config_path: Path, fixture_path: Path, roll_shift_hours: float, output_dir: Path
+) -> None:
+    app_cfg = AppConfig.from_yaml_file(config_path)
+    pred = load_fixture_prediction(fixture_path)
+    inverters = build_inverters(app_cfg.optimization)
+
+    objective = (
+        OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
+        if app_cfg.optimization.solver.objective == "self_consumption"
+        else OptimizationObjective.MINIMIZE_COST
+    )
+
+    dt = float(pred.dt_hours)
+    roll_shift_steps = max(1, int(round(roll_shift_hours / dt)))
+
+    base_opts = dict(app_cfg.optimization.solver.solver_opts)
+    base_opts.update(
+        {
+            "verbose": True,
+            "warm_start": True,
+            "output_flag": True,
+            "log_to_console": True,
+            "mip_min_logging_interval": 0.0,
+        }
+    )
+
+    print(f"Fixture file: {fixture_path}")
+    print(f"Fixture steps: {pred.steps}, dt_hours: {pred.dt_hours}")
+    print(f"Total roll span: {roll_shift_hours} h -> {roll_shift_steps} steps")
+    window_steps = pred.steps - roll_shift_steps
+    print(f"Window length per solve: {window_steps} steps ({window_steps * dt:.2f} h)")
+    print(
+        f"Window start index per roll: 0..{roll_shift_steps - 1} (increments by 1 step each roll)"
+    )
+    print(f"Objective: {objective.value}")
+    print("Solver verbose enabled: yes")
+    print()
+
+    rows = run_rolling_horizon(
+        inverters=inverters,
+        pred=pred,
+        roll_shift_hours=roll_shift_hours,
+        base_opts=base_opts,
+        objective=objective,
+        output_dir=output_dir,
+    )
 
     print("=== Rolling Horizon Summary ===")
     print(

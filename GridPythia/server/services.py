@@ -7,14 +7,18 @@ module rather than embedding logic inline.
 
 from __future__ import annotations
 
+import bisect
 import json
-from datetime import datetime
+from datetime import datetime, timezone
+from math import floor
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import plotly.graph_objects as go
 import yaml
+
+# plotly.graph_objects is imported lazily in fig_to_dict() to avoid pulling
+# narwhals (56 modules) via _plotly_utils at server startup.
 from structlog import get_logger
 
 import GridPythia.server.state as state
@@ -34,11 +38,10 @@ from GridPythia.prediction.electricprice.provider import ElecPriceFallbackChain
 from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
 from GridPythia.prediction.load.config import LoadProfileConfig
 from GridPythia.prediction.load.provider import load_provider_from_config
-from GridPythia.prediction.plots.electricprice import ElecPricePlotter
-from GridPythia.prediction.plots.feedintariff import FeedInTariffPlotter
-from GridPythia.prediction.plots.load import LoadPlotter
-from GridPythia.prediction.plots.pvforecast import PVForecastPlotter
-from GridPythia.prediction.plots.weather import WeatherPlotter
+
+# ElecPricePlotter, FeedInTariffPlotter, LoadPlotter, PVForecastPlotter,
+# WeatherPlotter are imported lazily inside make_prediction_figures() to
+# avoid pulling plotly → narwhals at server startup.
 from GridPythia.prediction.prediction import PredictionData, PredictionSetup
 from GridPythia.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
 from GridPythia.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
@@ -56,6 +59,19 @@ _MODE_NAMES: dict[int, str] = {m.value: m.name for m in InverterMode}
 
 
 # ── Config loader ─────────────────────────────────────────────────────────
+
+
+def snap_to_dt_grid(dt: datetime, dt_hours: float) -> datetime:
+    """Round *dt* to the nearest dt_hours grid boundary.
+
+    E.g. 13:07 with dt_hours=0.25 → 13:15; 13:04 → 13:00.
+    Ensures pred.fetch() always receives an aligned start so the solver gets
+    exactly round(hours/dt_hours) steps instead of +1.
+    """
+    step_s = dt_hours * 3600.0
+    epoch = dt.timestamp()
+    rounded_epoch = floor(epoch / step_s + 0.5) * step_s
+    return datetime.fromtimestamp(rounded_epoch, tz=dt.tzinfo)
 
 
 def load_config() -> tuple[AppConfig, dict[str, Any]]:
@@ -236,11 +252,17 @@ def get_optimizer(cfg: AppConfig) -> LinearOptimizer:
 
 
 def get_cached_pdata() -> tuple[PredictionData, datetime | None] | None:
-    """Return ``(pdata, forecast_from)`` when the cache is still fresh, else ``None``."""
+    """Return ``(pdata, forecast_from)`` when the cache is still fresh, else ``None``.
+
+    Uses :data:`~GridPythia.server.state.PDATA_FALLBACK_CACHE_TTL_S` (short) when
+    the cached data is flagged as a fallback/partial result, and the normal
+    :data:`~GridPythia.server.state.PDATA_CACHE_TTL_S` for complete fetches.
+    """
     if state.pdata_cache is None or state.pdata_cache_ts is None:
         return None
-    age = (datetime.now() - state.pdata_cache_ts).total_seconds()
-    if age >= state.PDATA_CACHE_TTL_S:
+    ttl = state.PDATA_FALLBACK_CACHE_TTL_S if state.pdata_is_fallback else state.PDATA_CACHE_TTL_S
+    age = (datetime.now(timezone.utc) - state.pdata_cache_ts).total_seconds()
+    if age >= ttl:
         return None
     return state.pdata_cache, state.pdata_forecast_from
 
@@ -256,13 +278,30 @@ def get_cached_pdata_age_s() -> float | None:
     """Return age of current prediction cache in seconds, or None when absent."""
     if state.pdata_cache_ts is None:
         return None
-    return (datetime.now() - state.pdata_cache_ts).total_seconds()
+    return (datetime.now(timezone.utc) - state.pdata_cache_ts).total_seconds()
 
 
-def set_cached_pdata(pdata: PredictionData, forecast_from: datetime | None) -> None:
+def set_cached_pdata(
+    pdata: PredictionData,
+    forecast_from: datetime | None,
+    *,
+    is_fallback: bool = False,
+) -> None:
+    """Store prediction data in the shared cache.
+
+    Args:
+        pdata:         The fetched :class:`~GridPythia.prediction.prediction.PredictionData`.
+        forecast_from: Timestamp of the last real (non-extrapolated) electricity-price
+                       data point; ``None`` when unavailable.
+        is_fallback:   ``True`` when *pdata* was produced by a partial fetch (one or more
+                       providers failed).  Fallback entries use a shorter TTL
+                       (:data:`~GridPythia.server.state.PDATA_FALLBACK_CACHE_TTL_S`) so
+                       that the next successful fetch replaces them quickly.
+    """
     state.pdata_cache = pdata
-    state.pdata_cache_ts = datetime.now()
+    state.pdata_cache_ts = datetime.now(timezone.utc)
     state.pdata_forecast_from = forecast_from
+    state.pdata_is_fallback = is_fallback
 
 
 # ── Solution cache ───────────────────────────────────────────────────────
@@ -272,7 +311,7 @@ def get_cached_solution() -> dict | None:
     """Return cached solution when fresh, else None."""
     if state.solution_cache is None or state.solution_cache_ts is None:
         return None
-    age = (datetime.now() - state.solution_cache_ts).total_seconds()
+    age = (datetime.now(timezone.utc) - state.solution_cache_ts).total_seconds()
     if age >= state.SOLUTION_CACHE_TTL_S:
         return None
     return state.solution_cache
@@ -281,7 +320,7 @@ def get_cached_solution() -> dict | None:
 def set_cached_solution(solution_dict: dict) -> None:
     """Store solution JSON and timestamp."""
     state.solution_cache = solution_dict
-    state.solution_cache_ts = datetime.now()
+    state.solution_cache_ts = datetime.now(timezone.utc)
 
 
 # ── SoC override mapping ──────────────────────────────────────────────────
@@ -340,7 +379,7 @@ def cap_runtime_soc_wh_for_solver(
 # ── Chart builders ────────────────────────────────────────────────────────
 
 
-def fig_to_dict(fig: go.Figure) -> dict[str, Any]:
+def fig_to_dict(fig: Any) -> dict[str, Any]:
     return json.loads(fig.to_json())
 
 
@@ -352,6 +391,13 @@ def make_prediction_figures(
 
     Returns a ``{tab_id: plotly_json_dict}`` mapping.
     """
+    # Lazy imports: plotly is only loaded on the first chart request, not at startup.
+    from GridPythia.prediction.plots.electricprice import ElecPricePlotter  # noqa: PLC0415
+    from GridPythia.prediction.plots.feedintariff import FeedInTariffPlotter  # noqa: PLC0415
+    from GridPythia.prediction.plots.load import LoadPlotter  # noqa: PLC0415
+    from GridPythia.prediction.plots.pvforecast import PVForecastPlotter  # noqa: PLC0415
+    from GridPythia.prediction.plots.weather import WeatherPlotter  # noqa: PLC0415
+
     ts = pdata.timestamps
     figs: dict[str, Any] = {}
     if pdata.electricprice is not None:
@@ -360,7 +406,13 @@ def make_prediction_figures(
         )
     if pdata.feedintariff is not None:
         figs["tab-feedin"] = fig_to_dict(FeedInTariffPlotter().plot(pdata.feedintariff, ts))
-    figs["tab-load"] = fig_to_dict(LoadPlotter().plot(pdata.load_wh, ts))
+    figs["tab-load"] = fig_to_dict(
+        LoadPlotter().plot(
+            pdata.base_load_wh,
+            ts,
+            appliance_load_by_id=pdata.appliance_load_by_id,
+        )
+    )
     if pdata.pv_by_inverter:
         figs["tab-pv"] = fig_to_dict(
             PVForecastPlotter().plot(pdata.pv_by_inverter, ts, dt_hours=pdata.dt_hours)
@@ -368,6 +420,96 @@ def make_prediction_figures(
     if pdata.weather_by_channel:
         figs["tab-weather"] = fig_to_dict(WeatherPlotter().plot(pdata.weather_by_channel, ts))
     return figs
+
+
+# ── Appliance load helpers ─────────────────────────────────────────────────
+
+
+def snap_appliance_forecasts_to_grid(
+    forecasts: dict[str, list[dict]],
+    timestamps: list,
+    dt_hours: float,
+) -> dict[str, np.ndarray]:
+    """Snap raw appliance forecast slots to the prediction time grid.
+
+    For each slot, the nearest prediction timestamp within ``dt_hours / 2`` is
+    found via binary search.  Energy (Wh) from slots that fall outside the
+    horizon or before *now* is silently dropped.  Multiple slots mapping to the
+    same grid point are summed.
+    """
+    from datetime import timezone as _tz
+
+    if not timestamps:
+        return {}
+
+    half_dt_s = dt_hours * 3600.0 / 2.0
+    now = datetime.now(tz=_tz.utc)
+    ts_epochs = [ts.timestamp() for ts in timestamps]
+
+    result: dict[str, np.ndarray] = {}
+    for appliance_id, slots in forecasts.items():
+        arr = np.zeros(len(timestamps), dtype=np.float32)
+        for slot in slots:
+            try:
+                t_raw = slot["time"]
+                wh = float(slot["load_wh"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            try:
+                t = datetime.fromisoformat(t_raw)
+            except ValueError:
+                continue
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=_tz.utc)
+            else:
+                t = t.astimezone(_tz.utc)
+            if t < now:
+                continue
+            t_epoch = t.timestamp()
+            idx = bisect.bisect_left(ts_epochs, t_epoch)
+            if idx == 0:
+                nearest = 0
+            elif idx >= len(ts_epochs):
+                nearest = len(ts_epochs) - 1
+            else:
+                nearest = (
+                    idx
+                    if abs(ts_epochs[idx] - t_epoch) < abs(ts_epochs[idx - 1] - t_epoch)
+                    else idx - 1
+                )
+            if abs(ts_epochs[nearest] - t_epoch) <= half_dt_s:
+                arr[nearest] += wh
+        result[appliance_id] = arr
+    return result
+
+
+def apply_appliance_loads(pdata: "PredictionData") -> "PredictionData":
+    """Return a new :class:`PredictionData` with active appliance forecasts injected.
+
+    When no appliance forecasts are registered the original *pdata* is returned
+    unchanged (zero-copy fast path).
+    """
+    if not state.appliance_forecasts:
+        return pdata
+    snapped = snap_appliance_forecasts_to_grid(
+        state.appliance_forecasts,
+        pdata.timestamps,
+        pdata.dt_hours,
+    )
+    snapped = {k: v for k, v in snapped.items() if v.any()}
+    if not snapped:
+        return pdata
+    return PredictionData(
+        requested_start=pdata.requested_start,
+        timestamps=pdata.timestamps,
+        dt_hours=pdata.dt_hours,
+        load_wh=pdata.base_load_wh,
+        electricprice_eur_wh=pdata.electricprice,
+        feedintariff_eur_wh=pdata.feedintariff,
+        pv_by_inverter=pdata.pv_by_inverter,
+        weather_by_channel=pdata.weather_by_channel,
+        appliance_load_by_id=snapped,
+    )
 
 
 # ── Inverter plan serialisation ───────────────────────────────────────────

@@ -47,7 +47,9 @@ class PredictionData:
         "_requested_start",
         "_timestamps",
         "dt_hours",
+        "_base_load_wh",
         "_load_wh",
+        "_appliance_load_by_id",
         "_electricprice_eur_wh",
         "_feedintariff_eur_wh",
         "_pv_by_inverter",
@@ -66,6 +68,7 @@ class PredictionData:
         feedintariff_eur_wh: Sequence[float] | np.ndarray | None = None,
         pv_by_inverter: Mapping[str, Sequence[float] | np.ndarray] | None = None,
         weather_by_channel: Mapping[str, Sequence[float] | np.ndarray] | None = None,
+        appliance_load_by_id: Mapping[str, Sequence[float] | np.ndarray] | None = None,
     ) -> None:
         if dt_hours <= 0:
             raise ValueError(f"dt_hours must be > 0, got {dt_hours}")
@@ -83,7 +86,20 @@ class PredictionData:
         self._requested_start = requested_start
         self._timestamps = timestamps_tuple
         self.dt_hours = float(dt_hours)
-        self._load_wh = self._coerce_series("load_wh", load_wh, steps)
+        self._base_load_wh = self._coerce_series("load_wh", load_wh, steps)
+        self._appliance_load_by_id = self._coerce_named_series_map(
+            prefix="appliance",
+            data=appliance_load_by_id,
+            steps=steps,
+        )
+        # Combined load = base profile + all appliance forecasts (used by solver)
+        if self._appliance_load_by_id:
+            combined = self._base_load_wh.copy()
+            for arr in self._appliance_load_by_id.values():
+                combined = combined + arr
+            self._load_wh = np.ascontiguousarray(combined, dtype=np.float32)
+        else:
+            self._load_wh = self._base_load_wh
         self._electricprice_eur_wh = self._coerce_optional_series(
             "electricprice_eur_wh", electricprice_eur_wh, steps
         )
@@ -164,7 +180,18 @@ class PredictionData:
 
     @property
     def load_wh(self) -> np.ndarray:
+        """Combined load (base profile + all active appliance forecasts)."""
         return self._load_wh
+
+    @property
+    def base_load_wh(self) -> np.ndarray:
+        """Base household load profile without appliance forecasts."""
+        return self._base_load_wh
+
+    @property
+    def appliance_load_by_id(self) -> dict[str, np.ndarray]:
+        """Per-appliance load arrays snapped to the prediction grid."""
+        return self._appliance_load_by_id
 
     @property
     def electricprice(self) -> np.ndarray | None:

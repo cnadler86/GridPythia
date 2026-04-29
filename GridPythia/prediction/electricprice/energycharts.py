@@ -24,7 +24,8 @@ from datetime import date, datetime, timedelta, timezone
 
 import aiohttp
 import numpy as np
-import plotly.graph_objects as go
+
+# plotly is only needed for the optional .plot() debug method; defer it.
 from pydantic import BaseModel, Field, field_validator
 from structlog import get_logger
 

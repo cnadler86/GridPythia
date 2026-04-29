@@ -46,6 +46,10 @@ class ServerConfig(BaseModel):
 
     model_config = {"frozen": True}
 
+    timezone: str = Field(
+        default="UTC",
+        description="IANA timezone for dashboard display and prediction start times (e.g. 'Europe/Berlin').",
+    )
     bind_host: str = Field(
         default="127.0.0.1",
         description=(

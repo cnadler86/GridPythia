@@ -19,7 +19,20 @@ from typing import Any, cast
 if machine() in ("armv7l", "armv6l"):
     pass  # libatomic already loaded by main.py via ctypes.CDLL(RTLD_GLOBAL)
 
-import cvxpy as cp
+# cvxpy (~47 MB) is imported lazily on first LinearOptimizer instantiation to
+# keep the server-startup RSS low on memory-constrained targets (e.g. ARMv7).
+# All usages of `cp` are inside instance methods, so they run after __init__.
+cp = None  # type: ignore[assignment]  # set by _import_cvxpy()
+
+
+def _import_cvxpy() -> None:
+    """Import cvxpy into the module namespace on first use."""
+    global cp
+    if cp is None:
+        import cvxpy as _cp  # noqa: PLC0415
+        cp = _cp
+
+
 import numpy as np
 from structlog import get_logger
 
@@ -108,6 +121,7 @@ class LinearOptimizer:
         objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
         solver_opts: Mapping[str, Any] | None = None,
     ) -> None:
+        _import_cvxpy()
         self.inverters = inverters
         self._objective = objective
         self._solver_opts: dict[str, Any] = dict(solver_opts) if solver_opts else {}
@@ -146,6 +160,23 @@ class LinearOptimizer:
                          parity report to the returned solution.
         """
         effective_objective = objective if objective is not None else self._objective
+
+        # Guard: any inverter with has_pv=True must have its id present in
+        # pv_by_inverter.  A missing key would silently produce an all-zero PV
+        # parameter, causing the solver to plan as if there is no solar
+        # generation.  Callers must ensure PV data is available before calling.
+        pv_missing = [
+            inv.device_id
+            for inv in self.inverters
+            if inv.parameters.has_pv and inv.device_id not in prediction.pv_by_inverter
+        ]
+        if pv_missing:
+            raise ValueError(
+                f"PV forecast data missing for inverter(s) {pv_missing}. "
+                "Solve aborted to avoid optimizing with no solar generation. "
+                "Pass a PredictionData that includes pv_by_inverter entries for all has_pv inverters."
+            )
+
         prep = self._prepare_inputs(prediction)
         self._ensure_compiled_layout(prep)
 
@@ -164,7 +195,7 @@ class LinearOptimizer:
         self._log.debug("optimizer_roll_horizon", shift_steps=roll_steps, horizon_steps=prep.T)
         warm_start_plan = self._build_warm_start_plan(roll_steps)
         self._update_runtime_parameters(prep, normalized_initial_modes, soc=soc)
-        self._apply_warm_start_values(prep, warm_start_plan)
+        self._apply_warm_start_values(prep, warm_start_plan, shift_steps=roll_steps)
 
         problem = self._problems[effective_objective]
         size = problem.size_metrics
@@ -636,6 +667,8 @@ class LinearOptimizer:
             tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None],
         ]
         | None,
+        *,
+        shift_steps: int = 0,
     ) -> None:
         if not warm_start_plan or prep.T <= 0:
             return
@@ -761,6 +794,24 @@ class LinearOptimizer:
             unbuf_self_est = sc_model.self_consumed_wh(total_unbuffered_est, remaining_load_est)
 
             self._pv_unbuffered_self.value = np.asarray(unbuf_self_est, dtype=float)
+
+        # Shift the grid import / feedin continuous variables so that warm-start
+        # values are aligned with the new prediction window.
+        # Without this, g_import[0] still holds the old window's t=0 value while
+        # the new window starts at t+shift_steps – causing a misaligned warm start
+        # that forces HiGHS to do extra LP repair work.
+        if shift_steps > 0:
+            for var in (self._g_import, self._g_feedin):
+                if var.value is not None:
+                    old_val = np.asarray(var.value, dtype=float)
+                    new_val = np.zeros(prep.T, dtype=float)
+                    src_start = min(shift_steps, int(old_val.size))
+                    copied = min(max(int(old_val.size) - src_start, 0), prep.T)
+                    if copied > 0:
+                        new_val[:copied] = old_val[src_start : src_start + copied]
+                    if copied < prep.T:
+                        new_val[copied:] = old_val[-1]
+                    var.value = new_val
 
     def _build_inverter_block(self, inv: InverterBase) -> _InverterModelBlock:
         T = self._T
