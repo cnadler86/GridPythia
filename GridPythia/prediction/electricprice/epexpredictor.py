@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 import aiohttp
 import numpy as np
@@ -149,7 +150,7 @@ class ElecPriceEpexPredictor(ElecPriceProvider):
 
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, params=cast(Any, params)) as resp:
                 resp.raise_for_status()
                 data = await resp.json(content_type=None)
 

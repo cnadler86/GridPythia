@@ -21,6 +21,7 @@ FallbackProvider) to switch to alternative providers.
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
 import aiohttp
 import numpy as np
@@ -31,6 +32,9 @@ from structlog import get_logger
 
 from GridPythia.prediction.cache import TimeBucketCache, to_utc
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
+
+if TYPE_CHECKING:
+    import plotly.graph_objects as go
 
 logger = get_logger(__name__)
 
@@ -64,7 +68,7 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
     """Fetch day-ahead electricity prices from the Energy-Charts API.
 
     Prices beyond the last available API timestamp are extended using
-    Exponential Smoothing (requires ``statsmodels``, optional).
+    additive Holt-Winters smoothing (pure NumPy fallback model).
 
     Parameters
     ----------

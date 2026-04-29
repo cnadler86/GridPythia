@@ -101,7 +101,6 @@ def phase_imports() -> None:
     print(f"  {'Modul':<45} {'Delta':>8}  {'RSS nach':>8}")
 
     baseline = _rss_mb()
-    cumulative = baseline
 
     for mod_name in _MODULES_TO_PROBE:
         before = _rss_mb()
@@ -200,8 +199,8 @@ def phase_modules_size() -> None:
     # Alle importierten Module einmal laden
     try:
         import GridPythia.server.app  # noqa: F401
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Hinweis: App-Import in Phase 4 fehlgeschlagen: {exc}")
     gc.collect()
 
     from collections import defaultdict
@@ -231,15 +230,14 @@ def phase_arrays() -> None:
     _hr("PHASE 5 – numpy-Array Inventory")
     try:
         import numpy as np
-        from pympler.asizeof import asizeof
     except ImportError:
-        print("  numpy/pympler fehlt – übersprungen")
+        print("  numpy fehlt – übersprungen")
         return
 
     try:
         import GridPythia.server.app  # noqa: F401
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Hinweis: App-Import in Phase 5 fehlgeschlagen: {exc}")
     gc.collect()
 
     arrays: list[tuple[int, str, tuple]] = []

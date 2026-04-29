@@ -356,7 +356,11 @@ class Prediction:
         ]
 
     @staticmethod
-    def _validate_series(name: str, values: np.ndarray | list[float], n: int) -> np.ndarray:
+    def _validate_series(
+        name: str,
+        values: np.ndarray | list[float] | dict[str, object] | object,
+        n: int,
+    ) -> np.ndarray:
         arr = np.asarray(values, dtype=np.float32)
         if arr.ndim != 1:
             raise ValueError(f"Prediction provider result '{name}' must be 1D, got {arr.shape}")
