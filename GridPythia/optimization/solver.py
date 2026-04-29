@@ -19,7 +19,20 @@ from typing import Any, cast
 if machine() in ("armv7l", "armv6l"):
     pass  # libatomic already loaded by main.py via ctypes.CDLL(RTLD_GLOBAL)
 
-import cvxpy as cp
+# cvxpy (~47 MB) is imported lazily on first LinearOptimizer instantiation to
+# keep the server-startup RSS low on memory-constrained targets (e.g. ARMv7).
+# All usages of `cp` are inside instance methods, so they run after __init__.
+cp = None  # type: ignore[assignment]  # set by _import_cvxpy()
+
+
+def _import_cvxpy() -> None:
+    """Import cvxpy into the module namespace on first use."""
+    global cp
+    if cp is None:
+        import cvxpy as _cp  # noqa: PLC0415
+        cp = _cp
+
+
 import numpy as np
 from structlog import get_logger
 
@@ -108,6 +121,7 @@ class LinearOptimizer:
         objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
         solver_opts: Mapping[str, Any] | None = None,
     ) -> None:
+        _import_cvxpy()
         self.inverters = inverters
         self._objective = objective
         self._solver_opts: dict[str, Any] = dict(solver_opts) if solver_opts else {}

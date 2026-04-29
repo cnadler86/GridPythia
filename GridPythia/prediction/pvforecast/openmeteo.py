@@ -20,7 +20,9 @@ from time import monotonic
 from typing import ClassVar, Sequence
 
 import numpy as np
-from open_meteo_solar_forecast import OpenMeteoSolarForecast
+
+# open_meteo_solar_forecast transitively imports suncalc → pandas (~30 MB).
+# Defer the import to the first network fetch so server startup stays lean.
 from structlog import get_logger
 
 from GridPythia.prediction.base import resample_to_timestamps
@@ -138,6 +140,7 @@ class PVForecastOpenMeteo(PVForecastProvider):
             forecast_days=forecast_days,
             past_days=past_days,
         )
+        from open_meteo_solar_forecast import OpenMeteoSolarForecast  # noqa: PLC0415
         async with OpenMeteoSolarForecast(
             azimuth=om_az,
             declination=plane.tilt,

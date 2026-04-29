@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import plotly.graph_objects as go
 import yaml
+
+# plotly.graph_objects is imported lazily in fig_to_dict() to avoid pulling
+# narwhals (56 modules) via _plotly_utils at server startup.
 from structlog import get_logger
 
 import GridPythia.server.state as state
@@ -36,11 +38,10 @@ from GridPythia.prediction.electricprice.provider import ElecPriceFallbackChain
 from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
 from GridPythia.prediction.load.config import LoadProfileConfig
 from GridPythia.prediction.load.provider import load_provider_from_config
-from GridPythia.prediction.plots.electricprice import ElecPricePlotter
-from GridPythia.prediction.plots.feedintariff import FeedInTariffPlotter
-from GridPythia.prediction.plots.load import LoadPlotter
-from GridPythia.prediction.plots.pvforecast import PVForecastPlotter
-from GridPythia.prediction.plots.weather import WeatherPlotter
+
+# ElecPricePlotter, FeedInTariffPlotter, LoadPlotter, PVForecastPlotter,
+# WeatherPlotter are imported lazily inside make_prediction_figures() to
+# avoid pulling plotly → narwhals at server startup.
 from GridPythia.prediction.prediction import PredictionData, PredictionSetup
 from GridPythia.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
 from GridPythia.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
@@ -378,7 +379,7 @@ def cap_runtime_soc_wh_for_solver(
 # ── Chart builders ────────────────────────────────────────────────────────
 
 
-def fig_to_dict(fig: go.Figure) -> dict[str, Any]:
+def fig_to_dict(fig: Any) -> dict[str, Any]:
     return json.loads(fig.to_json())
 
 
@@ -390,6 +391,13 @@ def make_prediction_figures(
 
     Returns a ``{tab_id: plotly_json_dict}`` mapping.
     """
+    # Lazy imports: plotly is only loaded on the first chart request, not at startup.
+    from GridPythia.prediction.plots.electricprice import ElecPricePlotter  # noqa: PLC0415
+    from GridPythia.prediction.plots.feedintariff import FeedInTariffPlotter  # noqa: PLC0415
+    from GridPythia.prediction.plots.load import LoadPlotter  # noqa: PLC0415
+    from GridPythia.prediction.plots.pvforecast import PVForecastPlotter  # noqa: PLC0415
+    from GridPythia.prediction.plots.weather import WeatherPlotter  # noqa: PLC0415
+
     ts = pdata.timestamps
     figs: dict[str, Any] = {}
     if pdata.electricprice is not None:

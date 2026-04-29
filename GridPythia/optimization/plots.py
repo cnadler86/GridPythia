@@ -17,8 +17,12 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+# plotly is imported lazily in SolutionPlotter.plot() so that importing this
+# module at server startup does not pull in narwhals (~56 modules) via
+# _plotly_utils.basevalidators.
+if TYPE_CHECKING:
+    import plotly.graph_objects as go
 
 if TYPE_CHECKING:
     from GridPythia.optimization.solution import EnergySolution
@@ -194,6 +198,9 @@ class SolutionPlotter:
             solution: Any :class:`~GridPythia.optimization.solution.EnergySolution`.
             title:    Plot title shown at the top.
         """
+        import plotly.graph_objects as go  # noqa: PLC0415
+        from plotly.subplots import make_subplots  # noqa: PLC0415
+
         timestamps = solution.prediction.timestamps
         result = solution.result
 
@@ -432,6 +439,9 @@ class SolutionPlotter:
           (AC charge, discharge, PV→Bat, right axis) with pastel mode
           background derived from :attr:`~GridPythia.optimization.plan.InverterPlan.modes`.
         """
+        import plotly.graph_objects as go  # noqa: PLC0415
+        from plotly.subplots import make_subplots  # noqa: PLC0415
+
         if title is None:
             title = f"Inverter Plan \u2013 {inv_device_id}"
 
