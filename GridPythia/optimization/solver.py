@@ -12,7 +12,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from platform import machine
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 # ARM libatomic preloading is handled in main.py (before any CVXPY import).
 # The message below is kept for visibility when the solver is loaded.
@@ -21,16 +21,35 @@ if machine() in ("armv7l", "armv6l"):
 
 # cvxpy (~47 MB) is imported lazily on first LinearOptimizer instantiation to
 # keep the server-startup RSS low on memory-constrained targets (e.g. ARMv7).
-# All usages of `cp` are inside instance methods, so they run after __init__.
-cp = None  # type: ignore[assignment]  # set by _import_cvxpy()
+# Keep `cp` typed as Any at runtime so static analyzers accept lazy binding.
+if TYPE_CHECKING:
+    import cvxpy as cp
+else:
+    cp: Any = None  # set by _import_cvxpy()
+
+
+# Preferred canonicalization backend (set after cvxpy is first imported).
+# CPP > COO >> SCIPY: CPP/COO are ~6× faster and allocate ~0 MB per solve
+# vs SCIPY which uses scipy.sparse and adds ~5 MB of live objects each call.
+_CANON_BACKEND: str | None = None
 
 
 def _import_cvxpy() -> None:
     """Import cvxpy into the module namespace on first use."""
-    global cp
+    global cp, _CANON_BACKEND
     if cp is None:
         import cvxpy as _cp  # noqa: PLC0415
+
         cp = _cp
+        # Pick the fastest available backend that doesn't allocate scipy sparse
+        # matrices on every solve call.  Fall back to SCIPY if neither is present
+        # (older cvxpy builds).
+        if hasattr(_cp, "CPP_CANON_BACKEND"):
+            _CANON_BACKEND = _cp.CPP_CANON_BACKEND
+        elif hasattr(_cp, "COO_CANON_BACKEND"):
+            _CANON_BACKEND = _cp.COO_CANON_BACKEND
+        else:
+            _CANON_BACKEND = _cp.SCIPY_CANON_BACKEND
 
 
 import numpy as np
@@ -213,8 +232,10 @@ class LinearOptimizer:
             opts.update(dict(solver_opts))
 
         t0 = time.perf_counter()
+        if _CANON_BACKEND is None:
+            raise RuntimeError("CVXPY canon backend not initialized")
         try:
-            problem.solve(solver=cp.HIGHS, canon_backend=cp.SCIPY_CANON_BACKEND, **opts)
+            problem.solve(solver=cp.HIGHS, canon_backend=_CANON_BACKEND, **opts)
         except cp.SolverError as exc:
             raise RuntimeError(f"CVXPY/HiGHS solver error: {exc}") from exc
         solve_time = time.perf_counter() - t0
