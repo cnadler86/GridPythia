@@ -144,6 +144,8 @@ server:
   scheduler:
     optimization_interval_minutes: 15   # Must be a divisor of 60
     prediction_refresh_minutes: 30      # How often to refresh forecast data
+    dispatch_buffer_seconds: 5          # Extra safety margin on top of solver time_limit
+    dispatch_buffer_max_seconds: 30     # Cap for adaptive late-publish compensation
 
   mqtt:
     enabled: false
@@ -154,7 +156,14 @@ server:
 
 > **Note on optimization slots:** The scheduler fires at fixed boundaries aligned
 > to the top of the hour — e.g., every 15 min → 00:00, 00:15, 00:30, 00:45.
-> On the very first run the server snaps to the next upcoming slot.
+> It starts each solve *before* the upcoming slot using
+> `solver time_limit + dispatch_buffer_seconds`, and if the previous cycle
+> published late, that lateness delta is added to the 5 s buffer up to
+> `dispatch_buffer_max_seconds`.
+> When a solve finishes shortly before dispatch and the new plan starts at the
+> next slot, the MQTT publisher prepends the still-active current slot from the
+> previously retained plan so downstream consumers can react correctly until the
+> boundary is reached.
 
 ---
 

@@ -7,7 +7,7 @@ publishing even when no client window is open.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
@@ -22,9 +22,63 @@ from GridPythia.server.routers.predictions import fetch_predictions
 
 logger = get_logger(__name__)
 
+_NEXT_SLOT_EPSILON_S = 1.1
+
 # Exponential-backoff delays for the startup fetch (seconds).
 # First entry is 0 → immediate first attempt; subsequent entries add wait time.
 _STARTUP_BACKOFF_DELAYS_S = [0, 5, 10, 20, 40, 60, 120, 240, 480]
+
+
+def _solver_time_limit_seconds(cfg) -> float:
+    """Return the configured solver time limit used to size the scheduler lead."""
+    raw = cfg.optimization.solver.solver_opts.get("time_limit", 30.0)
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _adaptive_dispatch_buffer_seconds(cfg, publish_lateness_s: float = 0.0) -> float:
+    """Return the current publish safety buffer.
+
+    The base buffer comes from config. If the previous cycle finished after its
+    target dispatch slot, the lateness delta is added on top, capped to the
+    configured maximum.
+    """
+    initial_buffer_s = float(cfg.server.scheduler.dispatch_buffer_seconds)
+    max_buffer_s = float(cfg.server.scheduler.dispatch_buffer_max_seconds)
+    lateness_s = max(0.0, float(publish_lateness_s))
+    return min(max_buffer_s, initial_buffer_s + lateness_s)
+
+
+def _scheduler_lead_seconds(cfg, publish_lateness_s: float = 0.0) -> float:
+    """Return how long before the dispatch slot the scheduler should fire."""
+    return _solver_time_limit_seconds(cfg) + _adaptive_dispatch_buffer_seconds(
+        cfg, publish_lateness_s
+    )
+
+
+def _next_future_dispatch_slot(reference: datetime, interval_minutes: int) -> datetime:
+    """Return the first dispatch slot strictly after *reference*."""
+    return next_optimization_slot(
+        reference + timedelta(seconds=_NEXT_SLOT_EPSILON_S),
+        interval_minutes,
+    )
+
+
+def _next_scheduler_trigger(
+    now: datetime,
+    cfg,
+    publish_lateness_s: float = 0.0,
+    last_dispatch_slot: datetime | None = None,
+) -> tuple[datetime, datetime, float]:
+    """Return ``(dispatch_slot, run_at, lead_s)`` for the next scheduler cycle."""
+    interval_min = int(cfg.server.scheduler.optimization_interval_minutes)
+    reference = last_dispatch_slot if last_dispatch_slot is not None else now
+    dispatch_slot = _next_future_dispatch_slot(reference, interval_min)
+    lead_s = _scheduler_lead_seconds(cfg, publish_lateness_s)
+    run_at = dispatch_slot - timedelta(seconds=lead_s)
+    return dispatch_slot, run_at, lead_s
 
 
 async def run_startup_fetch() -> None:
@@ -119,23 +173,44 @@ async def run_scheduler() -> None:
     1) refresh prediction cache (fast-path returns cached data)
     2) run optimization (publishes plans via MQTT when enabled)
     """
+    publish_lateness_s = 0.0
+    last_dispatch_slot: datetime | None = None
+
     while True:
         try:
             cfg, _ = services.load_config()
-            interval_min = int(cfg.server.scheduler.optimization_interval_minutes)
             server_tz = cfg.server.timezone or "UTC"
             now = datetime.now(tz=timezone.utc)
-            slot = next_optimization_slot(now, interval_min)
-            sleep_s = max(0.5, (slot - now).total_seconds())
+            slot, run_at, lead_s = _next_scheduler_trigger(
+                now,
+                cfg,
+                publish_lateness_s=publish_lateness_s,
+                last_dispatch_slot=last_dispatch_slot,
+            )
+            sleep_s = max(0.0, (run_at - now).total_seconds())
             logger.debug(
                 "scheduler_waiting",
-                interval_min=interval_min,
+                interval_min=int(cfg.server.scheduler.optimization_interval_minutes),
                 next_slot=slot.isoformat(),
+                run_at=run_at.isoformat(),
+                lead_s=round(lead_s, 2),
+                publish_buffer_s=round(
+                    _adaptive_dispatch_buffer_seconds(cfg, publish_lateness_s),
+                    2,
+                ),
                 sleep_s=round(sleep_s, 2),
             )
-            await asyncio.sleep(sleep_s)
+            if sleep_s > 0.0:
+                await asyncio.sleep(sleep_s)
 
-            logger.info("scheduler_slot_reached", slot=slot.isoformat(), interval_min=interval_min)
+            last_dispatch_slot = slot
+
+            logger.info(
+                "scheduler_slot_optimization_starting",
+                slot=slot.isoformat(),
+                interval_min=int(cfg.server.scheduler.optimization_interval_minutes),
+                lead_s=round(lead_s, 2),
+            )
 
             try:
                 await fetch_predictions(FetchRequest(timezone=server_tz))
@@ -157,7 +232,14 @@ async def run_scheduler() -> None:
                 )
                 continue
 
-            logger.info("scheduler_cycle_complete", slot=slot.isoformat())
+            completed_at = datetime.now(tz=timezone.utc)
+            publish_lateness_s = max(0.0, (completed_at - slot).total_seconds())
+            logger.info(
+                "scheduler_cycle_complete",
+                slot=slot.isoformat(),
+                completed_at=completed_at.isoformat(),
+                publish_lateness_s=round(publish_lateness_s, 2),
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001

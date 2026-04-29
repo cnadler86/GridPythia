@@ -24,6 +24,14 @@ class SchedulerConfig(BaseModel):
     ``optimization_interval_minutes`` must be a divisor of 60 so that
     optimization fires at full grid boundaries (e.g. 0:00, 0:15, 0:30, 0:45
     for 15 min). Supported values: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60.
+
+    The scheduler starts each optimization run before the upcoming dispatch
+    slot so a fresh plan can be published before the inverter consumer needs
+    it. The lead time is computed as::
+
+        solver_time_limit + dispatch_buffer_seconds [+ publish lateness delta]
+
+    where the lateness delta is capped by ``dispatch_buffer_max_seconds``.
     """
 
     model_config = {"frozen": True}
@@ -38,6 +46,18 @@ class SchedulerConfig(BaseModel):
         default=30,
         ge=1,
         description="Refresh prediction data every N minutes",
+    )
+    dispatch_buffer_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=30.0,
+        description="Initial publish safety buffer added on top of the solver time limit",
+    )
+    dispatch_buffer_max_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        le=300.0,
+        description="Maximum adaptive publish buffer after late plan publications",
     )
 
 

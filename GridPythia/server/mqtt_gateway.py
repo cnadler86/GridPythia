@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
+from math import floor
 from threading import Event
 from urllib.parse import urlparse
 
@@ -46,6 +48,61 @@ _TOPIC_RE = re.compile(r"^(.+)/inverters/([^/]+)/status$")
 _APPLIANCE_TOPIC_RE = re.compile(r"^(.+)/appliance_load/forecast/([^/]+)$")
 
 
+def _parse_step_timestamp(step: dict) -> datetime | None:
+    """Parse a plan-step timestamp, returning ``None`` for malformed entries."""
+    raw_ts = step.get("timestamp")
+    if not isinstance(raw_ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw_ts)
+    except ValueError:
+        return None
+
+
+def _current_slot_start(published_at: datetime, dt_hours: float) -> datetime:
+    """Return the start timestamp of the slot containing *published_at*."""
+    step_seconds = max(1.0, float(dt_hours) * 3600.0)
+    slot_epoch = floor(published_at.timestamp() / step_seconds) * step_seconds
+    return datetime.fromtimestamp(slot_epoch, tz=published_at.tzinfo or timezone.utc)
+
+
+def _stitch_current_slot_from_previous_plan(
+    steps: list[dict],
+    previous_steps: list[dict],
+    *,
+    published_at: datetime,
+    dt_hours: float,
+) -> list[dict]:
+    """Prepend the active slot from the previous published plan when needed.
+
+    If a newly solved plan starts at the next slot boundary because the solve ran
+    shortly before dispatch, downstream consumers still need the currently active
+    slot from the previously retained plan until the boundary is actually reached.
+    """
+    stitched_steps = [dict(step) for step in steps]
+    if not stitched_steps or not previous_steps:
+        return stitched_steps
+
+    first_step_ts = _parse_step_timestamp(stitched_steps[0])
+    if first_step_ts is None or published_at >= first_step_ts:
+        return stitched_steps
+
+    current_slot = _current_slot_start(published_at, dt_hours)
+    if first_step_ts <= current_slot:
+        return stitched_steps
+
+    for prev_step in reversed(previous_steps):
+        prev_step_ts = _parse_step_timestamp(prev_step)
+        if prev_step_ts is None:
+            continue
+        if prev_step_ts == current_slot:
+            if _parse_step_timestamp(stitched_steps[0]) == current_slot:
+                return stitched_steps
+            return [dict(prev_step), *stitched_steps]
+
+    return stitched_steps
+
+
 def _parse_broker(broker_url: str) -> tuple[str, int]:
     """Return (hostname, port) from a broker URL like ``mqtt://localhost:1883``."""
     parsed = urlparse(broker_url)
@@ -60,6 +117,7 @@ class MqttGateway:
     def __init__(self, cfg: MqttConfig) -> None:
         self._cfg = cfg
         self._stop = Event()
+        self._last_published_steps_by_device: dict[str, list[dict]] = {}
         host, port = _parse_broker(cfg.broker)
         self._host = host
         self._port = port
@@ -198,19 +256,25 @@ class MqttGateway:
         The message is published with ``retain=True`` so that a newly
         connecting controller immediately receives the last known plan.
         """
-        from datetime import datetime, timezone
-
         published_at = datetime.now(tz=timezone.utc).isoformat()
+        published_at_dt = datetime.fromisoformat(published_at)
         for plan in inverter_plans:
             device_id = plan.get("device_id", "")
             if not device_id:
                 continue
+            raw_steps = plan.get("steps", [])
+            effective_steps = _stitch_current_slot_from_previous_plan(
+                raw_steps,
+                self._last_published_steps_by_device.get(device_id, []),
+                published_at=published_at_dt,
+                dt_hours=dt_hours,
+            )
             topic = f"{self._cfg.topic_prefix}/inverters/{device_id}/plan"
             payload = {
                 "device_id": device_id,
                 "published_at": published_at,
                 "dt_hours": dt_hours,
-                "steps": plan.get("steps", []),
+                "steps": effective_steps,
             }
             try:
                 self._client.publish(
@@ -223,7 +287,11 @@ class MqttGateway:
                     "mqtt_plan_published",
                     device_id=device_id,
                     steps=len(payload["steps"]),
+                    prepended_current_slot=(1 if len(payload["steps"]) > len(raw_steps) else 0),
                 )
+                self._last_published_steps_by_device[device_id] = [
+                    dict(step) for step in payload["steps"]
+                ]
             except Exception as exc:  # noqa: BLE001
                 logger.warning("mqtt_plan_publish_failed", device_id=device_id, error=str(exc))
 
