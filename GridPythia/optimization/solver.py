@@ -181,7 +181,7 @@ class LinearOptimizer:
         self._log.debug("optimizer_roll_horizon", shift_steps=roll_steps, horizon_steps=prep.T)
         warm_start_plan = self._build_warm_start_plan(roll_steps)
         self._update_runtime_parameters(prep, normalized_initial_modes, soc=soc)
-        self._apply_warm_start_values(prep, warm_start_plan)
+        self._apply_warm_start_values(prep, warm_start_plan, shift_steps=roll_steps)
 
         problem = self._problems[effective_objective]
         size = problem.size_metrics
@@ -653,6 +653,8 @@ class LinearOptimizer:
             tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None],
         ]
         | None,
+        *,
+        shift_steps: int = 0,
     ) -> None:
         if not warm_start_plan or prep.T <= 0:
             return
@@ -778,6 +780,24 @@ class LinearOptimizer:
             unbuf_self_est = sc_model.self_consumed_wh(total_unbuffered_est, remaining_load_est)
 
             self._pv_unbuffered_self.value = np.asarray(unbuf_self_est, dtype=float)
+
+        # Shift the grid import / feedin continuous variables so that warm-start
+        # values are aligned with the new prediction window.
+        # Without this, g_import[0] still holds the old window's t=0 value while
+        # the new window starts at t+shift_steps – causing a misaligned warm start
+        # that forces HiGHS to do extra LP repair work.
+        if shift_steps > 0:
+            for var in (self._g_import, self._g_feedin):
+                if var.value is not None:
+                    old_val = np.asarray(var.value, dtype=float)
+                    new_val = np.zeros(prep.T, dtype=float)
+                    src_start = min(shift_steps, int(old_val.size))
+                    copied = min(max(int(old_val.size) - src_start, 0), prep.T)
+                    if copied > 0:
+                        new_val[:copied] = old_val[src_start : src_start + copied]
+                    if copied < prep.T:
+                        new_val[copied:] = old_val[-1]
+                    var.value = new_val
 
     def _build_inverter_block(self, inv: InverterBase) -> _InverterModelBlock:
         T = self._T

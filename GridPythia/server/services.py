@@ -10,6 +10,7 @@ from __future__ import annotations
 import bisect
 import json
 from datetime import datetime, timezone
+from math import floor
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,19 @@ _MODE_NAMES: dict[int, str] = {m.value: m.name for m in InverterMode}
 
 
 # ── Config loader ─────────────────────────────────────────────────────────
+
+
+def snap_to_dt_grid(dt: datetime, dt_hours: float) -> datetime:
+    """Round *dt* to the nearest dt_hours grid boundary.
+
+    E.g. 13:07 with dt_hours=0.25 → 13:15; 13:04 → 13:00.
+    Ensures pred.fetch() always receives an aligned start so the solver gets
+    exactly round(hours/dt_hours) steps instead of +1.
+    """
+    step_s = dt_hours * 3600.0
+    epoch = dt.timestamp()
+    rounded_epoch = floor(epoch / step_s + 0.5) * step_s
+    return datetime.fromtimestamp(rounded_epoch, tz=dt.tzinfo)
 
 
 def load_config() -> tuple[AppConfig, dict[str, Any]]:

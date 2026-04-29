@@ -234,6 +234,7 @@ class TestArbitrage:
         pred = _make_prediction(
             load_w=[0.0, 0.0, 2000.0],
             price_eur_wh=[0.00045, 0.00050, 0.00060],
+            pv_wh={"hybrid_h1": [0.0, 0.0, 0.0]},
         )
         inv = _make_hybrid_inverter()
 
@@ -251,6 +252,7 @@ class TestArbitrage:
         pred = _make_prediction(
             load_w=[0.0, 0.0, 2000.0],
             price_eur_wh=[0.00045, 0.00030, 0.00050],
+            pv_wh={"hybrid_h1": [0.0, 0.0, 0.0]},
         )
         inv = _make_hybrid_inverter()
 
@@ -271,6 +273,7 @@ class TestArbitrage:
         pred = _make_prediction(
             load_w=[0.0, 0.0, 2000.0],
             price_eur_wh=[0.00044, 0.00031, 0.00052],
+            pv_wh={"hybrid_h1": [0.0, 0.0, 0.0]},
         )
         inv = _make_hybrid_inverter()
 
@@ -302,7 +305,7 @@ class TestArbitrage:
 
     def test_zero_feed_discharge_covers_full_load(self) -> None:
         """ZFI discharge should fully cover load so that grid import is zero."""
-        pred = _make_prediction(load_w=[400.0, 0.0], price_eur_wh=[0.00060, 0.0])
+        pred = _make_prediction(load_w=[400.0, 0.0], price_eur_wh=[0.00060, 0.0], pv_wh={"hybrid_h1": [0.0, 0.0]})
         inv = _make_hybrid_inverter()
 
         sol = LinearOptimizer([inv]).solve(pred)
@@ -329,6 +332,7 @@ class TestTerminalValue:
         pred = _make_prediction(
             load_w=[1500.0, 1500.0, 1500.0, 1500.0],
             price_eur_wh=[0.00010, 0.00050, 0.00050, 0.00050],
+            pv_wh={"hybrid_h1": [0.0, 0.0, 0.0, 0.0]},
         )
         inv = _make_hybrid_inverter()
 
@@ -762,6 +766,7 @@ class TestModeSwitchCosts:
         pred = _make_prediction(
             load_w=[0.0, 0.0, 0.0, 0.0, 600.0],
             price_eur_wh=[0.00030, 0.00030, 0.00045, 0.00024, 0.00070],
+            pv_wh={"hybrid_sw": [0.0, 0.0, 0.0, 0.0, 0.0]},
         )
         inv = self._make_sw_inverter(switch_cost=0.005)
 
@@ -777,6 +782,7 @@ class TestModeSwitchCosts:
         pred = _make_prediction(
             load_w=[0.0, 0.0, 600.0],
             price_eur_wh=[0.00030, 0.00045, 0.00070],
+            pv_wh={"hybrid_sw": [0.0, 0.0, 0.0]},
         )
         inv_idle = self._make_sw_inverter(switch_cost=0.020)
         sol_idle = LinearOptimizer([inv_idle]).solve(pred)
@@ -1228,6 +1234,7 @@ class TestModelInfrastructure:
         pred = _make_prediction(
             load_w=[100.0, 100.0, 100.0, 100.0],
             price_eur_wh=[0.05, 0.05, 0.05, 0.05],
+            pv_wh={"hybrid_h1": [0.0, 0.0, 0.0, 0.0]},
         )
         inv = _make_hybrid_inverter()
         opt = LinearOptimizer([inv])
@@ -1242,6 +1249,7 @@ class TestModelInfrastructure:
         pred = _make_prediction(
             load_w=[100.0, 100.0, 100.0, 100.0],
             price_eur_wh=[0.05, 0.05, 0.05, 0.05],
+            pv_wh={"hybrid_h1": [0.0, 0.0, 0.0, 0.0]},
         )
         inv = _make_hybrid_inverter()
         opt = LinearOptimizer([inv])
@@ -1256,6 +1264,7 @@ class TestModelInfrastructure:
         pred = _make_prediction(
             load_w=[250.0, 250.0, 1200.0],
             price_eur_wh=[0.00031, 0.00029, 0.00060],
+            pv_wh={"hybrid_v2g": [0.0, 0.0, 0.0]},
         )
         eta = 0.8**0.5
         battery = Battery(

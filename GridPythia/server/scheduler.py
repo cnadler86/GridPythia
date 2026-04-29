@@ -74,7 +74,7 @@ async def run_startup_fetch() -> None:
         pred = Prediction(setup)
         try:
             pdata, errors = await pred.fetch_partial(
-                start=datetime.now(tz=tz),
+                start=services.snap_to_dt_grid(datetime.now(tz=tz), float(cfg.prediction.dt_hours)),
                 hours=float(cfg.prediction.horizon),
                 dt_hours=float(cfg.prediction.dt_hours),
             )

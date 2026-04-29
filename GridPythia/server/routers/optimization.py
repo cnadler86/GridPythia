@@ -85,7 +85,9 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
             pred = Prediction(setup)
             try:
                 pdata = await pred.fetch(
-                    start=datetime.now(tz=tz),
+                    start=services.snap_to_dt_grid(
+                        datetime.now(tz=tz), float(cfg.prediction.dt_hours)
+                    ),
                     hours=float(cfg.prediction.horizon),
                     dt_hours=float(cfg.prediction.dt_hours),
                 )
