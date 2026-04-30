@@ -24,7 +24,6 @@ import numpy as np
 if TYPE_CHECKING:
     import plotly.graph_objects as go
 
-if TYPE_CHECKING:
     from GridPythia.optimization.solution import EnergySolution
 
 
