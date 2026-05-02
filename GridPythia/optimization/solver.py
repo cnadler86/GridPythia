@@ -486,10 +486,6 @@ class LinearOptimizer:
         total_pv_ac = total_pv_ac_var + self._pv_external_param
         total_pv_buffered = self._sum_terms(total_pv_buffered_terms, self._T)
 
-        # Store expressions for use in other methods
-        self._total_pv_ac_expr = total_pv_ac
-        self._total_pv_buffered_expr = total_pv_buffered
-
         # --- Fraunhofer self-consumption model (on UNBUFFERED PV only) ---
         # Unbuffered PV = total_pv_ac - total_pv_buffered.
         # Buffered PV is backed by battery headroom → 100% controllable → directly
@@ -1070,12 +1066,10 @@ class LinearOptimizer:
         is_ch = mode_ch_activity if mode_ch_activity is not None else np.zeros(self._T, dtype=float)
         is_dc = mode_dc_activity if mode_dc_activity is not None else np.zeros(self._T, dtype=float)
 
-        # Use separate delta variables per binary so that a simultaneous
-        # AC_CHARGE→DISCHARGE transition incurs 2×switch_cost (one for each
-        # binary change), identical to going through IDLE in two steps.
-        # The old single delta_mode variable used max(Δch, Δdc) semantics,
-        # which created a spurious incentive to "park" at 1 % charge just
-        # before discharge to save one switch.
+        # Use separate delta variables per binary to detect transitions independently.
+        # To count a simultaneous AC_CHARGE→DISCHARGE transition as a single switch
+        # (not 2×), we use max(Δch, Δdc) semantics: only the larger delta per timestep
+        # contributes to the cost. This prevents double-counting when both binaries flip.
         delta_ch = cp.Variable(self._T, nonneg=True, name=f"delta_ch_{inv_id}")
         delta_dc = cp.Variable(self._T, nonneg=True, name=f"delta_dc_{inv_id}")
         self._constraints.extend(
@@ -1097,7 +1091,7 @@ class LinearOptimizer:
                 ]
             )
 
-        self._mode_switch_costs.append((cp.sum(delta_ch) + cp.sum(delta_dc)) * mode_switch_cost)
+        self._mode_switch_costs.append(cp.sum(cp.maximum(delta_ch, delta_dc)) * mode_switch_cost)
 
     @staticmethod
     def _mode_flags(mode: InverterMode) -> tuple[int, int]:
@@ -1261,6 +1255,7 @@ class LinearOptimizer:
 
             p_ch = self._expr_to_vec(block.p_ch, T)
             p_dc = self._expr_to_vec(block.p_dc, T)
+            pv_ac = self._expr_to_vec(block.pv_ac, T)
             pv_to_bat = self._expr_to_vec(block.pv_to_bat, T)
             battery_soc_wh: np.ndarray | None = None
 
@@ -1290,7 +1285,7 @@ class LinearOptimizer:
                     modes=modes,
                     charge_ac_wh=np.asarray(p_ch, dtype=np.float32),
                     discharge_ac_wh=np.asarray(p_dc, dtype=np.float32),
-                    pv_to_ac_wh=np.asarray(self._expr_to_vec(block.pv_ac, T), dtype=np.float32),
+                    pv_to_ac_wh=np.asarray(pv_ac, dtype=np.float32),
                     pv_to_battery_wh=np.asarray(pv_to_bat, dtype=np.float32),
                     battery_soc_wh=battery_soc_wh,
                 )
