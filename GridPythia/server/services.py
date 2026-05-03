@@ -75,12 +75,26 @@ def snap_to_dt_grid(dt: datetime, dt_hours: float) -> datetime:
 
 
 def load_config() -> tuple[AppConfig, dict[str, Any]]:
-    """Parse the YAML config file; return ``(AppConfig, raw_dict)``."""
+    """Parse the YAML config file; return ``(AppConfig, raw_dict)``.
+
+    Also synchronises :data:`~GridPythia.server.state.PDATA_CACHE_TTL_S` with
+    ``server.scheduler.prediction_refresh_minutes`` so that the prediction
+    cache stays valid for the configured refresh interval.  This makes
+    ``prediction_refresh_minutes`` actually control how often providers are
+    called – previously it was defined but never enforced.
+    """
     path = state.config_path
     if not path.exists():
         raise FileNotFoundError(f"Config not found: {path}")
     raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return AppConfig.from_dict(raw), raw
+    cfg = AppConfig.from_dict(raw)
+    # Align the in-memory cache TTL with the configured refresh interval so
+    # that consecutive optimisation cycles within one refresh window always use
+    # the same prediction data (prevents the "15-minute plan shift" where the
+    # optimal charging slot drifts because the prediction window shifts by one
+    # slot on every 15-min optimisation cycle).
+    state.PDATA_CACHE_TTL_S = float(cfg.server.scheduler.prediction_refresh_minutes) * 60.0
+    return cfg, raw
 
 
 # ── Pure builder helpers ──────────────────────────────────────────────────

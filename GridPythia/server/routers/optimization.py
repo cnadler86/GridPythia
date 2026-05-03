@@ -25,6 +25,20 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["optimization"])
 
 
+def _first_charge_slots(solution, timestamps: list[datetime]) -> dict[str, str | None]:
+    """Return the first AC-charge timestamp per inverter for log observability."""
+    result: dict[str, str | None] = {}
+    for plan in solution.inverter_plans:
+        charge_ts: str | None = None
+        for i, mode in enumerate(plan.modes):
+            if mode in (InverterMode.AC_CHARGE, InverterMode.AC_CHARGE_ZERO_FEED_IN):
+                if i < len(timestamps):
+                    charge_ts = timestamps[i].isoformat()
+                break
+        result[plan.device_id] = charge_ts
+    return result
+
+
 @router.post("/optimize")
 async def optimize(req: OptimizeRequest) -> JSONResponse:
     """Run the MILP energy optimizer and return the full solution.
@@ -64,7 +78,13 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
     cached = services.get_cached_pdata()
     if cached is not None:
         pdata, forecast_from = cached
-        logger.info("optimize_using_cached_pdata")
+        pdata_age_s = services.get_cached_pdata_age_s()
+        logger.info(
+            "optimize_using_cached_pdata",
+            prediction_start=pdata.timestamps[0].isoformat(),
+            prediction_steps=pdata.steps,
+            cache_age_s=round(pdata_age_s, 1) if pdata_age_s is not None else None,
+        )
     else:
         stale_cached = services.get_cached_pdata_any_age()
 
@@ -111,6 +131,15 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
                     else None
                 )
                 services.set_cached_pdata(pdata, forecast_from)
+
+    # Log prediction window for all paths (cache hit or fresh fetch)
+    logger.info(
+        "optimize_prediction_window",
+        prediction_start=pdata.timestamps[0].isoformat(),
+        prediction_end=pdata.timestamps[-1].isoformat(),
+        prediction_steps=pdata.steps,
+        dt_hours=pdata.dt_hours,
+    )
 
     # Apply active appliance load forecasts to pdata before solving
     pdata = services.apply_appliance_loads(pdata)
@@ -191,6 +220,13 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
             {inv_id: InverterMode(int(mode)) for inv_id, mode in req.initial_modes.items()}
         )
 
+    logger.info(
+        "optimize_initial_conditions",
+        soc_wh={k: round(v, 1) for k, v in soc_wh.items()},
+        initial_modes={k: v.name for k, v in initial_modes.items()},
+        prediction_start=pdata.timestamps[0].isoformat(),
+    )
+
     try:
         async with state.get_optimizer_lock():
             solution = await asyncio.to_thread(
@@ -269,6 +305,8 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
         solver_status=solution.solver_status,
         solve_time_s=round(solution.solve_time_s, 2),
         savings_eur=round(savings, 3),
+        prediction_start=pdata.timestamps[0].isoformat(),
+        first_charge_slots=_first_charge_slots(solution, pdata.timestamps),
     )
 
     response_data = {

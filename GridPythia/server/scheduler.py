@@ -170,11 +170,16 @@ async def run_scheduler() -> None:
     """Run prediction+optimization cycles at configured slot boundaries.
 
     Flow per slot:
-    1) refresh prediction cache (fast-path returns cached data)
+    1) refresh prediction cache if ``prediction_refresh_minutes`` elapsed
+       (fast-path returns cached data otherwise – avoids shifting the
+       prediction window on every 15-min cycle and thus prevents the
+       "plan shift" bug where the optimal charging slot drifts by one slot
+       whenever the prediction window advances)
     2) run optimization (publishes plans via MQTT when enabled)
     """
     publish_lateness_s = 0.0
     last_dispatch_slot: datetime | None = None
+    last_prediction_refresh_slot: datetime | None = None  # tracks when we last fetched fresh data
 
     while True:
         try:
@@ -205,22 +210,76 @@ async def run_scheduler() -> None:
 
             last_dispatch_slot = slot
 
+            # ── Decide whether to refresh predictions ─────────────────────
+            # Only re-fetch from providers when prediction_refresh_minutes
+            # have elapsed since the last refresh.  Skipping intermediate
+            # fetches is the key fix for the "15-minute plan shift":
+            # without this guard every 15-min cycle fetches new prediction
+            # data starting from *now* (e.g. 11:15) instead of the cached
+            # data starting from the previous refresh (e.g. 11:00), which
+            # shifts the optimizer's index-based optimal charging step by
+            # one slot on every cycle.
+            refresh_interval_s = float(cfg.server.scheduler.prediction_refresh_minutes) * 60.0
+            if last_prediction_refresh_slot is None:
+                seconds_since_refresh = float("inf")
+            else:
+                seconds_since_refresh = (slot - last_prediction_refresh_slot).total_seconds()
+
+            needs_prediction_refresh = seconds_since_refresh >= refresh_interval_s
+            cached_pdata_info = services.get_cached_pdata_any_age()
+            if cached_pdata_info is None:
+                needs_prediction_refresh = True  # always fetch when cache is empty
+
             logger.info(
                 "scheduler_slot_optimization_starting",
                 slot=slot.isoformat(),
                 interval_min=int(cfg.server.scheduler.optimization_interval_minutes),
                 lead_s=round(lead_s, 2),
+                needs_prediction_refresh=needs_prediction_refresh,
+                seconds_since_last_refresh=(
+                    round(seconds_since_refresh, 0)
+                    if seconds_since_refresh != float("inf")
+                    else None
+                ),
+                refresh_interval_s=refresh_interval_s,
+                prediction_cache_start=(
+                    cached_pdata_info[0].timestamps[0].isoformat()
+                    if cached_pdata_info is not None
+                    else None
+                ),
             )
 
-            try:
-                await fetch_predictions(FetchRequest(timezone=server_tz))
-            except HTTPException as exc:
-                logger.warning(
-                    "scheduler_prediction_refresh_failed",
-                    status_code=exc.status_code,
-                    detail=str(exc.detail),
+            if needs_prediction_refresh:
+                try:
+                    await fetch_predictions(FetchRequest(timezone=server_tz))
+                    last_prediction_refresh_slot = slot
+                    # Log new cache start for observability
+                    new_pdata_info = services.get_cached_pdata_any_age()
+                    if new_pdata_info is not None:
+                        logger.info(
+                            "scheduler_prediction_refreshed",
+                            slot=slot.isoformat(),
+                            prediction_start=new_pdata_info[0].timestamps[0].isoformat(),
+                            prediction_steps=new_pdata_info[0].steps,
+                        )
+                except HTTPException as exc:
+                    logger.warning(
+                        "scheduler_prediction_refresh_failed",
+                        status_code=exc.status_code,
+                        detail=str(exc.detail),
+                    )
+                    continue
+            else:
+                logger.debug(
+                    "scheduler_prediction_cache_reused",
+                    slot=slot.isoformat(),
+                    seconds_since_refresh=round(seconds_since_refresh, 0),
+                    prediction_start=(
+                        cached_pdata_info[0].timestamps[0].isoformat()
+                        if cached_pdata_info is not None
+                        else None
+                    ),
                 )
-                continue
 
             try:
                 await optimize(OptimizeRequest(timezone=server_tz))
