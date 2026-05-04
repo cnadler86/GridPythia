@@ -31,26 +31,72 @@ _LAYOUT_DEFAULTS: dict[str, Any] = {
 
 
 def apply_default_layout(
-    fig: Any, *, title: str = "", xaxis_title: str = "", yaxis_title: str = ""
+    fig: Any,
+    *,
+    title: str = "",
+    xaxis_title: str = "",
+    yaxis_title: str = "",
 ) -> None:
-    """Apply consistent layout settings to *fig* in-place."""
+    """Apply consistent layout settings to *fig* in-place.
+
+    Args:
+        fig:          Plotly figure.
+        title:        Chart title.
+        xaxis_title:  Label for the x-axis.
+        yaxis_title:  Label for the y-axis.
+        The x-axis keeps Plotly's automatic major tick labeling so labels are
+        responsive to available width; hourly vertical guide lines are rendered
+        via minor ticks.
+    """
     fig.update_layout(
         **_LAYOUT_DEFAULTS,
         title=title or None,
         xaxis_title=xaxis_title or None,
         yaxis_title=yaxis_title or None,
     )
-    fig.update_xaxes(
-        showgrid=True,
-        gridcolor="#e8e8e8",
-        minor={
+    xaxes_kwargs: dict[str, Any] = {
+        "showgrid": True,
+        "gridcolor": "#e8e8e8",
+        "minor": {
             "dtick": 3_600_000,
             "showgrid": True,
             "gridcolor": "rgba(200,200,200,0.35)",
             "ticks": "",
         },
-    )
+    }
+    fig.update_xaxes(**xaxes_kwargs)
     fig.update_yaxes(showgrid=True, gridcolor="#e8e8e8")
+
+
+class PredictionPlotter:
+    """Base class for all prediction plotters.
+
+    Subclasses implement ``plot(...)`` with domain-specific signatures.
+    The shared ``_apply_layout`` helper ensures consistent axis styling and
+    x-axis tick alignment across all prediction charts.
+    """
+
+    #: Default x-axis label – subclasses may override.
+    x_label: str = "Time"
+    #: Default y-axis label – subclasses may override.
+    y_label: str = ""
+
+    def _apply_layout(
+        self,
+        fig: Any,
+        timestamps: list[datetime],
+        *,
+        title: str,
+        xaxis_title: str | None = None,
+        yaxis_title: str | None = None,
+    ) -> None:
+        """Apply the shared layout with responsive labels and hourly guide lines."""
+        apply_default_layout(
+            fig,
+            title=title,
+            xaxis_title=xaxis_title if xaxis_title is not None else self.x_label,
+            yaxis_title=yaxis_title if yaxis_title is not None else self.y_label,
+        )
 
 
 def add_forecast_region(fig: Any, forecast_from: datetime, timestamps: list[datetime]) -> None:

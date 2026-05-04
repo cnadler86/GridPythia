@@ -7,11 +7,13 @@ from datetime import datetime
 import numpy as np
 import plotly.graph_objects as go
 
-from GridPythia.prediction.plots._base import PALETTE, apply_default_layout
+from GridPythia.prediction.plots._base import PALETTE, PredictionPlotter
 
 
-class FeedInTariffPlotter:
+class FeedInTariffPlotter(PredictionPlotter):
     """Render a feed-in tariff series as a step chart."""
+
+    y_label = "EUR / kWh"
 
     def plot(
         self,
@@ -43,5 +45,5 @@ class FeedInTariffPlotter:
             )
         )
 
-        apply_default_layout(fig, title=title, xaxis_title="Time", yaxis_title="EUR / kWh")
+        self._apply_layout(fig, timestamps, title=title, yaxis_title="EUR / kWh")
         return fig

@@ -49,6 +49,7 @@ from GridPythia.prediction.pvforecast.provider import PVPlaneConfig
 from GridPythia.prediction.weather.brightsky import WeatherBrightSky
 from GridPythia.prediction.weather.openmeteo import WeatherOpenMeteo
 from GridPythia.server.models import InverterPlanResponse, InverterPlanStep
+from GridPythia.server.plan_utils import stitch_current_slot_from_previous_plan
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.battery import Battery
 from GridPythia.simulation.devices.inverterbase import InverterBase
@@ -633,6 +634,36 @@ async def run_optimization_cycle(
         inverter_plan_to_response(plan, list(solver_pdata.timestamps))
         for plan in solution.inverter_plans
     ]
+
+    # ── Stitch current-slot step from previous plan when solver skipped it ──
+    # Happens when now > slot midpoint (e.g. 14:55 → solver starts at 15:00).
+    fetch_start = result.fetch_pdata.timestamps[0]
+    if result.solver_start > fetch_start:
+        prev_solution = get_cached_solution()
+        if prev_solution is not None:
+            prev_by_device = {
+                p["device_id"]: p["steps"] for p in prev_solution.get("inverter_plans", [])
+            }
+            stitched = []
+            for plan in inverter_plans:
+                new_steps = stitch_current_slot_from_previous_plan(
+                    [s.model_dump() for s in plan.steps],
+                    prev_by_device.get(plan.device_id, []),
+                    published_at=fetch_start,
+                    dt_hours=dt_hours,
+                )
+                stitched.append(
+                    InverterPlanResponse(
+                        device_id=plan.device_id,
+                        steps=[InverterPlanStep(**s) for s in new_steps],
+                    )
+                )
+            inverter_plans = stitched
+            logger.debug(
+                "optimization_stitched_current_slot",
+                fetch_start=fetch_start.isoformat(),
+                solver_start=result.solver_start.isoformat(),
+            )
 
     # ── Charts ────────────────────────────────────────────────────────
     forecast_from: datetime | None = (

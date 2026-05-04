@@ -123,6 +123,20 @@ class _InverterModelBlock:
     mode_dc_activity: cp.Expression | None
 
 
+@dataclass
+class _WarmStartSeed:
+    """Shifted previous-solution arrays used to warm-start the MILP solver."""
+
+    modes: np.ndarray
+    charge_ac_wh: np.ndarray
+    discharge_ac_wh: np.ndarray
+    pv_to_bat_wh: np.ndarray
+    pv_to_ac_wh: np.ndarray
+    battery_soc_wh: np.ndarray | None
+    delta_ch: np.ndarray
+    delta_dc: np.ndarray
+
+
 class LinearOptimizer:
     """MILP optimizer with a compiled reusable CVXPY model.
 
@@ -155,6 +169,9 @@ class LinearOptimizer:
         )
 
         self._compiled = False
+        # delta_ch / delta_dc CVXPY variable references (populated in _add_mode_switch_costs)
+        self._delta_ch_vars: dict[str, Any] = {}
+        self._delta_dc_vars: dict[str, Any] = {}
 
     def solve(
         self,
@@ -327,24 +344,19 @@ class LinearOptimizer:
         dt_s = self._dt * 3600.0
         return min(max(0, round(delta_s / dt_s)), self._T)
 
-    def _build_warm_start_plan(
-        self, shift_steps: int
-    ) -> dict[
-        str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]
-    ]:
+    def _build_warm_start_plan(self, shift_steps: int) -> dict[str, _WarmStartSeed]:
         """Build a warm-start seed from the cached solution, shifted by *shift_steps*.
 
-        Returns a dict mapping device_id → (modes, charge_ac_wh, discharge_ac_wh,
-        pv_to_bat_wh, pv_ac_wh, soc_wh | None).
+        Returns a dict mapping device_id → :class:`_WarmStartSeed`.
+        The ``delta_ch`` / ``delta_dc`` arrays are estimated from the shifted mode
+        sequence; at ``t=0`` the transition from the previous initial mode is
+        unknown, so delta is conservatively set to 0.
         """
         if self._cached_solution is None or shift_steps <= 0:
             return {}
 
         T = self._T
-        out: dict[
-            str,
-            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None],
-        ] = {}
+        out: dict[str, _WarmStartSeed] = {}
         for inv_plan in self._cached_solution.inverter_plans:
             src_modes = np.asarray(inv_plan.modes, dtype=np.int8)
             src_ch = np.asarray(inv_plan.charge_ac_wh, dtype=np.float32)
@@ -353,13 +365,15 @@ class LinearOptimizer:
             src_pva = np.asarray(inv_plan.pv_to_ac_wh, dtype=np.float32)
 
             if src_modes.size == 0:
-                out[inv_plan.device_id] = (
-                    np.full(T, int(InverterMode.IDLE), dtype=np.int8),
-                    np.zeros(T, dtype=np.float32),
-                    np.zeros(T, dtype=np.float32),
-                    np.zeros(T, dtype=np.float32),
-                    np.zeros(T, dtype=np.float32),
-                    None,
+                out[inv_plan.device_id] = _WarmStartSeed(
+                    modes=np.full(T, int(InverterMode.IDLE), dtype=np.int8),
+                    charge_ac_wh=np.zeros(T, dtype=np.float32),
+                    discharge_ac_wh=np.zeros(T, dtype=np.float32),
+                    pv_to_bat_wh=np.zeros(T, dtype=np.float32),
+                    pv_to_ac_wh=np.zeros(T, dtype=np.float32),
+                    battery_soc_wh=None,
+                    delta_ch=np.zeros(T, dtype=np.float32),
+                    delta_dc=np.zeros(T, dtype=np.float32),
                 )
                 continue
 
@@ -414,13 +428,32 @@ class LinearOptimizer:
                 if soc_copied < T:
                     shifted_soc[soc_copied:] = src_soc[-1]
 
-            out[inv_plan.device_id] = (
+            # Estimate delta_ch / delta_dc from the shifted mode sequence.
+            # At t=0 the transition from the (unknown) previous initial mode is
+            # conservatively set to 0. For t>0 the absolute difference is exact.
+            is_ch = np.isin(
                 shifted_modes,
-                shifted_ch,
-                shifted_dc,
-                shifted_pvb,
-                shifted_pva,
-                shifted_soc,
+                [int(InverterMode.AC_CHARGE), int(InverterMode.AC_CHARGE_ZERO_FEED_IN)],
+            ).astype(np.float32)
+            is_dc = np.isin(
+                shifted_modes,
+                [int(InverterMode.DISCHARGE), int(InverterMode.DISCHARGE_ZERO_FEED_IN)],
+            ).astype(np.float32)
+            delta_ch = np.zeros(T, dtype=np.float32)
+            delta_dc = np.zeros(T, dtype=np.float32)
+            if T > 1:
+                delta_ch[1:] = np.abs(np.diff(is_ch))
+                delta_dc[1:] = np.abs(np.diff(is_dc))
+
+            out[inv_plan.device_id] = _WarmStartSeed(
+                modes=shifted_modes,
+                charge_ac_wh=shifted_ch,
+                discharge_ac_wh=shifted_dc,
+                pv_to_bat_wh=shifted_pvb,
+                pv_to_ac_wh=shifted_pva,
+                battery_soc_wh=shifted_soc,
+                delta_ch=delta_ch,
+                delta_dc=delta_dc,
             )
         return out
 
@@ -679,11 +712,7 @@ class LinearOptimizer:
     def _apply_warm_start_values(
         self,
         prep: _PreparedInputs,
-        warm_start_plan: Mapping[
-            str,
-            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None],
-        ]
-        | None,
+        warm_start_plan: Mapping[str, _WarmStartSeed] | None,
         *,
         shift_steps: int = 0,
     ) -> None:
@@ -701,7 +730,14 @@ class LinearOptimizer:
             if seed is None:
                 continue
 
-            seed_modes, seed_ch_wh, seed_dc_wh, seed_pvb_wh, seed_pva_wh, seed_soc_wh = seed
+            seed_modes, seed_ch_wh, seed_dc_wh, seed_pvb_wh, seed_pva_wh, seed_soc_wh = (
+                seed.modes,
+                seed.charge_ac_wh,
+                seed.discharge_ac_wh,
+                seed.pv_to_bat_wh,
+                seed.pv_to_ac_wh,
+                seed.battery_soc_wh,
+            )
             if seed_modes.size == 0:
                 continue
 
@@ -710,6 +746,8 @@ class LinearOptimizer:
             seed_dc_wh = _pad(seed_dc_wh, 0.0)
             seed_pvb_wh = _pad(seed_pvb_wh, 0.0)
             seed_pva_wh = _pad(seed_pva_wh, 0.0)
+            seed_delta_ch = _pad(seed.delta_ch, 0.0)
+            seed_delta_dc = _pad(seed.delta_dc, 0.0)
 
             if isinstance(block.mode_ch_activity, cp.Variable):
                 ch = np.isin(
@@ -786,6 +824,13 @@ class LinearOptimizer:
                 else:
                     soc0 = float(self._soc_init_params[inv.device_id].value or 0.0)
                     block.soc.value = np.full(prep.T, soc0, dtype=float)
+
+            # Warm-start mode-switch delta variables when they exist
+            inv_id = inv.device_id
+            if inv_id in self._delta_ch_vars:
+                self._delta_ch_vars[inv_id].value = seed_delta_ch[: prep.T].astype(float)
+            if inv_id in self._delta_dc_vars:
+                self._delta_dc_vars[inv_id].value = seed_delta_dc[: prep.T].astype(float)
 
         # Warm-start pv_unbuffered_self with Fraunhofer model estimate
         if isinstance(self._pv_unbuffered_self, cp.Variable):
@@ -1072,6 +1117,8 @@ class LinearOptimizer:
         # contributes to the cost. This prevents double-counting when both binaries flip.
         delta_ch = cp.Variable(self._T, nonneg=True, name=f"delta_ch_{inv_id}")
         delta_dc = cp.Variable(self._T, nonneg=True, name=f"delta_dc_{inv_id}")
+        self._delta_ch_vars[inv_id] = delta_ch
+        self._delta_dc_vars[inv_id] = delta_dc
         self._constraints.extend(
             [
                 delta_ch[0] >= is_ch[0] - init_ch_param,

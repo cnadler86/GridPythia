@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from GridPythia.optimization.runner import OptimizationResult, run_optimization
-from GridPythia.prediction.base import ceil_to_slot, floor_to_slot
+from GridPythia.prediction.base import ceil_to_slot, floor_to_slot, round_to_slot
 from GridPythia.prediction.prediction import PredictionData, PredictionSetup
 
 
@@ -108,14 +108,18 @@ async def test_run_optimization_floors_start_for_fetch():
 
 
 @pytest.mark.asyncio
-async def test_run_optimization_solver_start_is_ceil():
-    """solver_pdata starts at ceil(start), not at floor(start)."""
+async def test_run_optimization_solver_start_rounds_to_nearest_second_half():
+    """When start is in the second half of a slot, solver_start = next slot (like ceil)."""
     dt = 0.25
-    start = datetime(2025, 6, 15, 11, 18, tzinfo=timezone.utc)
+    # 11:23 is 8 min into the 11:15 slot (midpoint = 11:22:30) → round → 11:30
+    start = datetime(2025, 6, 15, 11, 23, tzinfo=timezone.utc)
     end = start + timedelta(hours=8)
 
-    expected_solver_start = ceil_to_slot(start, dt)  # 11:30
-    expected_fetch_start = floor_to_slot(start, dt)  # 11:15
+    expected_solver_start = round_to_slot(start, dt)  # 11:30 (ceil equivalent)
+    expected_fetch_start = floor_to_slot(start, dt)   # 11:15
+
+    # solver_start must equal ceil here
+    assert expected_solver_start == ceil_to_slot(start, dt)
 
     fetch_pdata = _make_pdata(33, expected_fetch_start, dt)
     mock_pred = _make_mock_prediction(fetch_pdata)
@@ -132,6 +136,37 @@ async def test_run_optimization_solver_start_is_ceil():
     assert result.solver_start == expected_solver_start
     assert result.solver_pdata.timestamps[0] == expected_solver_start
     # fetch_pdata starts at floor(start)
+    assert result.fetch_pdata.timestamps[0] == expected_fetch_start
+
+
+@pytest.mark.asyncio
+async def test_run_optimization_solver_start_rounds_to_nearest_first_half():
+    """When start is in the first half of a slot, solver_start = same slot (like floor)."""
+    dt = 0.25
+    # 11:18 is 3 min into the 11:15 slot (midpoint = 11:22:30) → round → 11:15
+    start = datetime(2025, 6, 15, 11, 18, tzinfo=timezone.utc)
+    end = start + timedelta(hours=8)
+
+    expected_solver_start = round_to_slot(start, dt)  # 11:15 (floor equivalent)
+    expected_fetch_start = floor_to_slot(start, dt)   # 11:15
+
+    # solver_start and fetch_start must be the same
+    assert expected_solver_start == expected_fetch_start
+
+    fetch_pdata = _make_pdata(33, expected_fetch_start, dt)
+    mock_pred = _make_mock_prediction(fetch_pdata)
+    mock_opt = _make_mock_optimizer()
+
+    result = await run_optimization(
+        start=start,
+        end=end,
+        prediction=mock_pred,
+        optimizer=mock_opt,
+        dt_hours=dt,
+    )
+
+    assert result.solver_start == expected_solver_start
+    assert result.solver_pdata.timestamps[0] == expected_solver_start
     assert result.fetch_pdata.timestamps[0] == expected_fetch_start
 
 

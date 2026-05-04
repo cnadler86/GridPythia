@@ -7,7 +7,7 @@ from datetime import datetime
 import numpy as np
 import plotly.graph_objects as go
 
-from GridPythia.prediction.plots._base import PALETTE, apply_default_layout
+from GridPythia.prediction.plots._base import PALETTE, PredictionPlotter
 
 _COLORS = [
     PALETTE["orange"],
@@ -18,12 +18,14 @@ _COLORS = [
 ]
 
 
-class PVForecastPlotter:
+class PVForecastPlotter(PredictionPlotter):
     """Render per-inverter PV energy output as a bar chart with daily totals.
 
     When only one inverter is present the label is simply "PV".  When
     multiple inverters are present each trace is labelled with its key.
     """
+
+    y_label = "Wh"
 
     def plot(
         self,
@@ -66,8 +68,11 @@ class PVForecastPlotter:
                 d = t.date()
                 day_total[d] = day_total.get(d, 0.0) + float(wh_val)
 
+            first_ts = timestamps[0]
             for d, total_wh in day_total.items():
-                noon = datetime(d.year, d.month, d.day, 12, 0, tzinfo=timestamps[0].tzinfo)
+                noon = datetime(d.year, d.month, d.day, 12, 0, tzinfo=first_ts.tzinfo)
+                if noon < first_ts:
+                    continue
                 fig.add_annotation(
                     x=noon,
                     y=max(next(iter(series_by_inverter.values()))) * 1.05,
@@ -76,6 +81,6 @@ class PVForecastPlotter:
                     font={"size": 9, "color": "#555"},
                 )
 
-        apply_default_layout(fig, title=title, xaxis_title="Time", yaxis_title="Wh")
+        self._apply_layout(fig, timestamps, title=title, yaxis_title="Wh")
         fig.update_layout(barmode="stack")
         return fig

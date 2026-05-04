@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from GridPythia.server.mqtt_gateway import _stitch_current_slot_from_previous_plan
+from GridPythia.server.plan_utils import stitch_current_slot_from_previous_plan as _stitch_current_slot_from_previous_plan
 
 
 class TestMqttPlanPublish:

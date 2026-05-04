@@ -31,7 +31,7 @@ from structlog import get_logger
 
 from GridPythia.optimization.solution import LinearSolution, OptimizationObjective
 from GridPythia.optimization.solver import LinearOptimizer
-from GridPythia.prediction.base import ceil_to_slot, floor_to_slot
+from GridPythia.prediction.base import floor_to_slot, round_to_slot
 from GridPythia.prediction.prediction import Prediction, PredictionData
 from GridPythia.simulation.devices import InverterMode
 
@@ -47,8 +47,8 @@ class OptimizationResult:
         fetch_pdata:  Full prediction data fetched from providers,
                       spanning ``[floor(start), last_slot_before(end)]``.
         solver_pdata: Prediction slice actually passed to the solver,
-                      starting at ``ceil(start)`` (first complete slot).
-        solver_start: First timestamp of *solver_pdata*  (== ``ceil_to_slot(start)``).
+                      starting at ``round(start)`` (nearest slot boundary).
+        solver_start: First timestamp of *solver_pdata*  (== ``round_to_slot(start)``).
     """
 
     solution: LinearSolution
@@ -77,9 +77,11 @@ async def run_optimization(
 
     * ``fetch_start = floor_to_slot(start)`` – providers are always queried from
       a clean slot boundary so caches hit consistently.
-    * ``solver_start = ceil_to_slot(start)`` – the solver only sees *complete*
-      slots that have not yet started.  When *start* is already on a boundary,
-      ``solver_start == start`` and no data is dropped.
+    * ``solver_start = round_to_slot(start)`` – the solver starts at the nearest
+      slot boundary.  When ``start`` is in the first half of a slot (e.g. 14:47
+      → 14:45), the current slot is included.  When ``start`` is in the second
+      half (e.g. 14:55 → 15:00), the solver starts at the next boundary and the
+      caller is responsible for stitching the skipped slot from a prior plan.
     * ``fetch_end   = last slot before (start + hours)`` – the fetch window covers
       the full requested range but never adds spurious slots when the end already
       falls on a boundary.
@@ -113,7 +115,7 @@ async def run_optimization(
         raise ValueError("run_optimization: end must be timezone-aware")
 
     fetch_start = floor_to_slot(start, dt_hours)
-    solver_start = ceil_to_slot(start, dt_hours)
+    solver_start = round_to_slot(start, dt_hours)
     fetch_hours = (end - fetch_start).total_seconds() / 3600.0
 
     logger.info(
