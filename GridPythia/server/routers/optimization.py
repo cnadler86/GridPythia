@@ -87,6 +87,13 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
     if req.prediction_start is not None:
         try:
             dispatch_slot = datetime.fromisoformat(req.prediction_start)
+            # Normalize to the request timezone so timestamps in PredictionData
+            # are always in the configured local timezone, regardless of whether
+            # the scheduler sent UTC or the browser sent local time.
+            if dispatch_slot.tzinfo is not None:
+                dispatch_slot = dispatch_slot.astimezone(tz)
+            else:
+                dispatch_slot = dispatch_slot.replace(tzinfo=tz)
         except (ValueError, TypeError):
             dispatch_slot = services.snap_to_dt_grid(datetime.now(tz=tz), dt_hours)
     else:
