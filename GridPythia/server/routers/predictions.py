@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from structlog import get_logger
 
 import GridPythia.server.state as state
+from GridPythia.prediction.base import floor_to_slot
 from GridPythia.prediction.prediction import Prediction
 from GridPythia.server import services
 from GridPythia.server.models import FetchRequest, PredictionsStatusResponse
@@ -56,7 +57,7 @@ async def _retry_failed_providers(
         pred = Prediction(setup)
         try:
             pdata, errors = await pred.fetch_partial(
-                start=services.snap_to_dt_grid(datetime.now(tz=tz), float(cfg.prediction.dt_hours)),
+                start=floor_to_slot(datetime.now(tz=tz), float(cfg.prediction.dt_hours)),
                 hours=float(cfg.prediction.horizon),
                 dt_hours=float(cfg.prediction.dt_hours),
             )
@@ -131,7 +132,7 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
     pred = Prediction(setup)
     try:
         pdata, errors = await pred.fetch_partial(
-            start=services.snap_to_dt_grid(datetime.now(tz=tz), float(cfg.prediction.dt_hours)),
+            start=floor_to_slot(datetime.now(tz=tz), float(cfg.prediction.dt_hours)),
             hours=float(cfg.prediction.horizon),
             dt_hours=float(cfg.prediction.dt_hours),
         )

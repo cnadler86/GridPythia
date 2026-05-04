@@ -489,3 +489,235 @@ def inverter_plan_to_response(
             )
         )
     return InverterPlanResponse(device_id=plan.device_id, steps=steps)
+
+
+# ── Optimization cycle orchestration ─────────────────────────────────────
+
+
+async def run_optimization_cycle(
+    start: datetime,
+    end: datetime,
+    cfg: "AppConfig",
+    raw_yaml: dict[str, Any],
+    *,
+    battery_soc_overrides: dict[str, float] | None = None,
+    initial_modes_overrides: dict[str, int] | None = None,
+    solver_opts_overrides: dict[str, Any] | None = None,
+    validate_with_simulation: bool = True,
+) -> dict[str, Any]:
+    """Orchestrate a full optimization cycle including server-side effects.
+
+    This function is the shared entry point for the HTTP router and the
+    scheduler.  Both pass a timezone-aware *start* / *end* pair and receive
+    the same serialisable response dict.
+
+    Side effects performed here (in addition to fetch + solve):
+    - Applies active appliance forecasts to the prediction data.
+    - Checks inverter readiness (raises ``ValueError`` if any inverter is stale).
+    - Guards against missing PV forecast data.
+    - Builds Plotly chart dicts for the dashboard.
+    - Caches the result via :func:`set_cached_solution`.
+    - Broadcasts the result over the WebSocket hub.
+    - Publishes inverter plans via MQTT (when the gateway is running).
+
+    Args:
+        start:  Horizon start (timezone-aware).  Floored to slot by the runner.
+        end:    Horizon end (timezone-aware).  Covered by the runner.
+        cfg:    Parsed :class:`~GridPythia.config.AppConfig`.
+        raw_yaml: Raw YAML dict (needed to rebuild providers on config change).
+        battery_soc_overrides:  ``battery_id → %`` SoC overrides from the caller.
+        initial_modes_overrides: ``inverter_id → int`` mode overrides from the caller.
+        solver_opts_overrides:   HiGHS option overrides merged on top of config defaults.
+        validate_with_simulation: Attach simulation parity report to solution.
+
+    Returns:
+        Serialisable response dict with keys ``summary``, ``inverter_plans``,
+        ``charts``, and ``status``.
+
+    Raises:
+        RuntimeError:  Config / provider / optimizer setup failed.
+        ValueError:    *start* or *end* are naive, or inverter status is stale.
+        Exception:     Prediction fetch or solver error (re-raised as-is).
+    """
+    # Lazy imports to avoid circular import at module level
+    from GridPythia.optimization.plots import SolutionPlotter  # noqa: PLC0415
+    from GridPythia.optimization.runner import run_optimization  # noqa: PLC0415
+    from GridPythia.optimization.solution import OptimizationObjective  # noqa: PLC0415
+    from GridPythia.prediction.prediction import Prediction  # noqa: PLC0415
+    from GridPythia.server.models import OptimizeSummary  # noqa: PLC0415
+
+    dt_hours = float(cfg.prediction.dt_hours)
+
+    setup = get_providers(cfg, raw_yaml)
+    optimizer = get_optimizer(cfg)
+
+    # ── Inverter readiness check ──────────────────────────────────────
+    ready, missing = state.coordinator.all_optimizable_ready(
+        optimizer.inverters,
+        now=start,
+    )
+    if not ready:
+        raise ValueError(
+            f"Optimization blocked: missing or stale inverter status for {sorted(missing)}"
+        )
+
+    # ── Objective ────────────────────────────────────────────────────
+    objective = (
+        OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
+        if cfg.optimization.solver.objective == "self_consumption"
+        else OptimizationObjective.MINIMIZE_COST
+    )
+
+    # ── SoC and initial modes ─────────────────────────────────────────
+    soc_wh = state.coordinator.get_soc_overrides_wh(optimizer.inverters)
+    soc_wh.update(soc_overrides_wh_for_solver(optimizer, battery_soc_overrides or {}))
+    soc_wh = cap_runtime_soc_wh_for_solver(optimizer, soc_wh)
+
+    initial_modes = state.coordinator.get_initial_modes(optimizer.inverters)
+    if initial_modes_overrides:
+        from GridPythia.simulation.devices import InverterMode as _IM  # noqa: PLC0415
+
+        initial_modes.update(
+            {inv_id: _IM(int(mode)) for inv_id, mode in initial_modes_overrides.items()}
+        )
+
+    # ── Solver opts ───────────────────────────────────────────────────
+    solver_opts = dict(cfg.optimization.solver.solver_opts)
+    if solver_opts_overrides:
+        solver_opts.update(solver_opts_overrides)
+
+    logger.info(
+        "optimization_cycle_initial_conditions",
+        start=start.isoformat(),
+        end=end.isoformat(),
+        soc_wh={k: round(v, 1) for k, v in soc_wh.items()},
+        initial_modes={k: v.name for k, v in initial_modes.items()},
+    )
+
+    # ── Core: fetch predictions + solve ──────────────────────────────
+    prediction = Prediction(setup)
+    async with state.get_optimizer_lock():
+        result = await run_optimization(
+            start=start,
+            end=end,
+            prediction=prediction,
+            optimizer=optimizer,
+            dt_hours=dt_hours,
+            soc=soc_wh or None,
+            initial_modes=initial_modes or None,
+            solver_opts=solver_opts,
+            objective=objective,
+            validate_with_simulation=validate_with_simulation,
+            pdata_transform=apply_appliance_loads,
+        )
+
+    solution = result.solution
+    fetch_pdata = result.fetch_pdata
+    solver_pdata = result.solver_pdata
+
+    # ── PV data integrity guard ───────────────────────────────────────
+    pv_missing = [
+        inv.device_id
+        for inv in optimizer.inverters
+        if inv.parameters.has_pv and inv.device_id not in solver_pdata.pv_by_inverter
+    ]
+    if pv_missing:
+        raise ValueError(
+            f"PV forecast missing for inverter(s) {pv_missing}. "
+            "Refusing to optimize without PV data to avoid planning as if there is no solar "
+            "generation. Fix the PV provider or wait for the retry task to recover."
+        )
+
+    # ── Inverter plans ────────────────────────────────────────────────
+    inverter_plans = [
+        inverter_plan_to_response(plan, list(solver_pdata.timestamps))
+        for plan in solution.inverter_plans
+    ]
+
+    # ── Charts ────────────────────────────────────────────────────────
+    forecast_from: datetime | None = (
+        setup.electricprice.last_real_ts if setup.electricprice is not None else None
+    )
+    charts: dict[str, Any] = {}
+    charts.update(make_prediction_figures(solver_pdata, forecast_from))
+    plotter = SolutionPlotter()
+    for inv in optimizer.inverters:
+        charts[f"tab-inv-{inv.device_id}"] = fig_to_dict(
+            plotter.plot_inverter(solution, inv.device_id)
+        )
+
+    # ── Savings vs. naive baseline ────────────────────────────────────
+    import numpy as np  # noqa: PLC0415
+
+    pv_total = np.zeros(solver_pdata.steps, dtype=float)
+    for arr in solver_pdata.pv_by_inverter.values():
+        pv_total += np.asarray(arr, dtype=float)
+    load_arr = np.asarray(solver_pdata.load_wh, dtype=float)
+    price_arr = (
+        np.asarray(solver_pdata.electricprice, dtype=float)
+        if solver_pdata.electricprice is not None
+        else np.zeros(solver_pdata.steps, dtype=float)
+    )
+    feedin_arr = (
+        np.asarray(solver_pdata.feedintariff, dtype=float)
+        if solver_pdata.feedintariff is not None
+        else np.zeros(solver_pdata.steps, dtype=float)
+    )
+    naive_net_cost = float(
+        np.sum(np.maximum(0.0, load_arr - pv_total) * price_arr)
+        - np.sum(np.maximum(0.0, pv_total - load_arr) * feedin_arr)
+    )
+    net_cost = solution.result.total_cost - solution.result.total_revenue
+    savings = naive_net_cost - net_cost
+    parity_ok = solution.parity_report.ok if solution.parity_report is not None else None
+
+    # ── Summary ───────────────────────────────────────────────────────
+    from GridPythia.server.models import OptimizeSummary  # noqa: PLC0415, F811
+
+    summary = OptimizeSummary(
+        solver_status=solution.solver_status,
+        solve_time_s=round(solution.solve_time_s, 2),
+        objective=objective.value,
+        total_cost_eur=round(float(solution.result.total_cost), 4),
+        total_revenue_eur=round(float(solution.result.total_revenue), 4),
+        net_cost_eur=round(float(net_cost), 4),
+        naive_net_cost_eur=round(float(naive_net_cost), 4),
+        savings_eur=round(float(savings), 4),
+        parity_ok=parity_ok,
+        solved_at=datetime.now(timezone.utc).isoformat(),
+    )
+    parity_warn = " ⚠ parity" if parity_ok is False else ""
+    status = (
+        f"Solved {solution.solve_time_s:.1f}s · {solution.solver_status} · "
+        f"naive: {naive_net_cost:.3f} EUR → optimized: {net_cost:.3f} EUR · "
+        f"savings: {savings:.3f} EUR{parity_warn}"
+    )
+
+    logger.info(
+        "optimization_cycle_done",
+        solver_status=solution.solver_status,
+        solve_time_s=round(solution.solve_time_s, 2),
+        savings_eur=round(savings, 3),
+        solver_start=result.solver_start.isoformat(),
+        solver_steps=solver_pdata.steps,
+    )
+
+    response_data: dict[str, Any] = {
+        "summary": summary.model_dump(),
+        "inverter_plans": [p.model_dump() for p in inverter_plans],
+        "charts": charts,
+        "status": status,
+    }
+
+    # ── Cache + broadcast + MQTT ──────────────────────────────────────
+    set_cached_solution(response_data)
+
+    await state.ws_hub.broadcast({"type": "optimization_updated", "payload": response_data})
+
+    if state.mqtt_gateway is not None:
+        state.mqtt_gateway.publish_plans(
+            [p.model_dump() for p in inverter_plans],
+            dt_hours=dt_hours,
+        )
+
+    return response_data

@@ -10,13 +10,11 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fastapi import HTTPException
 from structlog import get_logger
 
 from GridPythia.coordination import next_optimization_slot
+from GridPythia.prediction.base import floor_to_slot
 from GridPythia.server import services
-from GridPythia.server.models import OptimizeRequest
-from GridPythia.server.routers.optimization import optimize
 
 logger = get_logger(__name__)
 
@@ -117,7 +115,7 @@ async def run_startup_fetch() -> None:
         pred = Prediction(setup)
         try:
             _, errors = await pred.fetch_partial(
-                start=services.snap_to_dt_grid(datetime.now(tz=tz), float(cfg.prediction.dt_hours)),
+                start=floor_to_slot(datetime.now(tz=tz), float(cfg.prediction.dt_hours)),
                 hours=float(cfg.prediction.horizon),
                 dt_hours=float(cfg.prediction.dt_hours),
             )
@@ -154,17 +152,23 @@ async def run_startup_fetch() -> None:
 async def run_scheduler() -> None:
     """Run optimization cycles at configured slot boundaries.
 
-    Each slot: call optimize() with prediction_start=slot.  The optimize
-    endpoint fetches directly from providers (providers own cache TTL via
-    cache_ttl_hours) with dispatch_slot as start, eliminating the slot-shift bug.
+    Each cycle: call ``services.run_optimization_cycle()`` with the dispatch
+    slot as ``start``.  The runner floors the slot to the nearest prediction
+    boundary (no-op when the slot is already aligned) and ceils it for the
+    solver window, so every cycle is consistently anchored.
     """
     publish_lateness_s = 0.0
     last_dispatch_slot: datetime | None = None
 
     while True:
         try:
-            cfg, _ = services.load_config()
-            server_tz = cfg.server.timezone or "UTC"
+            cfg, raw_yaml = services.load_config()
+            server_tz_str = cfg.server.timezone or "UTC"
+            try:
+                server_tz = ZoneInfo(server_tz_str)
+            except Exception:
+                server_tz = ZoneInfo("UTC")
+
             now = datetime.now(tz=timezone.utc)
             slot, run_at, lead_s = _next_scheduler_trigger(
                 now,
@@ -190,29 +194,32 @@ async def run_scheduler() -> None:
 
             last_dispatch_slot = slot
 
+            # Dispatch slot is always a 15-min boundary in UTC; shift to server TZ
+            # so that prediction timestamps use the configured local timezone.
+            slot_local = slot.astimezone(server_tz)
+            end_local = slot_local + timedelta(hours=float(cfg.prediction.horizon))
+
             logger.info(
                 "scheduler_slot_optimization_starting",
-                slot=slot.isoformat(),
+                slot=slot_local.isoformat(),
+                end=end_local.isoformat(),
                 interval_min=int(cfg.server.scheduler.optimization_interval_minutes),
                 lead_s=round(lead_s, 2),
             )
 
             try:
-                # prediction_start = dispatch slot so optimize() anchors the
-                # prediction window at the same start across consecutive cycles
-                # and slices from this slot.  Providers own their cache TTL
-                # (cache_ttl_hours) and decide whether to hit the network.
-                await optimize(
-                    OptimizeRequest(
-                        timezone=server_tz,
-                        prediction_start=slot.isoformat(),
-                    )
+                await services.run_optimization_cycle(
+                    start=slot_local,
+                    end=end_local,
+                    cfg=cfg,
+                    raw_yaml=raw_yaml,
+                    validate_with_simulation=True,
                 )
-            except HTTPException as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "scheduler_optimization_failed",
-                    status_code=exc.status_code,
-                    detail=str(exc.detail),
+                    slot=slot_local.isoformat(),
+                    error=str(exc),
                 )
                 continue
 
@@ -220,7 +227,7 @@ async def run_scheduler() -> None:
             publish_lateness_s = max(0.0, (completed_at - slot).total_seconds())
             logger.info(
                 "scheduler_cycle_complete",
-                slot=slot.isoformat(),
+                slot=slot_local.isoformat(),
                 completed_at=completed_at.isoformat(),
                 publish_lateness_s=round(publish_lateness_s, 2),
             )
