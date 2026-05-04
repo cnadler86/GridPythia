@@ -148,7 +148,7 @@
   <span class="gp-brand">⚡ GridPythia</span>
   <span id="chip-pred" class="gp-status-chip">Predictions: —</span>
   <span id="chip-opt"  class="gp-status-chip">Optimization: —</span>
-  <span id="next-slot" class="ms-auto">Next slot: <strong id="countdown">—</strong></span>
+  <span id="next-slot" class="ms-auto">Next opt: <strong id="countdown">—</strong></span>
   <span id="server-clock" style="font-size:.75rem;color:#bbb;white-space:nowrap">—</span>
   <span id="mqtt-status"><span class="mqtt-dot" id="mqtt-dot"></span>MQTT</span>
   <span id="spinner-global" class="spinner-sm" style="display:none"></span>
@@ -185,6 +185,13 @@ let BUSY = false;
 let WS = null;
 let WS_RETRY_MS = 1000;
 
+// ── Scheduler timing (server-pushed) ──────────────────────────────────────
+let SCHEDULER_RUN_AT_MS = null;   // Date.getTime() of next scheduler run
+
+// ── Inverter cache (WS-fed, client-side age tracking) ─────────────────────
+// device_id → { soc, mode, mode_name, age_s, reported_at, is_fresh, _received_at_ms }
+const INVERTER_CACHE = {};
+
 // ── Utility ────────────────────────────────────────────────────────────────
 function fmtAge(s) {
   if (s == null) return '—';
@@ -206,21 +213,6 @@ function fmtTimestamp(isoStr) {
   }
 }
 
-// ── Server clock ─────────────────────────────────────────────────────────────
-function updateServerClock() {
-  const el = document.getElementById('server-clock');
-  if (!el) return;
-  try {
-    const now = new Date().toLocaleString('de-DE', {
-      timeZone: TZ,
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    });
-    el.textContent = now + ' (' + TZ + ')';
-  } catch (e) {
-    el.textContent = new Date().toLocaleTimeString();
-  }
-}
-
 function setSpinner(on) {
   document.getElementById('spinner-global').style.display = on ? 'inline-block' : 'none';
 }
@@ -231,21 +223,35 @@ function setActionStatus(msg, color) {
   el.style.color = color || '#888';
 }
 
-// ── Countdown to next optimization slot ───────────────────────────────────
-function nextSlotMs(intervalMin) {
-  const now = new Date();
-  const ms = intervalMin * 60_000;
-  const epoch = now.getTime();
-  return ms - (epoch % ms);          // ms until next boundary
-}
+// ── 1-second tick: clock + countdown + inverter freshness ─────────────────
+function tick() {
+  // Server clock
+  const el = document.getElementById('server-clock');
+  if (el) {
+    try {
+      el.textContent = new Date().toLocaleString('de-DE', {
+        timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit',
+      }) + ' (' + TZ + ')';
+    } catch (e) {
+      el.textContent = new Date().toLocaleTimeString();
+    }
+  }
 
-function updateCountdown() {
-  if (!CFG) return;
-  const ms = nextSlotMs(CFG.optimization_interval_min);
-  const s = Math.round(ms / 1000);
-  const m = Math.floor(s / 60);
-  const ss = String(s % 60).padStart(2, '0');
-  document.getElementById('countdown').textContent = m + ':' + ss;
+  // Countdown to next scheduled optimizer run (server-pushed run_at)
+  const cd = document.getElementById('countdown');
+  if (cd) {
+    if (SCHEDULER_RUN_AT_MS !== null) {
+      const remaining_s = Math.max(0, Math.round((SCHEDULER_RUN_AT_MS - Date.now()) / 1000));
+      const m = Math.floor(remaining_s / 60);
+      const s = String(remaining_s % 60).padStart(2, '0');
+      cd.textContent = m + ':' + s;
+    } else {
+      cd.textContent = '—';
+    }
+  }
+
+  // Inverter freshness (recompute age from original age_s + elapsed since received)
+  if (CFG) refreshInverterUI();
 }
 
 // ── Inverter cards ─────────────────────────────────────────────────────────
@@ -272,28 +278,30 @@ function buildInverterCards(cfgInverters) {
   }
 }
 
-function updateInverterCards(statusList, maxAgeSec) {
-  const byId = Object.fromEntries(statusList.map(s => [s.device_id, s]));
+const _MODE_BADGE = {
+  0: { text: 'I',   color: '#888',    title: 'Idle' },
+  1: { text: '↓D',  color: '#e08020', title: 'Discharge' },
+  2: { text: '↓D',  color: '#e08020', title: 'Discharge ZFI' },
+  3: { text: '↑C',  color: '#1565c0', title: 'Charge' },
+  4: { text: '↑C',  color: '#1565c0', title: 'Charge ZFI' },
+};
+
+function refreshInverterUI() {
+  if (!CFG) return;
+  const maxAgeSec = CFG.inverter_status_max_age_s;
+  const now = Date.now();
   let allFresh = true;
 
   for (const inv of CFG.inverters) {
-    const s = byId[inv.device_id];
+    const raw = INVERTER_CACHE[inv.device_id];
     const card = document.getElementById('inv-card-' + inv.device_id);
     const dot  = document.getElementById('dot-'  + inv.device_id);
     if (!card) continue;
 
-    const _MODE_BADGE = {
-      0: { text: 'I',   color: '#888',    title: 'Idle' },
-      1: { text: '↓D',  color: '#e08020', title: 'Discharge' },
-      2: { text: '↓D',  color: '#e08020', title: 'Discharge ZFI' },
-      3: { text: '↑C',  color: '#1565c0', title: 'Charge' },
-      4: { text: '↑C',  color: '#1565c0', title: 'Charge ZFI' },
-    };
-
-    if (!s) {
+    if (!raw) {
       card.className = 'inv-card unknown';
-      dot.className = 'freshness-dot';
-      dot.title = 'no data';
+      dot.className  = 'freshness-dot';
+      dot.title      = 'no data';
       document.getElementById('soc-bar-' + inv.device_id).style.width = '0%';
       document.getElementById('soc-bar-bg-' + inv.device_id).title = '— %';
       const badge0 = document.getElementById('mode-' + inv.device_id);
@@ -302,22 +310,26 @@ function updateInverterCards(statusList, maxAgeSec) {
       continue;
     }
 
-    const pct  = s.soc.toFixed(1);
-    const bar  = document.getElementById('soc-bar-' + inv.device_id);
+    // age_s grows from its server-reported value as time passes
+    const age_s = raw.age_s + (now - raw._received_at_ms) / 1000;
+    const is_fresh = age_s < maxAgeSec;
+
+    const pct = raw.soc.toFixed(1);
+    const bar = document.getElementById('soc-bar-' + inv.device_id);
     bar.style.width = pct + '%';
-    bar.className = 'soc-bar-fill' + (s.soc < 25 ? ' low' : '');
+    bar.className = 'soc-bar-fill' + (raw.soc < 25 ? ' low' : '');
     document.getElementById('soc-bar-bg-' + inv.device_id).title = pct + ' %';
 
-    dot.title = fmtAge(s.age_s);
+    dot.title = fmtAge(age_s);
 
-    const mInfo = _MODE_BADGE[s.mode] || { text: '?', color: '#888', title: '?' };
+    const mInfo = _MODE_BADGE[raw.mode] || { text: '?', color: '#888', title: '?' };
     const badge = document.getElementById('mode-' + inv.device_id);
     badge.textContent = mInfo.text; badge.style.color = mInfo.color; badge.title = mInfo.title;
 
-    if (s.is_fresh) {
+    if (is_fresh) {
       card.className = 'inv-card fresh';
       dot.className  = 'freshness-dot ok';
-    } else if (s.age_s < maxAgeSec * 2) {
+    } else if (age_s < maxAgeSec * 2) {
       card.className = 'inv-card stale';
       dot.className  = 'freshness-dot warn';
       allFresh = false;
@@ -329,7 +341,6 @@ function updateInverterCards(statusList, maxAgeSec) {
   }
 
   document.getElementById('btn-optimize').disabled = !allFresh || BUSY;
-  return allFresh;
 }
 
 // ── Tab label map ──────────────────────────────────────────────────────────
@@ -343,12 +354,8 @@ const TAB_LABELS = {
 
 // ── Tabs ───────────────────────────────────────────────────────────────────
 function buildTabs() {
-  // Prediction tabs: backend already filtered out trivial (fixed/constant) ones
-  const predTabs = CFG.visible_prediction_tabs.map(id => ({
-    id,
-    label: TAB_LABELS[id] ?? id,
-  }));
-  const invTabs = CFG.inverters.map(inv => ({
+  const predTabs = CFG.visible_prediction_tabs.map(id => ({ id, label: TAB_LABELS[id] ?? id }));
+  const invTabs  = CFG.inverters.map(inv => ({
     id: 'tab-inv-' + inv.device_id, label: '⚡ ' + inv.device_id,
   }));
   TABS = [...predTabs, ...invTabs];
@@ -384,7 +391,6 @@ function showTab(id) {
   if (el._dirty && CHART_DATA[id]) {
     _renderChart(el, id, CHART_DATA[id]);
   } else if (el._plotly) {
-    // Trigger responsive width resize without touching height
     Plotly.Plots.resize(el);
   }
 }
@@ -393,11 +399,9 @@ function _renderChart(el, tabId, fig) {
   const hasPlot = Boolean(el._plotly);
   if (!hasPlot) el.replaceChildren();
   el.classList.remove('chart-placeholder');
-  // Pin explicit CSS height to prevent Plotly collapsing on resize / double-click
   const h = (fig.layout && fig.layout.height) ? fig.layout.height : 400;
   el.style.height = h + 'px';
   el.style.minHeight = h + 'px';
-  // Keep server layout (height, template, …) but enable responsive width
   const layout = Object.assign({}, fig.layout || {}, { autosize: true });
   const plotFn = hasPlot ? Plotly.react : Plotly.newPlot;
   plotFn(el, fig.data || [], layout, { responsive: true, displayModeBar: false });
@@ -410,7 +414,6 @@ function renderCharts(charts) {
     CHART_DATA[tabId] = fig;
     const el = document.getElementById('chart-' + tabId);
     if (!el) continue;
-    // Defer rendering for charts in hidden panes to avoid 0-height collapse
     const pane = document.getElementById('pane-' + tabId);
     if (pane && !pane.classList.contains('active')) {
       el._dirty = true;
@@ -420,7 +423,23 @@ function renderCharts(charts) {
   }
 }
 
-// ── WebSocket live updates ───────────────────────────────────────────────
+// ── MQTT status ────────────────────────────────────────────────────────────
+function applyMqttStatus(s) {
+  const dot   = document.getElementById('mqtt-dot');
+  const label = document.getElementById('mqtt-status');
+  if (!s.enabled) {
+    dot.className = 'mqtt-dot';
+    label.title   = 'MQTT disabled';
+  } else if (s.connected) {
+    dot.className = 'mqtt-dot on';
+    label.title   = 'MQTT connected';
+  } else {
+    dot.className = 'mqtt-dot off';
+    label.title   = 'MQTT disconnected';
+  }
+}
+
+// ── WebSocket live updates ─────────────────────────────────────────────────
 function wsUrl() {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return proto + '//' + window.location.host + '/api/ws';
@@ -429,24 +448,51 @@ function wsUrl() {
 function handleLiveEvent(msg) {
   if (!msg || !msg.type) return;
 
-  if (msg.type === 'predictions_updated' && msg.payload?.charts) {
-    renderCharts(msg.payload.charts);
-    updatePredChip({ has_cache: true, age_s: 0 });
-    setActionStatus('Live: predictions updated', '#4caf82');
-    return;
-  }
+  switch (msg.type) {
+    case 'predictions_updated':
+      if (msg.payload?.charts) {
+        renderCharts(msg.payload.charts);
+        updatePredChip(true);
+        setActionStatus('Live: predictions updated', '#4caf82');
+      }
+      break;
 
-  if (msg.type === 'optimization_updated' && msg.payload?.summary) {
-    LAST_OPT = msg.payload;
-    if (msg.payload.charts) renderCharts(msg.payload.charts);
-    updateOptChip(LAST_OPT);
-    setActionStatus('Live: optimization updated', '#4caf82');
-    return;
-  }
+    case 'optimization_updated':
+      if (msg.payload?.summary) {
+        LAST_OPT = msg.payload;
+        if (msg.payload.charts) renderCharts(msg.payload.charts);
+        updateOptChip(LAST_OPT);
+        setActionStatus('Live: optimization updated', '#4caf82');
+      }
+      break;
 
-  if (msg.type === 'inverter_status') {
-    // Keep UI state coherent by using the same code path as periodic polling.
-    pollInverters();
+    case 'inverter_status': {
+      const s = msg.payload;
+      if (s?.device_id) {
+        INVERTER_CACHE[s.device_id] = { ...s, _received_at_ms: Date.now() };
+        refreshInverterUI();
+      }
+      break;
+    }
+
+    case 'inverter_status_all':
+      if (Array.isArray(msg.payload)) {
+        for (const s of msg.payload) {
+          if (s?.device_id) INVERTER_CACHE[s.device_id] = { ...s, _received_at_ms: Date.now() };
+        }
+        refreshInverterUI();
+      }
+      break;
+
+    case 'scheduler_status':
+      if (msg.payload?.run_at) {
+        SCHEDULER_RUN_AT_MS = new Date(msg.payload.run_at).getTime();
+      }
+      break;
+
+    case 'mqtt_status':
+      if (msg.payload) applyMqttStatus(msg.payload);
+      break;
   }
 }
 
@@ -485,36 +531,30 @@ function connectWebSocket() {
   };
 }
 
-// ── Prediction status chip ─────────────────────────────────────────────────
-function updatePredChip(status) {
+// ── Prediction / opt status chips ──────────────────────────────────────────
+function updatePredChip(ok) {
   const chip = document.getElementById('chip-pred');
-  if (!status || !status.has_cache) {
-    chip.className = 'gp-status-chip warn';
-    chip.textContent = 'Predictions: no cache';
-    return;
-  }
-  const age = Math.round(status.age_s);
-  chip.className = 'gp-status-chip ok';
-  chip.textContent = 'Predictions: ' + fmtAge(age);
+  chip.className  = ok ? 'gp-status-chip ok' : 'gp-status-chip warn';
+  chip.textContent = ok ? 'Predictions: ok' : 'Predictions: no cache';
 }
 
 function updateOptChip(opt) {
   const chip = document.getElementById('chip-opt');
   const info = document.getElementById('last-opt-info');
   if (!opt) {
-    chip.className = 'gp-status-chip';
+    chip.className  = 'gp-status-chip';
     chip.textContent = 'Optimization: —';
     return;
   }
-  const savings = opt.summary.savings_eur;
+  const savings  = opt.summary.savings_eur;
   const statusOk = opt.summary.solver_status === 'optimal' || opt.summary.solver_status === 'optimal_inaccurate';
-  chip.className = 'gp-status-chip ' + (statusOk ? 'ok' : 'warn');
+  chip.className  = 'gp-status-chip ' + (statusOk ? 'ok' : 'warn');
   chip.textContent = 'Opt: ' + opt.summary.solver_status + ' · ' + (savings >= 0 ? '+' : '') + savings.toFixed(3) + ' EUR';
-  const solvedAt = opt.summary.solved_at ? fmtTimestamp(opt.summary.solved_at) : '—';
+  const solvedAt  = opt.summary.solved_at ? fmtTimestamp(opt.summary.solved_at) : '—';
   info.textContent = 'Last optimization: ' + solvedAt + ' · ' + opt.summary.objective + ' · savings ' + savings.toFixed(3) + ' EUR';
 }
 
-// ── API helpers ────────────────────────────────────────────────────────────
+// ── API helper ─────────────────────────────────────────────────────────────
 async function apiFetch(path, method, body) {
   const opts = { method: method || 'GET', headers: {} };
   if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
@@ -527,61 +567,6 @@ async function apiFetch(path, method, body) {
   return r.json();
 }
 
-// ── Poll MQTT status (every 30s) ──────────────────────────────────────────
-async function pollMqttStatus() {
-  try {
-    const s = await apiFetch('/api/mqtt/status');
-    const dot   = document.getElementById('mqtt-dot');
-    const label = document.getElementById('mqtt-status');
-    if (!s.enabled) {
-      dot.className  = 'mqtt-dot';
-      label.title    = 'MQTT disabled';
-    } else if (s.connected) {
-      dot.className  = 'mqtt-dot on';
-      label.title    = 'MQTT connected';
-    } else {
-      dot.className  = 'mqtt-dot off';
-      label.title    = 'MQTT disconnected';
-    }
-  } catch (e) { /* silent – server may not have started yet */ }
-}
-
-// ── Poll inverter status (every 30s) ──────────────────────────────────────
-async function pollInverters() {
-  try {
-    const list = await apiFetch('/api/inverters/status');
-    const allFresh = updateInverterCards(list, CFG.inverter_status_max_age_s);
-    return allFresh;
-  } catch (e) {
-    console.warn('inverter poll failed:', e.message);
-    return false;
-  }
-}
-
-// ── Poll prediction status (every 60s) ────────────────────────────────────
-async function pollPredStatus() {
-  try {
-    const s = await apiFetch('/api/predictions/status');
-    updatePredChip(s);
-    return s;
-  } catch (e) { return null; }
-}
-
-// ── Poll optimization status (every 60s) ──────────────────────────────────
-async function pollOptStatus() {
-  try {
-    const s = await apiFetch('/api/optimize/status');
-    if (s.has_cache && !LAST_OPT) {
-      // Cache is fresh but we haven't loaded it yet; fetch and render it
-      const data = await apiFetch('/api/optimize');
-      LAST_OPT = data;
-      renderCharts(data.charts);
-      updateOptChip(data);
-    }
-    return s;
-  } catch (e) { return null; }
-}
-
 // ── Manual: fetch predictions ──────────────────────────────────────────────
 async function triggerFetch() {
   if (BUSY) return;
@@ -590,7 +575,7 @@ async function triggerFetch() {
   try {
     const data = await apiFetch('/api/predictions/fetch', 'POST', { timezone: TZ });
     renderCharts(data.charts);
-    updatePredChip({ has_cache: true, age_s: 0 });
+    updatePredChip(true);
     setActionStatus('Predictions updated ✓', '#4caf82');
   } catch (e) {
     setActionStatus('✗ ' + e.message, '#e05050');
@@ -600,21 +585,12 @@ async function triggerFetch() {
   }
 }
 
-// ── Manual / auto: optimize ────────────────────────────────────────────────
+// ── Manual: optimize now ───────────────────────────────────────────────────
 async function triggerOptimize() {
   if (BUSY) return;
   BUSY = true; setSpinner(true); setActionStatus('Optimizing…', '#aaa');
   document.getElementById('btn-optimize').disabled = true;
   try {
-    // Predict first if cache is stale (optimize call will handle it, but let's render charts)
-    const predStatus = await apiFetch('/api/predictions/status');
-    if (!predStatus.has_cache) {
-      setActionStatus('Fetching predictions…', '#aaa');
-      const fetchData = await apiFetch('/api/predictions/fetch', 'POST', { timezone: TZ });
-      renderCharts(fetchData.charts);
-    }
-
-    setActionStatus('Optimizing…', '#aaa');
     const data = await apiFetch('/api/optimize', 'POST', { timezone: TZ });
     LAST_OPT = data;
     renderCharts(data.charts);
@@ -628,40 +604,7 @@ async function triggerOptimize() {
     setActionStatus('✗ ' + e.message, '#e05050');
   } finally {
     BUSY = false; setSpinner(false);
-    // Re-evaluate button state after poll
-    await pollInverters();
-  }
-}
-
-// ── Auto-scheduler: fire at slot boundary if inverters are fresh ───────────
-let lastAutoOptSlot = null;
-
-async function schedulerTick() {
-  if (!CFG || BUSY) return;
-  const ms = nextSlotMs(CFG.optimization_interval_min);
-  // Fire when we're within 5s of the next slot
-  if (ms > 5_000) return;
-
-  const slotKey = Math.floor(Date.now() / (CFG.optimization_interval_min * 60_000));
-  if (lastAutoOptSlot === slotKey) return;   // already fired this slot
-  lastAutoOptSlot = slotKey;
-
-  const allFresh = await pollInverters();
-  if (allFresh) {
-    console.info('[scheduler] slot reached, all inverters fresh → auto-optimize');
-    setActionStatus('Auto-optimizing…', '#f0c040');
-    await triggerOptimize();
-  } else {
-    // Still refresh predictions even without inverter data
-    try {
-      const predStatus = await apiFetch('/api/predictions/status');
-      if (!predStatus.has_cache || predStatus.age_s > CFG.optimization_interval_min * 60) {
-        const fetchData = await apiFetch('/api/predictions/fetch', 'POST', { timezone: TZ });
-        renderCharts(fetchData.charts);
-        updatePredChip({ has_cache: true, age_s: 0 });
-      }
-    } catch (e) { /* silent */ }
-    setActionStatus('Slot reached – waiting for inverter status', '#f0a030');
+    refreshInverterUI();  // re-evaluate button state from INVERTER_CACHE
   }
 }
 
@@ -669,39 +612,24 @@ async function schedulerTick() {
 async function init() {
   try {
     CFG = await apiFetch('/api/config');
-    TZ = CFG.server_timezone || 'UTC';  // use server timezone for all display + API calls
+    TZ  = CFG.server_timezone || 'UTC';
     buildInverterCards(CFG.inverters);
     buildTabs();
 
-    // Initial data load
-    await pollInverters();
-    const predStatus = await pollPredStatus();
-    await pollMqttStatus();
-    await pollOptStatus();
-
-    // If predictions are already cached, fetch and render them
-    if (predStatus && predStatus.has_cache) {
-      try {
-        const data = await apiFetch('/api/predictions/fetch', 'POST', { timezone: TZ });
-        renderCharts(data.charts);
-      } catch (e) {
-        setActionStatus('Could not hydrate cached predictions: ' + e.message, '#f0a030');
-      }
+    // Always fetch fresh predictions on page load so plots start from ~now
+    try {
+      setActionStatus('Fetching predictions…', '#aaa');
+      const predData = await apiFetch('/api/predictions/fetch', 'POST', { timezone: TZ });
+      renderCharts(predData.charts);
+      updatePredChip(true);
+      setActionStatus('Ready', '#7a7a7a');
+    } catch (e) {
+      setActionStatus('Prediction fetch failed: ' + e.message, '#f0a030');
+      updatePredChip(false);
     }
 
-    // Fallback: if optimization cache exists but charts are not yet rendered,
-    // load it directly so inverter tabs do not remain on "No data yet".
-    if (!LAST_OPT) {
-      try {
-        const cachedOpt = await apiFetch('/api/optimize');
-        if (cachedOpt && cachedOpt.summary && cachedOpt.charts) {
-          LAST_OPT = cachedOpt;
-          renderCharts(cachedOpt.charts);
-          updateOptChip(cachedOpt);
-        }
-      } catch (e) { /* no cached optimize is valid */ }
-    }
-
+    // Connect WebSocket – server hydrates optimization, inverters, MQTT and
+    // scheduler status on connect (no extra HTTP round-trips needed).
     connectWebSocket();
 
   } catch (e) {
@@ -710,17 +638,9 @@ async function init() {
     return;
   }
 
-  // ── Timers ────────────────────────────────────────────────────────────────
-  setInterval(updateCountdown,   1_000);    // countdown every second
-  setInterval(updateServerClock, 1_000);    // server clock every second
-  setInterval(pollInverters,    30_000);   // inverter status every 30s
-  setInterval(pollPredStatus,   60_000);   // pred cache status every 60s
-  setInterval(pollOptStatus,    60_000);   // opt cache status every 60s
-  setInterval(pollMqttStatus,   30_000);   // MQTT status every 30s
-  setInterval(schedulerTick,     5_000);   // check for slot boundary every 5s
-
-  updateCountdown();
-  updateServerClock();
+  // Single 1-second ticker handles clock, countdown and inverter freshness.
+  setInterval(tick, 1_000);
+  tick();
 }
 
 document.addEventListener('DOMContentLoaded', init);

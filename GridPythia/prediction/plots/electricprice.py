@@ -61,7 +61,7 @@ class ElecPricePlotter:
                     y=known_vals,
                     marker_color=PALETTE["blue"],
                     name="Price (real)",
-                    hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.4f} EUR/kWh<extra></extra>",
+                    hovertemplate="%{y:.4f} EUR/kWh<extra></extra>",
                 )
             )
 
@@ -72,7 +72,7 @@ class ElecPricePlotter:
                     y=pred_vals,
                     marker_color="rgba(179, 157, 219, 0.85)",  # lavender for predicted
                     name="Price (forecast)",
-                    hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.4f} EUR/kWh<extra></extra>",
+                    hovertemplate="%{y:.4f} EUR/kWh<extra></extra>",
                 )
             )
 

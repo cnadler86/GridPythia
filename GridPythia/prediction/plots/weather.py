@@ -97,7 +97,7 @@ class WeatherPlotter:
                     mode="lines",
                     line={"color": color, "width": 1.8},
                     name=chan_title,
-                    hovertemplate=f"%{{x|%Y-%m-%d %H:%M}}<br>%{{y:.2f}} {ylabel}<extra>{chan_title}</extra>",
+                    hovertemplate=f"%{{y:.2f}} {ylabel}<extra>{chan_title}</extra>",
                 )
             )
             apply_default_layout(
@@ -125,7 +125,7 @@ class WeatherPlotter:
                     mode="lines",
                     line={"color": color, "width": 1.5},
                     name=chan_title,
-                    hovertemplate=f"%{{x|%Y-%m-%d %H:%M}}<br>%{{y:.2f}} {ylabel}<extra>{chan_title}</extra>",
+                    hovertemplate=f"%{{y:.2f}} {ylabel}<extra>{chan_title}</extra>",
                 ),
                 row=row_idx,
                 col=1,

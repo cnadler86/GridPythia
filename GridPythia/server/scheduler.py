@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from structlog import get_logger
 
+import GridPythia.server.state as state
 from GridPythia.coordination import next_optimization_slot
 from GridPythia.prediction.base import floor_to_slot
 from GridPythia.server import services
@@ -176,6 +177,17 @@ async def run_scheduler() -> None:
                 publish_lateness_s=publish_lateness_s,
                 last_dispatch_slot=last_dispatch_slot,
             )
+
+            # Broadcast scheduler timing so dashboard clients can show a
+            # precise server-side countdown (not a client-computed estimate).
+            next_info = {
+                "dispatch_slot": slot.isoformat(),
+                "run_at": run_at.isoformat(),
+                "lead_s": round(lead_s, 2),
+            }
+            state.scheduler_next_info = next_info
+            await state.ws_hub.broadcast({"type": "scheduler_status", "payload": next_info})
+
             sleep_s = max(0.0, (run_at - now).total_seconds())
             logger.debug(
                 "scheduler_waiting",

@@ -54,7 +54,7 @@ class LoadPlotter:
                 fill="tozeroy",
                 fillcolor="rgba(230, 81, 0, 0.10)",
                 name="Base load",
-                hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.1f} Wh<extra></extra>",
+                hovertemplate="%{y:.1f} Wh<extra></extra>",
             )
         )
 
@@ -73,7 +73,7 @@ class LoadPlotter:
                         fill="tozeroy",
                         fillcolor=fill_color,
                         name=appliance_id,
-                        hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.1f} Wh<extra></extra>",
+                        hovertemplate="%{y:.1f} Wh<extra></extra>",
                     )
                 )
 

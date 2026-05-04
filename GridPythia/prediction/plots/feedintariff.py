@@ -39,7 +39,7 @@ class FeedInTariffPlotter:
                 fill="tozeroy",
                 fillcolor="rgba(46, 125, 50, 0.10)",
                 name="Feed-in Tariff",
-                hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.5f} EUR/kWh<extra></extra>",
+                hovertemplate="%{y:.5f} EUR/kWh<extra></extra>",
             )
         )
 

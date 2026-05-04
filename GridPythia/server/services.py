@@ -639,7 +639,7 @@ async def run_optimization_cycle(
         setup.electricprice.last_real_ts if setup.electricprice is not None else None
     )
     charts: dict[str, Any] = {}
-    charts.update(make_prediction_figures(solver_pdata, forecast_from))
+    charts.update(make_prediction_figures(fetch_pdata, forecast_from))
     plotter = SolutionPlotter()
     for inv in optimizer.inverters:
         charts[f"tab-inv-{inv.device_id}"] = fig_to_dict(

@@ -55,7 +55,7 @@ class PVForecastPlotter:
                     name=label,
                     marker_color=color,
                     opacity=0.85,
-                    hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.1f} Wh<extra>" + label + "</extra>",
+                    hovertemplate="%{y:.1f} Wh<extra>" + label + "</extra>",
                 )
             )
 

@@ -80,6 +80,11 @@ coordinator: InverterCoordinator = InverterCoordinator()
 # Updated by the MQTT gateway (retained topic) or via the HTTP appliance endpoint.
 appliance_forecasts: dict[str, list[dict]] = {}
 
+# ── Scheduler next-run info ───────────────────────────────────────────────
+# Set by run_scheduler() each cycle so WS clients can be hydrated on connect.
+# Keys: dispatch_slot (ISO str), run_at (ISO str), lead_s (float).
+scheduler_next_info: "dict | None" = None
+
 
 class DashboardWebSocketHub:
     """Track dashboard websocket clients and broadcast JSON events."""
