@@ -10,8 +10,9 @@ Azimuth convention:
     Conversion: ``om_az = plane.azimuth − 180``.
 
 Caching:
-    Responses are cached per plane for
-    :attr:`PVForecastOpenMeteo._TTL_S` seconds (default 3600 = 1 h).
+    Responses are cached per plane for the configured TTL
+    (default :attr:`PVForecastOpenMeteo._DEFAULT_TTL_S` seconds = 3600 = 1 h;
+    configurable via the ``cache_ttl_s`` constructor argument).
 """
 
 from collections import defaultdict
@@ -67,7 +68,7 @@ class PVForecastOpenMeteo(PVForecastProvider):
                        (e.g. ``"best_match"``, ``"ecmwf_ifs04"``).  ``None`` = API default.
     """
 
-    _TTL_S: ClassVar[int] = 3600  # 1-hour TTL for cached API responses
+    _DEFAULT_TTL_S: ClassVar[int] = 3600  # 1-hour default TTL for cached API responses
 
     def __init__(
         self,
@@ -76,6 +77,7 @@ class PVForecastOpenMeteo(PVForecastProvider):
         longitude: float,
         api_key: str | None = None,
         weather_model: str | None = None,
+        cache_ttl_s: float | None = None,
     ) -> None:
         if not planes:
             raise ValueError("At least one PVPlaneConfig is required.")
@@ -84,6 +86,7 @@ class PVForecastOpenMeteo(PVForecastProvider):
         self._lon = longitude
         self._api_key = api_key
         self._weather_model = weather_model
+        self._ttl_s: float = cache_ttl_s if cache_ttl_s is not None else float(self._DEFAULT_TTL_S)
         # Per-plane cache: plane -> (forecast_days, past_days, fetched_at_mono, data)
         self._cache: dict[
             PVPlaneConfig,
@@ -141,6 +144,7 @@ class PVForecastOpenMeteo(PVForecastProvider):
             past_days=past_days,
         )
         from open_meteo_solar_forecast import OpenMeteoSolarForecast  # noqa: PLC0415
+
         async with OpenMeteoSolarForecast(
             azimuth=om_az,
             declination=plane.tilt,
@@ -193,7 +197,7 @@ class PVForecastOpenMeteo(PVForecastProvider):
                 cached is None
                 or cached[0] != forecast_days
                 or cached[1] != past_days
-                or (now_mono - cached[2]) >= self._TTL_S
+                or (now_mono - cached[2]) >= self._ttl_s
             ):
                 plane_data = await self._fetch_plane(plane, forecast_days, past_days)
                 self._cache[plane] = (forecast_days, past_days, now_mono, plane_data)

@@ -152,12 +152,18 @@ def build_providers(cfg: AppConfig, raw_yaml: dict[str, Any]) -> PredictionSetup
         inverter_id=plane_cfg.inverter_id,
     )
     if pred_cfg.pvforecast.provider == "OpenMeteo":
+        pv_ttl_s = (
+            float(pred_cfg.pvforecast.cache_ttl_hours) * 3600.0
+            if pred_cfg.pvforecast.cache_ttl_hours is not None
+            else None
+        )
         pv_provider = PVForecastOpenMeteo(
             planes=[plane],
             latitude=pred_cfg.latitude,
             longitude=pred_cfg.longitude,
             api_key=om_cfg.api_key or None,
             weather_model=om_cfg.weather_model or None,
+            cache_ttl_s=pv_ttl_s,
         )
     else:
         pv_provider = PVForecastAkkudoktor(
@@ -246,62 +252,6 @@ def get_optimizer(cfg: AppConfig) -> LinearOptimizer:
         state.coordinator._max_age_s = cfg.server.inverter_status_max_age_s
         logger.info("optimizer_rebuilt")
     return state.optimizer
-
-
-# ── PData cache ───────────────────────────────────────────────────────────
-
-
-def get_cached_pdata() -> tuple[PredictionData, datetime | None] | None:
-    """Return ``(pdata, forecast_from)`` when the cache is still fresh, else ``None``.
-
-    Uses :data:`~GridPythia.server.state.PDATA_FALLBACK_CACHE_TTL_S` (short) when
-    the cached data is flagged as a fallback/partial result, and the normal
-    :data:`~GridPythia.server.state.PDATA_CACHE_TTL_S` for complete fetches.
-    """
-    if state.pdata_cache is None or state.pdata_cache_ts is None:
-        return None
-    ttl = state.PDATA_FALLBACK_CACHE_TTL_S if state.pdata_is_fallback else state.PDATA_CACHE_TTL_S
-    age = (datetime.now(timezone.utc) - state.pdata_cache_ts).total_seconds()
-    if age >= ttl:
-        return None
-    return state.pdata_cache, state.pdata_forecast_from
-
-
-def get_cached_pdata_any_age() -> tuple[PredictionData, datetime | None] | None:
-    """Return cached ``(pdata, forecast_from)`` regardless of TTL freshness."""
-    if state.pdata_cache is None or state.pdata_cache_ts is None:
-        return None
-    return state.pdata_cache, state.pdata_forecast_from
-
-
-def get_cached_pdata_age_s() -> float | None:
-    """Return age of current prediction cache in seconds, or None when absent."""
-    if state.pdata_cache_ts is None:
-        return None
-    return (datetime.now(timezone.utc) - state.pdata_cache_ts).total_seconds()
-
-
-def set_cached_pdata(
-    pdata: PredictionData,
-    forecast_from: datetime | None,
-    *,
-    is_fallback: bool = False,
-) -> None:
-    """Store prediction data in the shared cache.
-
-    Args:
-        pdata:         The fetched :class:`~GridPythia.prediction.prediction.PredictionData`.
-        forecast_from: Timestamp of the last real (non-extrapolated) electricity-price
-                       data point; ``None`` when unavailable.
-        is_fallback:   ``True`` when *pdata* was produced by a partial fetch (one or more
-                       providers failed).  Fallback entries use a shorter TTL
-                       (:data:`~GridPythia.server.state.PDATA_FALLBACK_CACHE_TTL_S`) so
-                       that the next successful fetch replaces them quickly.
-    """
-    state.pdata_cache = pdata
-    state.pdata_cache_ts = datetime.now(timezone.utc)
-    state.pdata_forecast_from = forecast_from
-    state.pdata_is_fallback = is_fallback
 
 
 # ── Solution cache ───────────────────────────────────────────────────────

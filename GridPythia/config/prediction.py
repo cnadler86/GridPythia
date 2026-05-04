@@ -26,6 +26,11 @@ class ElectricPriceConfig(BaseModel):
     provider: Literal["EnergyCharts", "Fixed", "EpexPredictor"] = "EnergyCharts"
     charges_kwh: float = Field(default=0.1528, ge=0.0)
     vat_rate: float = Field(default=0.19, ge=0.0)
+    cache_ttl_hours: float | None = Field(
+        default=1.0,
+        ge=0.0,
+        description="Provider cache TTL in hours. None = always fetch fresh.",
+    )
     energycharts: EnergyChartsConfigModel = Field(default_factory=EnergyChartsConfigModel)
     epexpredictor: EpexPredictorConfigModel = Field(default_factory=EpexPredictorConfigModel)
 
@@ -35,6 +40,11 @@ class FeedInTariffConfig(BaseModel):
 
     provider: Literal["Fixed"] = "Fixed"
     tariff_kwh: float = Field(default=0.0, ge=0.0)
+    cache_ttl_hours: float | None = Field(
+        default=24.0,
+        ge=0.0,
+        description="Provider cache TTL in hours. None = always fetch fresh.",
+    )
 
 
 class LoadConfigModel(BaseModel):
@@ -44,6 +54,11 @@ class LoadConfigModel(BaseModel):
     path: str = ""
     country: str = "DE"
     subdivision: str = "BW"
+    cache_ttl_hours: float | None = Field(
+        default=24.0,
+        ge=0.0,
+        description="Provider cache TTL in hours. None = always fetch fresh.",
+    )
 
 
 class PVPlaneConfigModel(BaseModel):
@@ -73,12 +88,22 @@ class PVForecastConfigModel(BaseModel):
     provider: Literal["OpenMeteo", "Akkudoktor"] = "OpenMeteo"
     plane: PVPlaneConfigModel = Field(default_factory=PVPlaneConfigModel)
     openmeteo: PVOpenMeteoConfigModel = Field(default_factory=PVOpenMeteoConfigModel)
+    cache_ttl_hours: float | None = Field(
+        default=1.0,
+        ge=0.0,
+        description="Provider cache TTL in hours. None = always fetch fresh.",
+    )
 
 
 class WeatherConfigModel(BaseModel):
     """Configuration for weather providers."""
 
     provider: Literal["OpenMeteo", "BrightSky"] = "OpenMeteo"
+    cache_ttl_hours: float | None = Field(
+        default=1.0,
+        ge=0.0,
+        description="Provider cache TTL in hours. None = always fetch fresh.",
+    )
 
 
 class PredictionConfig(BaseModel):

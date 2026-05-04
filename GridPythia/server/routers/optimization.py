@@ -14,8 +14,7 @@ from structlog import get_logger
 import GridPythia.server.state as state
 from GridPythia.optimization.plots import SolutionPlotter
 from GridPythia.optimization.solution import OptimizationObjective
-from GridPythia.prediction.electricprice.energycharts import ElecPriceEnergyCharts
-from GridPythia.prediction.prediction import Prediction, PredictionData
+from GridPythia.prediction.prediction import Prediction
 from GridPythia.server import services
 from GridPythia.server.models import OptimizeRequest, OptimizeStatusResponse, OptimizeSummary
 from GridPythia.simulation.devices import InverterMode
@@ -75,111 +74,46 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
         tz = ZoneInfo("UTC")
 
     # ── Prediction data ───────────────────────────────────────────────
-    # Two paths:
-    #
-    # A) Scheduler path (prediction_start is set):
-    #    Slice the cached prediction from the given dispatch slot.
-    #    Uses get_cached_pdata_any_age() to bypass the TTL – the scheduler
-    #    controls refresh timing independently via prediction_refresh_minutes.
-    #    This is the fix for the "slot-shift bug": by slicing the existing
-    #    prediction (not fetching a new one starting at snap(now)) the price
-    #    at every absolute timestamp stays identical across consecutive 15-min
-    #    cycles and the solver picks the same globally-optimal charging slot.
-    #
-    # B) Browser / API path (prediction_start is None):
-    #    Use the TTL-gated cache; if stale fall back to a fresh fetch.
-    pdata: "PredictionData | None" = None
-    forecast_from: "datetime | None" = None
-
+    # Always fetch directly from providers (they own their cache TTL via
+    # cache_ttl_hours).  dispatch_slot is the 15-min grid boundary the
+    # solver should start from:
+    #   - scheduler passes prediction_start (the upcoming dispatch slot)
+    #   - browser/manual call uses snap(now) → next grid boundary
+    # fetch(start=dispatch_slot) gives exactly horizon/dt_hours steps
+    # starting at the slot.  The slot-shift bug cannot occur because the
+    # provider's internal cache returns the same absolute prices regardless
+    # of whether the call comes at 11:00 or 11:08 or 11:15.
+    dt_hours = float(cfg.prediction.dt_hours)
     if req.prediction_start is not None:
-        # ── Path A: scheduler slice ───────────────────────────────────
-        cached_any = services.get_cached_pdata_any_age()
-        if cached_any is not None:
-            full_pdata, forecast_from = cached_any
-            try:
-                prediction_start_dt = datetime.fromisoformat(req.prediction_start)
-                pdata = full_pdata.slice_from(prediction_start_dt)
-                pdata_age_s = services.get_cached_pdata_age_s()
-                logger.info(
-                    "optimize_using_sliced_pdata",
-                    dispatch_slot=req.prediction_start,
-                    full_pdata_start=full_pdata.timestamps[0].isoformat(),
-                    sliced_start=pdata.timestamps[0].isoformat(),
-                    sliced_steps=pdata.steps,
-                    cache_age_s=round(pdata_age_s, 1) if pdata_age_s is not None else None,
-                )
-            except (ValueError, TypeError) as exc:
-                logger.warning(
-                    "optimize_slice_failed_fallback_to_full",
-                    dispatch_slot=req.prediction_start,
-                    error=str(exc),
-                )
-                pdata = full_pdata  # use full if slice fails
+        try:
+            dispatch_slot = datetime.fromisoformat(req.prediction_start)
+        except (ValueError, TypeError):
+            dispatch_slot = services.snap_to_dt_grid(datetime.now(tz=tz), dt_hours)
+    else:
+        dispatch_slot = services.snap_to_dt_grid(datetime.now(tz=tz), dt_hours)
 
-    if pdata is None:
-        # ── Path B: TTL-based cache or fresh fetch ────────────────────
-        cached = services.get_cached_pdata()
-        if cached is not None:
-            pdata, forecast_from = cached
-            pdata_age_s = services.get_cached_pdata_age_s()
-            logger.info(
-                "optimize_using_cached_pdata",
-                prediction_start=pdata.timestamps[0].isoformat(),
-                prediction_steps=pdata.steps,
-                cache_age_s=round(pdata_age_s, 1) if pdata_age_s is not None else None,
-            )
-        else:
-            stale_cached = services.get_cached_pdata_any_age()
+    try:
+        setup = services.get_providers(cfg, raw_yaml)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Provider build error: {exc}") from exc
 
-            try:
-                setup = services.get_providers(cfg, raw_yaml)
-            except Exception as exc:
-                if stale_cached is not None:
-                    pdata, forecast_from = stale_cached
-                    age_s = services.get_cached_pdata_age_s()
-                    logger.warning(
-                        "optimize_using_stale_cached_pdata",
-                        reason=f"provider_build_error: {exc}",
-                        cache_age_s=(round(age_s, 1) if age_s is not None else None),
-                    )
-                else:
-                    raise HTTPException(
-                        status_code=500, detail=f"Provider build error: {exc}"
-                    ) from exc
-            else:
-                pred = Prediction(setup)
-                try:
-                    pdata = await pred.fetch(
-                        start=services.snap_to_dt_grid(
-                            datetime.now(tz=tz), float(cfg.prediction.dt_hours)
-                        ),
-                        hours=float(cfg.prediction.horizon),
-                        dt_hours=float(cfg.prediction.dt_hours),
-                    )
-                except Exception as exc:
-                    if stale_cached is not None:
-                        pdata, forecast_from = stale_cached
-                        age_s = services.get_cached_pdata_age_s()
-                        logger.warning(
-                            "optimize_using_stale_cached_pdata",
-                            reason=f"prediction_fetch_error: {exc}",
-                            cache_age_s=(round(age_s, 1) if age_s is not None else None),
-                        )
-                    else:
-                        raise HTTPException(
-                            status_code=502, detail=f"Prediction fetch failed: {exc}"
-                        ) from exc
-                else:
-                    forecast_from = (
-                        setup.electricprice.last_real_ts
-                        if isinstance(setup.electricprice, ElecPriceEnergyCharts)
-                        else None
-                    )
-                    services.set_cached_pdata(pdata, forecast_from)
+    pred = Prediction(setup)
+    try:
+        pdata = await pred.fetch(
+            start=dispatch_slot,
+            hours=float(cfg.prediction.horizon),
+            dt_hours=dt_hours,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Prediction fetch failed: {exc}") from exc
 
-    # Log the effective prediction window for all paths
+    forecast_from: "datetime | None" = (
+        setup.electricprice.last_real_ts if setup.electricprice is not None else None
+    )
+
     logger.info(
         "optimize_prediction_window",
+        dispatch_slot=dispatch_slot.isoformat(),
         prediction_start=pdata.timestamps[0].isoformat(),
         prediction_end=pdata.timestamps[-1].isoformat(),
         prediction_steps=pdata.steps,

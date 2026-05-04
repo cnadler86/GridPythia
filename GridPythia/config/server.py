@@ -42,11 +42,6 @@ class SchedulerConfig(BaseModel):
         le=60,
         description="Run optimization every N minutes (must be divisor of 60)",
     )
-    prediction_refresh_minutes: int = Field(
-        default=30,
-        ge=1,
-        description="Refresh prediction data every N minutes",
-    )
     dispatch_buffer_seconds: float = Field(
         default=5.0,
         ge=0.0,

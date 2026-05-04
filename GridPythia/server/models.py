@@ -121,14 +121,10 @@ class AppConfigResponse(BaseModel):
 
 
 class PredictionsStatusResponse(BaseModel):
-    """Cache status returned by ``GET /api/predictions/status``."""
+    """Status returned by ``GET /api/predictions/status``."""
 
-    has_cache: bool
-    age_s: float | None = None
-    ttl_s: float
     forecast_from: str | None = None
-    is_fallback: bool = False
-    """True when the cached data comes from a partial fetch (some providers failed)."""
+    """ISO-8601 timestamp of the last real (non-forecast) electricity price data point."""
 
 
 # ── Optimization status response ──────────────────────────────────────────

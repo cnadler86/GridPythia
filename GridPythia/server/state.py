@@ -18,7 +18,7 @@ from fastapi import WebSocket
 
 if TYPE_CHECKING:
     from GridPythia.optimization.solver import LinearOptimizer
-    from GridPythia.prediction.prediction import PredictionData, PredictionSetup
+    from GridPythia.prediction.prediction import PredictionSetup
 
 from GridPythia.coordination.inverter_coordinator import InverterCoordinator
 
@@ -45,16 +45,6 @@ def get_optimizer_lock() -> asyncio.Lock:
         _optimizer_lock = asyncio.Lock()
     return _optimizer_lock
 
-
-# ── Prediction data cache ─────────────────────────────────────────────────
-# Avoids double-fetching between a /api/predictions/fetch and /api/optimize
-# call issued by the same browser session within the TTL window.
-pdata_cache: "PredictionData | None" = None
-pdata_cache_ts: datetime | None = None
-pdata_forecast_from: datetime | None = None  # last real EnergyCharts timestamp
-pdata_is_fallback: bool = False  # True when cache holds a partial/error result
-PDATA_CACHE_TTL_S: float = 300.0  # 5 minutes – for complete (no-error) fetches
-PDATA_FALLBACK_CACHE_TTL_S: float = 60.0  # 1 minute – for partial/fallback results
 
 # ── Partial-fetch retry state ─────────────────────────────────────────────
 # Maps provider name → next retry datetime when that provider failed on the last fetch.

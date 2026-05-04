@@ -7,7 +7,7 @@ GET  /api/predictions/status – cache status (age, TTL, forecast_from).
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException
@@ -71,8 +71,6 @@ async def _retry_failed_providers(
             forecast_from: datetime | None = None
             if setup.electricprice is not None:
                 forecast_from = setup.electricprice.last_real_ts
-            # Mark as fallback if some providers are still failing, fresh otherwise.
-            services.set_cached_pdata(pdata, forecast_from, is_fallback=bool(errors))
             logger.info("prediction_retry_recovered", recovered=recovered)
 
         remaining = still_failing
@@ -86,20 +84,13 @@ async def _retry_failed_providers(
 
 @router.get("/status", response_model=PredictionsStatusResponse)
 async def predictions_status() -> PredictionsStatusResponse:
-    """Return the current state of the server-side prediction cache."""
-    if state.pdata_cache is None or state.pdata_cache_ts is None:
-        return PredictionsStatusResponse(has_cache=False, ttl_s=state.PDATA_CACHE_TTL_S)
-    age = (datetime.now(timezone.utc) - state.pdata_cache_ts).total_seconds()
-    ttl = state.PDATA_FALLBACK_CACHE_TTL_S if state.pdata_is_fallback else state.PDATA_CACHE_TTL_S
-    return PredictionsStatusResponse(
-        has_cache=age < ttl,
-        age_s=round(age, 1),
-        ttl_s=ttl,
-        forecast_from=(
-            state.pdata_forecast_from.isoformat() if state.pdata_forecast_from else None
-        ),
-        is_fallback=state.pdata_is_fallback,
-    )
+    """Return prediction provider metadata (last real data timestamp)."""
+    providers = state.providers
+    forecast_from: str | None = None
+    if providers is not None and providers.electricprice is not None:
+        lrt = providers.electricprice.last_real_ts
+        forecast_from = lrt.isoformat() if lrt is not None else None
+    return PredictionsStatusResponse(forecast_from=forecast_from)
 
 
 @router.post("/fetch")
@@ -121,45 +112,9 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
           "errors": {"EnergyCharts": "..."}   // only present when partial failure
         }
     """
-    # ── Fast path: serve from cache ───────────────────────────────────
-    cached = services.get_cached_pdata()
-    if cached is not None:
-        pdata, forecast_from = cached
-        pdata = services.apply_appliance_loads(pdata)
-        charts = services.make_prediction_figures(pdata, forecast_from)
-        logger.info("predictions_served_from_cache", charts=list(charts.keys()))
-        return JSONResponse({"charts": charts, "from_cache": True})
-
-    stale_cached = services.get_cached_pdata_any_age()
-
-    def _stale_fallback(reason: str) -> JSONResponse | None:
-        if stale_cached is None:
-            return None
-        pdata, forecast_from = stale_cached
-        pdata = services.apply_appliance_loads(pdata)
-        charts = services.make_prediction_figures(pdata, forecast_from)
-        age_s = services.get_cached_pdata_age_s()
-        logger.warning(
-            "predictions_stale_cache_fallback",
-            reason=reason,
-            cache_age_s=(round(age_s, 1) if age_s is not None else None),
-        )
-        return JSONResponse(
-            {
-                "charts": charts,
-                "from_cache": True,
-                "stale_cache": True,
-                "stale_age_s": (round(age_s, 1) if age_s is not None else None),
-            }
-        )
-
-    # ── Slow path: fetch via persistent provider singletons ───────────
     try:
         cfg, raw_yaml = services.load_config()
     except Exception as exc:
-        fallback = _stale_fallback(f"config_error: {exc}")
-        if fallback is not None:
-            return fallback
         raise HTTPException(status_code=500, detail=f"Config error: {exc}") from exc
 
     try:
@@ -171,9 +126,6 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
     try:
         setup = services.get_providers(cfg, raw_yaml)
     except Exception as exc:
-        fallback = _stale_fallback(f"provider_build_error: {exc}")
-        if fallback is not None:
-            return fallback
         raise HTTPException(status_code=500, detail=f"Provider build error: {exc}") from exc
 
     pred = Prediction(setup)
@@ -184,30 +136,19 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
             dt_hours=float(cfg.prediction.dt_hours),
         )
     except Exception as exc:  # noqa: BLE001
-        fallback = _stale_fallback(f"prediction_fetch_error: {exc}")
-        if fallback is not None:
-            return fallback
         raise HTTPException(status_code=502, detail=f"Prediction fetch failed: {exc}") from exc
 
-    # All providers failed → load_wh would be zeros; treat as hard error only
-    # when *all* core providers failed (no useful data at all).
+    # Hard error only when *all* core providers failed (no useful data at all).
     core_failed = {"electricprice", "feedintariff", "load"}
     if errors.keys() >= core_failed:
-        fallback = _stale_fallback(f"all_core_failed: {errors}")
-        if fallback is not None:
-            return fallback
         raise HTTPException(
             status_code=502,
             detail=f"All core prediction providers failed: {errors}",
         )
 
-    forecast_from: datetime | None = None
-    if setup.electricprice is not None:
-        forecast_from = setup.electricprice.last_real_ts
-
-    # Partial results (some providers failed) get a short TTL so the next
-    # successful fetch can overwrite them quickly.
-    services.set_cached_pdata(pdata, forecast_from, is_fallback=bool(errors))
+    forecast_from: datetime | None = (
+        setup.electricprice.last_real_ts if setup.electricprice is not None else None
+    )
     pdata = services.apply_appliance_loads(pdata)
     charts = services.make_prediction_figures(pdata, forecast_from)
 
@@ -226,7 +167,6 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
     if errors:
         failed_ids = list(errors.keys())
         logger.warning("predictions_partial_failure", failed=failed_ids)
-        # Cancel any previously running retry task
         if state._retry_task is not None and not state._retry_task.done():
             state._retry_task.cancel()
         state._retry_task = asyncio.create_task(
