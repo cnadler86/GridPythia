@@ -239,6 +239,68 @@ class PredictionData:
         self._solver_view_cache[cache_key] = solver_view
         return solver_view
 
+    def slice_from(self, start: datetime) -> "PredictionData":
+        """Return a new PredictionData whose first timestamp is *start*.
+
+        Finds the first timestamp in this prediction whose UTC epoch is >=
+        *start*'s UTC epoch and returns all series from that index onward.
+        All values stay mapped to their original timestamps (no re-indexing
+        of prices, load, PV, etc.) – this is the timestamp-indexed slicing
+        API that prevents off-by-one errors when the optimisation dispatch
+        slot advances by one step.
+
+        Args:
+            start: Target start timestamp (timezone-aware recommended).
+                   Compared to internal timestamps in UTC.
+
+        Returns:
+            A new :class:`PredictionData` starting at or after *start*.
+
+        Raises:
+            ValueError: If *start* lies beyond the last prediction timestamp.
+        """
+        if start.tzinfo is not None:
+            start_epoch = start.astimezone(timezone.utc).timestamp()
+        else:
+            start_epoch = start.replace(tzinfo=timezone.utc).timestamp()
+
+        idx = None
+        for i, ts in enumerate(self._timestamps):
+            if ts.tzinfo is not None:
+                ts_epoch = ts.astimezone(timezone.utc).timestamp()
+            else:
+                ts_epoch = ts.replace(tzinfo=timezone.utc).timestamp()
+            # 0.5 s grace period to absorb floating-point drift in epoch arithmetic
+            if ts_epoch >= start_epoch - 0.5:
+                idx = i
+                break
+
+        if idx is None:
+            raise ValueError(
+                f"slice_from: start {start.isoformat()} is beyond the last "
+                f"prediction timestamp {self._timestamps[-1].isoformat()}"
+            )
+
+        if idx == 0:
+            return self
+
+        new_timestamps = list(self._timestamps[idx:])
+        return PredictionData(
+            requested_start=start,
+            timestamps=new_timestamps,
+            dt_hours=self.dt_hours,
+            load_wh=self._base_load_wh[idx:],
+            electricprice_eur_wh=(
+                self._electricprice_eur_wh[idx:] if self._electricprice_eur_wh is not None else None
+            ),
+            feedintariff_eur_wh=(
+                self._feedintariff_eur_wh[idx:] if self._feedintariff_eur_wh is not None else None
+            ),
+            pv_by_inverter={k: v[idx:] for k, v in self._pv_by_inverter.items()},
+            weather_by_channel={k: v[idx:] for k, v in self._weather_by_channel.items()},
+            appliance_load_by_id={k: v[idx:] for k, v in self._appliance_load_by_id.items()},
+        )
+
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "requested_start": (

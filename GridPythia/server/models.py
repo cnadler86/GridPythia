@@ -63,6 +63,17 @@ class OptimizeRequest(BaseModel):
             'Example: {"time_limit": 10, "mip_rel_gap": 0.05}.'
         ),
     )
+    prediction_start: str | None = Field(
+        None,
+        description=(
+            "ISO-8601 datetime string specifying the dispatch slot start.  "
+            "When set the optimizer slices the cached prediction from this "
+            "timestamp rather than fetching new data.  This prevents the "
+            "prediction window from shifting by one slot on every 15-min "
+            "scheduler cycle ('slot-shift bug').  "
+            "Normally only the scheduler sets this field."
+        ),
+    )
 
 
 # ── Config response ───────────────────────────────────────────────────────

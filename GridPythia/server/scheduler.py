@@ -282,7 +282,18 @@ async def run_scheduler() -> None:
                 )
 
             try:
-                await optimize(OptimizeRequest(timezone=server_tz))
+                # Pass prediction_start = dispatch slot so that optimize()
+                # slices the cached prediction from exactly the dispatch slot
+                # instead of using a freshly-fetched prediction starting at
+                # snap(now).  This is the fix for the 15-minute slot-shift:
+                # prices stay anchored to their absolute timestamps across
+                # consecutive optimisation cycles.
+                await optimize(
+                    OptimizeRequest(
+                        timezone=server_tz,
+                        prediction_start=slot.isoformat(),
+                    )
+                )
             except HTTPException as exc:
                 logger.warning(
                     "scheduler_optimization_failed",

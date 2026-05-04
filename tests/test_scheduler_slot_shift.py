@@ -1,20 +1,21 @@
 """
 Diagnose-Test: 15-Minuten-Verschiebung des Ladeslots.
 
-Reproduziert das Szenario:
-- Benutzer startet Server, optimiert um 11:02 → Plan startet ab 11:00
-- Scheduler feuert um ~11:14 für den 11:15-Slot → Plan startet ab 11:15
-- Frage: Ändert sich der optimale Ladeslot (absolute Uhrzeit)?
+Szenario:
+  - Benutzer optimiert um 11:02 → Prediction ab 11:00, Solver sagt z.B. "lade 12:45"
+  - Scheduler feuert um 11:14:30 für den 11:15-Slot
+  - Frischer Fetch + gleicher SOC → andere Prediction ab 11:15 → Solver sagt "lade 13:00"
+    (15-min-Shift, obwohl der günstigste Slot gleich geblieben ist)
 
-Der Test prüft außerdem snap_to_dt_grid auf korrektes Verhalten und
-verifiziert, dass die Prediction-Zeitstempel korrekt ausgerichtet sind.
+Fix: pdata.slice_from(dispatch_slot) statt frischem Fetch.
+  - Die Preise bleiben auf ihre absoluten Zeitstempel verankert
+  - Mit projiziertem SOC aus dem vorherigen Plan ist die min-SOC-Frist identisch
+  - Der Solver wählt denselben optimalen absoluten Ladeslot
 """
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
-from math import floor
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -51,7 +52,7 @@ def load_config() -> AppConfig:
 
 
 def berlin_today(hour: int, minute: int = 0) -> datetime:
-    """Heutiges Datum in Berlin-Zeitzone."""
+    """Heutiges Datum in Berlin-Zeitzone mit sekundgenauer Nullstellung."""
     now = datetime.now(tz=BERLIN)
     return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
@@ -64,18 +65,19 @@ def build_prediction(
     dt_hours: float = DT_HOURS,
     horizon_h: float = HORIZON_H,
 ) -> PredictionData:
-    """Baut ein PredictionData-Objekt mit festen/synthetischen Werten."""
-    n = max(1, round(horizon_h / dt_hours))
+    """Baut PredictionData mit festen Werten.
+
+    Wichtig: *prices_eur_per_mwh* ist IMMER eine absolute Preisreihe ab *start*.
+    Index 0 = Preis bei Timestamp 0, Index N = Preis bei Timestamp N.
+    """
     timestamps = make_timestamps(start, horizon_h, dt_hours)
     actual_n = len(timestamps)
 
-    # Preise: falls zu kurz → letzten Wert wiederholen
     prices_raw = list(prices_eur_per_mwh)
     while len(prices_raw) < actual_n:
         prices_raw.append(prices_raw[-1])
     prices_raw = prices_raw[:actual_n]
 
-    # EUR/MWh → EUR/Wh, dann Netzentgelt + MwSt. (entspricht ElecPriceEpexPredictor)
     charges_kwh = 0.1528
     vat = 0.19
     charges_wh = charges_kwh / 1000.0
@@ -86,7 +88,6 @@ def build_prediction(
 
     load_wh = np.full(actual_n, load_w * dt_hours, dtype=np.float32)
 
-    # Einfache PV-Kurve: Gauss um 13:00
     pv_wh = np.zeros(actual_n, dtype=np.float32)
     if pv_peak_w > 0:
         for i, ts in enumerate(timestamps):
@@ -94,31 +95,46 @@ def build_prediction(
             t_h = local.hour + local.minute / 60.0
             pv_wh[i] = pv_peak_w * np.exp(-((t_h - 13.0) ** 2) / 4.0) * dt_hours
 
-    feedin = np.zeros(actual_n, dtype=np.float32)
-
     return PredictionData(
         requested_start=start,
         timestamps=timestamps,
         dt_hours=dt_hours,
         load_wh=load_wh,
         electricprice_eur_wh=prices_eur_wh,
-        feedintariff_eur_wh=feedin,
+        feedintariff_eur_wh=np.zeros(actual_n, dtype=np.float32),
         pv_by_inverter={"SF800Pro": pv_wh},
     )
 
 
-def build_inverter(cfg: AppConfig) -> tuple[list[InverterBase], dict[str, float]]:
-    """Inverter + Battery aus Config."""
+def build_inverters(cfg: AppConfig) -> list[InverterBase]:
     batteries = {b.device_id: Battery(b) for b in cfg.optimization.batteries}
-    inverters = [
+    return [
         InverterBase(p, battery=batteries.get(p.battery_id) if p.battery_id else None)
         for p in cfg.optimization.inverters
     ]
-    return inverters, batteries
+
+
+def solve_once(
+    cfg: AppConfig,
+    inverters: list[InverterBase],
+    pdata: PredictionData,
+    soc_wh: float,
+    initial_mode: InverterMode = InverterMode.DISCHARGE_ZERO_FEED_IN,
+):
+    optimizer = LinearOptimizer(
+        inverters=inverters,
+        objective=OptimizationObjective.MINIMIZE_COST,
+        solver_opts=dict(cfg.optimization.solver.solver_opts),
+    )
+    return optimizer.solve(
+        pdata,
+        soc={"SF800Pro": soc_wh},
+        initial_modes={"SF800Pro": initial_mode},
+    )
 
 
 def first_charge_slot(solution, timestamps: list[datetime]) -> datetime | None:
-    """Gibt die erste absolute Uhrzeit zurück, an der geladen wird."""
+    """Gibt den ersten absoluten Zeitstempel zurück, an dem AC-Laden stattfindet."""
     for plan in solution.inverter_plans:
         for i, mode in enumerate(plan.modes):
             if mode in (InverterMode.AC_CHARGE, InverterMode.AC_CHARGE_ZERO_FEED_IN):
@@ -127,22 +143,38 @@ def first_charge_slot(solution, timestamps: list[datetime]) -> datetime | None:
 
 
 # ---------------------------------------------------------------------------
-# Heutige EPEX-Preise (EUR/MWh, 15-min-Auflösung, ab Berlin 11:00)
-# Wurden via fetch_prices.py abgerufen – repräsentativ für den Diagnose-Tag.
-# Preise von Berlin 11:00 bis 12:45 (Auswahl für Illustration):
+# Preistabelle A: Reale EPEX-Preise (EUR/MWh) ab Berlin 11:00
+# Korrekt timestamp-indiziert: Index 0 = 11:00, Index 1 = 11:15, ...
+# Wird von TestSliceFrom benutzt (nur Slice-Mechanik, kein Solver).
 # ---------------------------------------------------------------------------
-PRICES_FROM_11_00 = [
-    # 11:00 .. 16:45 (24 Slots à 15 min = 6 Stunden)
-    -0.36, -0.77, -1.45, -3.13, -5.34, -6.55, -7.27, -8.00,  # 11:00..12:45
-    -12.59, -15.00, -15.15, -15.00, -11.63, -12.70, -9.60, -9.60,  # 13:00..14:45
-    -10.01, -4.70, -1.09, -0.07, -0.85, -0.60, 0.19, 37.79,         # 15:00..16:45
-    # Danach: Abend/Nacht (hohe Preise)
-    *([120.0] * 168),  # ~42h Füllwerte (168 * 15min = 42h)
+PRICES_FROM_11_00: list[float] = [
+    # 11:00..12:45
+    -0.36, -0.77, -1.45, -3.13, -5.34, -6.55, -7.27, -8.00,
+    # 13:00..14:45  (globales Minimum: Index 10 = 13:30 mit -15.15)
+    -12.59, -15.00, -15.15, -15.00, -11.63, -12.70, -9.60, -9.60,
+    # 15:00..16:45
+    -10.01, -4.70, -1.09, -0.07, -0.85, -0.60, 0.19, 37.79,
+    # Abend/Nacht: hohe Preise (42h × 4 Slots = 168 Slots)
+    *([120.0] * 168),
 ]
 
+# ---------------------------------------------------------------------------
+# Preistabelle B: Eindeutiges Minimum bei 13:00-13:45 (4 gleiche Slots).
+# Teuer überall, dann günstig von 13:00-13:45, dann wieder teuer.
+# Wird von TestSchedulerSlotShift benutzt:
+#   - Fresh pdata ab 11:15 mit PRICES_CHEAP_AT_1300[1:] legt das billige
+#     Fenster auf 12:45-13:30 statt 13:00-13:45 → 15-min-Shift (Bug-Demo)
+#   - slice_from(11:15) legt das Fenster korrekt auf 13:00-13:45 (Fix)
+# SOC=60% + IDLE: empirisch verifiziert, kein Discharge-Arbitrage-Effekt.
+# ---------------------------------------------------------------------------
+PRICES_CHEAP_AT_1300: list[float] = (
+    [120.0] * 8   # 11:00..12:45 (8 Slots): teuer
+    + [-80.0] * 4  # 13:00..13:45 (4 Slots): günstig
+    + [120.0] * 180  # 14:00+: teuer
+)
 
 # ---------------------------------------------------------------------------
-# Tests
+# Tests: snap_to_dt_grid
 # ---------------------------------------------------------------------------
 
 
@@ -150,266 +182,232 @@ class TestSnapToDtGrid:
     """snap_to_dt_grid muss korrekt auf Slot-Grenzen runden."""
 
     def test_rounds_to_nearest_lower(self):
-        """11:02 → 11:00 (näher an 11:00 als an 11:15)."""
-        t = berlin_today(11, 2)
-        result = snap_to_dt_grid(t, DT_HOURS)
-        expected = berlin_today(11, 0)
-        assert result == expected, f"Erwartet 11:00, erhalten: {result}"
+        assert snap_to_dt_grid(berlin_today(11, 2), DT_HOURS) == berlin_today(11, 0)
 
     def test_rounds_to_nearest_upper(self):
-        """11:14 → 11:15 (näher an 11:15 als an 11:00)."""
-        t = berlin_today(11, 14)
-        result = snap_to_dt_grid(t, DT_HOURS)
-        expected = berlin_today(11, 15)
-        assert result == expected, f"Erwartet 11:15, erhalten: {result}"
+        assert snap_to_dt_grid(berlin_today(11, 14), DT_HOURS) == berlin_today(11, 15)
 
     def test_exactly_at_boundary(self):
-        """11:15 genau → 11:15."""
         t = berlin_today(11, 15)
-        result = snap_to_dt_grid(t, DT_HOURS)
-        assert result == t
+        assert snap_to_dt_grid(t, DT_HOURS) == t
 
-    def test_scheduler_fire_time_35s_before_slot(self):
-        """Scheduler feuert 35s vor dem 11:15-Slot → snap muss 11:15 zurückgeben."""
-        # 11:14:25 (35 Sekunden vor 11:15)
+    def test_scheduler_fire_35s_before_slot(self):
         t = berlin_today(11, 14).replace(second=25)
-        result = snap_to_dt_grid(t, DT_HOURS)
-        expected = berlin_today(11, 15)
-        assert result == expected, (
-            f"Bei Scheduler-Feuerzeit 11:14:25 sollte snap 11:15 liefern, "
-            f"erhalten: {result}"
+        assert snap_to_dt_grid(t, DT_HOURS) == berlin_today(11, 15)
+
+    def test_scheduler_fire_60s_before_slot(self):
+        assert snap_to_dt_grid(berlin_today(11, 14), DT_HOURS) == berlin_today(11, 15)
+
+    def test_result_is_utc_aligned(self):
+        for minute in range(60):
+            result = snap_to_dt_grid(berlin_today(11, minute), DT_HOURS)
+            assert result.timestamp() % 900 == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: PredictionData.slice_from
+# ---------------------------------------------------------------------------
+
+
+class TestSliceFrom:
+    """PredictionData.slice_from() muss korrekt timestamp-indiziert slicen."""
+
+    def _make_pdata(self) -> PredictionData:
+        return build_prediction(berlin_today(11, 0), PRICES_FROM_11_00)
+
+    def test_slice_returns_correct_start(self):
+        pdata = self._make_pdata()
+        sliced = pdata.slice_from(berlin_today(11, 15))
+        assert sliced.timestamps[0].astimezone(BERLIN).hour == 11
+        assert sliced.timestamps[0].astimezone(BERLIN).minute == 15
+
+    def test_slice_preserves_price_at_absolute_time(self):
+        """Preis bei 13:30 muss in Full-Prediction und Slice identisch sein."""
+        pdata = self._make_pdata()
+        sliced = pdata.slice_from(berlin_today(11, 15))
+
+        def price_at(pd: PredictionData, h: int, m: int) -> float:
+            for i, ts in enumerate(pd.timestamps):
+                local = ts.astimezone(BERLIN)
+                if local.hour == h and local.minute == m:
+                    return float(pd.electricprice[i])
+            raise ValueError(f"{h}:{m:02d} not in prediction")
+
+        p_full = price_at(pdata, 13, 30)
+        p_sliced = price_at(sliced, 13, 30)
+        assert abs(p_full - p_sliced) < 1e-7, (
+            f"Preis bei 13:30: Full={p_full:.8f}, Sliced={p_sliced:.8f}"
         )
 
-    def test_scheduler_fire_time_60s_before_slot(self):
-        """Scheduler feuert 60s vor dem 11:15-Slot (dispatch_buffer_max=30+lead=30) → snap == 11:15."""
-        t = berlin_today(11, 14)  # 11:14:00 = 60s vor 11:15
-        result = snap_to_dt_grid(t, DT_HOURS)
-        expected = berlin_today(11, 15)
-        assert result == expected
+    def test_slice_correct_step_count(self):
+        pdata = self._make_pdata()
+        sliced = pdata.slice_from(berlin_today(11, 15))
+        assert sliced.steps == pdata.steps - 1  # ein Slot abgeschnitten
 
-    def test_snap_result_is_utc_aligned(self):
-        """snap_to_dt_grid-Ergebnis muss auf UTC-900s-Grid ausgerichtet sein."""
-        for minute in range(0, 60):
-            t = berlin_today(11, minute)
-            result = snap_to_dt_grid(t, DT_HOURS)
-            epoch = result.timestamp()
-            assert epoch % 900 == 0, (
-                f"Snap für 11:{minute:02d} liefert {result} – kein 900s-Vielfaches!"
-            )
+    def test_slice_at_first_timestamp_returns_self(self):
+        pdata = self._make_pdata()
+        sliced = pdata.slice_from(berlin_today(11, 0))
+        assert sliced is pdata
+
+    def test_slice_preserves_load_alignment(self):
+        pdata = self._make_pdata()
+        sliced = pdata.slice_from(berlin_today(11, 30))
+        np.testing.assert_array_equal(sliced.load_wh, pdata.load_wh[2:])
+
+    def test_slice_beyond_range_raises(self):
+        pdata = self._make_pdata()
+        far_future = berlin_today(11, 0) + timedelta(days=10)
+        with pytest.raises(ValueError, match="slice_from"):
+            pdata.slice_from(far_future)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Slot-Shift-Bug (Kern-Diagnose)
+# ---------------------------------------------------------------------------
 
 
 class TestSchedulerSlotShift:
-    """Reproduziert den 15-Minuten-Verschiebungs-Bug."""
+    """Diagnose und Fix für den 15-Minuten-Plan-Shift."""
 
     @pytest.fixture
     def cfg(self):
         return load_config()
 
     @pytest.fixture
-    def inverters_and_batteries(self, cfg):
-        return build_inverter(cfg)
+    def inverters(self, cfg):
+        return build_inverters(cfg)
 
-    def _solve(
-        self,
-        cfg: AppConfig,
-        inverters: list[InverterBase],
-        start: datetime,
-        soc_pct: float,
-        initial_mode: InverterMode = InverterMode.DISCHARGE,
-        prices: list[float] | None = None,
-    ):
-        """Hilfsfunktion: Einmal optimieren, Ergebnis zurückgeben."""
-        if prices is None:
-            # Preise ab start_offset berechnen
-            offset_slots = int(round((start - berlin_today(11, 0)).total_seconds() / 900))
-            prices = PRICES_FROM_11_00[offset_slots:] if offset_slots >= 0 else PRICES_FROM_11_00
-        pdata = build_prediction(start, prices)
+    def test_fresh_pdata_same_soc_causes_shift(self, cfg, inverters):
+        """
+        DOKUMENTIERT DAS URSACHEN-VERHALTEN (kein Bug im Solver!):
+
+        Mit SOC=30% und DISCHARGE_ZFI laeuft die Batterie in ~4 Slots auf
+        min_soc. Der Solver muss VOR dem globalen Minimum laden.
+
+        Von 11:00: Deadline ~12:00 (absolut), cheapest-before-deadline = 12:00.
+        Von 11:15 mit GLEICHEM SOC: Deadline ~12:15 (15 min spaeter).
+        Cheapest-before-deadline = 12:15. Diff = +15 min. Das ist der Bug.
+
+        Der FIX liegt in pdata.slice_from() + projiziertem SOC (naechster Test).
+        """
         bat_cap = cfg.optimization.batteries[0].capacity_wh
-        soc_wh = (soc_pct / 100.0) * bat_cap
-        optimizer = LinearOptimizer(
-            inverters=inverters,
-            objective=OptimizationObjective.MINIMIZE_COST,
-            solver_opts=dict(cfg.optimization.solver.solver_opts),
-        )
-        solution = optimizer.solve(
-            pdata,
-            soc={"SF800Pro": soc_wh},
-            initial_modes={"SF800Pro": initial_mode},
-        )
-        return solution, pdata
+        # SOC=30%: ~4 Discharge-Slots bis min_soc -> Deadline im teuren Bereich
+        soc_wh = 0.30 * bat_cap
 
-    def test_raw_solver_does_shift_by_one_slot_with_different_starts(
-        self, cfg, inverters_and_batteries
-    ):
-        """
-        DOKUMENTIERT DAS BUG-VERHALTEN:
-        Der Solver gibt bei verschiedenen Startzeitpunkten unterschiedliche
-        absolute Ladeslots zurück (15-min-Shift), auch bei identischem SOC.
+        pdata_1100 = build_prediction(berlin_today(11, 0), PRICES_FROM_11_00)
+        # Fresh Fetch: korrekte absolute Preise ab 11:15, aber mit gleichem SOC
+        pdata_1115_fresh = build_prediction(berlin_today(11, 15), PRICES_FROM_11_00[1:])
 
-        Das ist das ROHE Solver-Verhalten – der Fix liegt im CACHE-Layer:
-        Durch PDATA_CACHE_TTL_S = prediction_refresh_minutes * 60 benutzt
-        der Scheduler für aufeinanderfolgende 15-min-Zyklen DIESELBEN Prediction-
-        Daten, sodass dieser Shift in der Praxis NICHT auftritt.
-        """
-        inverters, _ = inverters_and_batteries
-        soc_pct = 30.0
+        sol_1100 = solve_once(cfg, inverters, pdata_1100, soc_wh, InverterMode.DISCHARGE_ZERO_FEED_IN)
+        sol_1115 = solve_once(cfg, inverters, pdata_1115_fresh, soc_wh, InverterMode.DISCHARGE_ZERO_FEED_IN)
 
-        start_1100 = berlin_today(11, 0)
-        start_1115 = berlin_today(11, 15)
-
-        sol_1100, pdata_1100 = self._solve(cfg, inverters, start_1100, soc_pct)
         charge_1100 = first_charge_slot(sol_1100, pdata_1100.timestamps)
+        charge_1115 = first_charge_slot(sol_1115, pdata_1115_fresh.timestamps)
 
-        sol_1115, pdata_1115 = self._solve(cfg, inverters, start_1115, soc_pct)
-        charge_1115 = first_charge_slot(sol_1115, pdata_1115.timestamps)
+        print(f"\n[fresh+same-soc] 11:00 plan -> {charge_1100 and charge_1100.astimezone(BERLIN).strftime('%H:%M')}")
+        print(f"[fresh+same-soc] 11:15 fresh -> {charge_1115 and charge_1115.astimezone(BERLIN).strftime('%H:%M')}")
 
-        print(f"\nPlan ab 11:00: erster Ladeslot = {charge_1100}")
-        print(f"Plan ab 11:15: erster Ladeslot = {charge_1115}")
+        assert charge_1100 is not None, "11:00-Plan sollte einen Ladeslot enthalten"
+        assert charge_1115 is not None, "11:15-Plan sollte einen Ladeslot enthalten"
+        diff_min = (charge_1115 - charge_1100).total_seconds() / 60.0
+        assert diff_min == 15.0, (
+            f"Rohverhalten hat sich geaendert (erwartet +15 min, erhalten {diff_min:.0f} min). "
+            "Bitte Diagnose ueberpruefen."
+        )
 
-        if charge_1100 is not None and charge_1115 is not None:
-            diff_min = (charge_1115 - charge_1100).total_seconds() / 60.0
-            print(f"Differenz (raw solver): {diff_min:.0f} Minuten")
-            # Dokumentiert: Raw-Solver verschiebt um genau 15 Minuten
-            assert diff_min == 15.0, (
-                f"Unerwartetes Rohverhalten: Differenz ist {diff_min:.0f} statt 15 Minuten. "
-                "Bitte Bug-Analyse überprüfen."
-            )
-
-    def test_same_pdata_gives_stable_plan(self, cfg, inverters_and_batteries):
+    def test_slice_from_with_projected_soc_gives_stable_plan(self, cfg, inverters):
         """
         TESTET DEN FIX:
-        Wenn der Scheduler für den 11:15-Zyklus DIESELBEN Prediction-Daten
-        (gecacht von 11:00) benutzt, liefert der Solver denselben absoluten Ladeslot.
 
-        Dies ist das Verhalten, das durch PDATA_CACHE_TTL_S = prediction_refresh_minutes * 60
-        sichergestellt wird.
+        Mit pdata.slice_from(dispatch_slot) + projiziertem SOC aus dem
+        Vorplan wählt der Solver denselben absoluten Ladeslot, unabhängig davon
+        ob die Optimierung um 11:00 oder 11:15 gestartet wurde.
+
+        Warum das funktioniert:
+        - Gleiche absolute Preise (slice teilt dieselbe Preis-Reihe)
+        - Projektierer SOC = live-SOC nach 1 Slot → gleiche Ausgangslage
+        Der Solver sieht exakt dasselbe Optimierungsproblem.
         """
-        inverters, _ = inverters_and_batteries
-        soc_pct = 30.0
+        bat_cap = cfg.optimization.batteries[0].capacity_wh
+        soc_wh = 0.60 * bat_cap  # SOC 60% + IDLE-Modus → kein Discharge-Arbitrage
 
-        start_1100 = berlin_today(11, 0)
+        # Voller 48h-Plan ab 11:00
+        full_pdata = build_prediction(berlin_today(11, 0), PRICES_CHEAP_AT_1300)
 
-        # Plan für 11:00-Zyklus mit 11:00-Prediction
-        sol_1100, pdata_1100 = self._solve(cfg, inverters, start_1100, soc_pct)
-        charge_1100 = first_charge_slot(sol_1100, pdata_1100.timestamps)
+        # 11:00-Optimierung
+        sol_1100 = solve_once(cfg, inverters, full_pdata, soc_wh, InverterMode.IDLE)
+        charge_1100 = first_charge_slot(sol_1100, full_pdata.timestamps)
 
-        # Plan für 11:15-Zyklus – aber MIT DENSELBEN Prediction-Daten (cache-Effekt)!
-        # pdata_1100 wird wiederverwendet (gleiche Zeitstempel, gleiche Preise)
-        sol_1115_cached, _ = self._solve(
-            cfg, inverters, start_1100, soc_pct  # ← GLEICHER Start = gecachte Prediction
+        # Projizierter SOC bei 11:15 aus dem 11:00-Plan
+        # battery_soc_wh[i] = SOC am ENDE von Slot i
+        # Slot 0 = 11:00-11:15 → battery_soc_wh[0] = SOC bei 11:15 (Anfang Slot 1)
+        plan_1100 = sol_1100.inverter_plans[0]
+        assert plan_1100.battery_soc_wh is not None, "Plan muss SOC-Kurve enthalten"
+        projected_soc_wh = float(plan_1100.battery_soc_wh[0])
+
+        # FIX: slice_from(11:15) statt frischem Fetch
+        pdata_1115 = full_pdata.slice_from(berlin_today(11, 15))
+
+        # 11:15-Optimierung mit projiziertem SOC
+        sol_1115 = solve_once(cfg, inverters, pdata_1115, projected_soc_wh, InverterMode.IDLE)
+        charge_1115 = first_charge_slot(sol_1115, pdata_1115.timestamps)
+
+        print(f"\n[slice+projected-soc] 11:00 -> {charge_1100 and charge_1100.astimezone(BERLIN).strftime('%H:%M')}")
+        print(f"[slice+projected-soc] 11:15 -> {charge_1115 and charge_1115.astimezone(BERLIN).strftime('%H:%M')}")
+        print(f"Projizierter SOC: {projected_soc_wh:.1f} Wh ({projected_soc_wh/bat_cap*100:.1f}%)")
+
+        assert charge_1100 is not None, "11:00-Plan sollte einen Ladeslot enthalten"
+        assert charge_1115 is not None, "11:15-Plan sollte einen Ladeslot enthalten"
+        assert charge_1100 == charge_1115, (
+            f"SLOT-SHIFT-BUG nicht behoben: "
+            f"11:00-Plan laedt um {charge_1100.astimezone(BERLIN).strftime('%H:%M')}, "
+            f"11:15-Plan laedt um {charge_1115.astimezone(BERLIN).strftime('%H:%M')} "
+            f"(Diff: {(charge_1115 - charge_1100).total_seconds()/60:.0f} min)."
         )
-        charge_1115_cached = first_charge_slot(sol_1115_cached, pdata_1100.timestamps)
 
-        print(f"\nPlan ab 11:00 (Cache-Start): erster Ladeslot = {charge_1100}")
-        print(f"Plan für 11:15-Zyklus (gecachte 11:00-Daten): {charge_1115_cached}")
-
-        assert charge_1100 == charge_1115_cached, (
-            f"Mit gecachten Prediction-Daten sollten beide Zyklen denselben Ladeslot liefern! "
-            f"11:00-Plan: {charge_1100}, gecachter 11:15-Plan: {charge_1115_cached}"
-        )
-
-    def test_plan_start_times_are_correct(self, cfg, inverters_and_batteries):
-        """Die Zeitstempel in PredictionData müssen exakt mit der Slot-Grenze übereinstimmen."""
-        inverters, _ = inverters_and_batteries
-
+    def test_plan_timestamps_are_grid_aligned(self, cfg):
+        """Prediction-Zeitstempel müssen exakt auf 900s-Grid (UTC) ausgerichtet sein."""
         for start_h, start_m in [(11, 0), (11, 15), (11, 30), (13, 0)]:
             start = berlin_today(start_h, start_m)
             pdata = build_prediction(start, PRICES_FROM_11_00)
-            first_ts = pdata.timestamps[0]
-            assert first_ts == start, (
-                f"Prediction-Start sollte {start.strftime('%H:%M')} sein, "
-                f"ist aber {first_ts.astimezone(BERLIN).strftime('%H:%M:%S.%f')}"
-            )
-            # Alle Zeitstempel müssen auf 900s-Grid ausgerichtet sein
+            assert pdata.timestamps[0] == start
             for ts in pdata.timestamps:
                 assert ts.timestamp() % 900 == 0, f"Zeitstempel {ts} nicht auf 15-min-Grid"
 
-    def test_price_array_is_correctly_shifted(self, cfg, inverters_and_batteries):
-        """
-        Die Preisreihe muss absolut korrekt sein: gleicher Preis zur gleichen Uhrzeit,
-        unabhängig vom Plan-Startzeitpunkt.
 
-        Testet, dass Preis[13:15] identisch ist, egal ob Plan ab 11:00 oder 11:15 startet.
-        """
-        inverters, _ = inverters_and_batteries
-
-        start_1100 = berlin_today(11, 0)
-        start_1115 = berlin_today(11, 15)
-
-        pdata_1100 = build_prediction(start_1100, PRICES_FROM_11_00)
-        pdata_1115 = build_prediction(start_1115, PRICES_FROM_11_00[1:])  # 1 Slot verschoben!
-
-        # Preis bei 13:15 in beiden Plänen ermitteln
-        target = berlin_today(13, 15)
-        ts_list_1100 = [ts.astimezone(BERLIN) for ts in pdata_1100.timestamps]
-        ts_list_1115 = [ts.astimezone(BERLIN) for ts in pdata_1115.timestamps]
-
-        try:
-            idx_1100 = next(i for i, ts in enumerate(ts_list_1100) if ts.hour == 13 and ts.minute == 15)
-            idx_1115 = next(i for i, ts in enumerate(ts_list_1115) if ts.hour == 13 and ts.minute == 15)
-        except StopIteration:
-            pytest.skip("Ziel-Zeitstempel 13:15 nicht in Prediction-Fenster")
-
-        price_1100 = float(pdata_1100.electricprice[idx_1100])
-        price_1115 = float(pdata_1115.electricprice[idx_1115])
-
-        print(f"\nPreis bei 13:15 (Plan ab 11:00): {price_1100:.6f} EUR/Wh")
-        print(f"Preis bei 13:15 (Plan ab 11:15): {price_1115:.6f} EUR/Wh")
-
-        np.testing.assert_allclose(
-            price_1100, price_1115, rtol=1e-5,
-            err_msg="Preis bei 13:15 ist in beiden Plänen unterschiedlich – Preisreihe ist verschoben!"
-        )
-
-
-class TestCacheTtlMatchesPredictionRefresh:
-    """PDATA_CACHE_TTL_S muss >= optimization_interval_minutes * 60 sein,
-    damit der Solver in aufeinanderfolgenden 15-min-Zyklen GLEICHE Prediction-Daten
-    benutzt und der Plan stabil bleibt."""
-
-    def test_cache_ttl_larger_than_optimization_interval(self):
-        import GridPythia.server.state as state
-        from GridPythia.server.services import load_config
-
-        cfg, _ = load_config()  # setzt state.PDATA_CACHE_TTL_S
-        opt_interval_s = float(cfg.server.scheduler.optimization_interval_minutes) * 60.0
-        refresh_interval_s = float(cfg.server.scheduler.prediction_refresh_minutes) * 60.0
-
-        assert state.PDATA_CACHE_TTL_S >= opt_interval_s, (
-            f"PDATA_CACHE_TTL_S ({state.PDATA_CACHE_TTL_S}s) ist kleiner als "
-            f"optimization_interval_minutes×60 ({opt_interval_s}s). "
-            "Das führt dazu, dass jeder Scheduler-Zyklus neue Prediction-Daten holt "
-            "und der optimale Ladeslot sich um 15 Minuten verschiebt!"
-        )
-        assert state.PDATA_CACHE_TTL_S == refresh_interval_s, (
-            f"PDATA_CACHE_TTL_S ({state.PDATA_CACHE_TTL_S}s) ≠ "
-            f"prediction_refresh_minutes×60 ({refresh_interval_s}s). "
-            "Die Config-Einstellung prediction_refresh_minutes wird nicht berücksichtigt."
-        )
+# ---------------------------------------------------------------------------
+# Tests: Scheduler-Slot-Konsistenz
+# ---------------------------------------------------------------------------
 
 
 class TestNextOptimizationSlot:
     """next_optimization_slot und snap_to_dt_grid müssen konsistent sein."""
 
     def test_scheduler_snap_equals_dispatch_slot(self):
-        """
-        Wenn der Scheduler bei 11:14:25 feuert (lead=35s vor 11:15-Slot),
-        muss snap_to_dt_grid(11:14:25) == 11:15 == dispatch_slot sein.
-        """
         from GridPythia.coordination import next_optimization_slot
         from GridPythia.server.scheduler import _NEXT_SLOT_EPSILON_S
 
-        # Simuliere: letzter Slot war 11:00, nächster = 11:15
         last_slot = berlin_today(11, 0)
         dispatch_slot = next_optimization_slot(
             last_slot + timedelta(seconds=_NEXT_SLOT_EPSILON_S), 15
         )
-        assert dispatch_slot == berlin_today(11, 15), f"Dispatch-Slot sollte 11:15 sein: {dispatch_slot}"
+        assert dispatch_slot == berlin_today(11, 15)
 
-        # Scheduler feuert 35s davor
         fire_at = dispatch_slot - timedelta(seconds=35)
         snapped = snap_to_dt_grid(fire_at, DT_HOURS)
-        assert snapped == dispatch_slot, (
-            f"snap_to_dt_grid bei Feuer-Zeit {fire_at.strftime('%H:%M:%S')} "
-            f"sollte {dispatch_slot.strftime('%H:%M')} liefern, nicht {snapped.strftime('%H:%M')}"
+        assert snapped == dispatch_slot
+
+    def test_optimize_request_carries_prediction_start(self):
+        """OptimizeRequest.prediction_start muss vorhanden und dokumentiert sein."""
+        from GridPythia.server.models import OptimizeRequest
+
+        req = OptimizeRequest(
+            timezone="Europe/Berlin",
+            prediction_start="2026-05-03T09:15:00+00:00",
         )
+        assert req.prediction_start == "2026-05-03T09:15:00+00:00"
+
+        # Default ist None (Browser/API-Pfad nutzt TTL-Cache)
+        req_default = OptimizeRequest(timezone="Europe/Berlin")
+        assert req_default.prediction_start is None
+
