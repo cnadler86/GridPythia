@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from threading import Event
 from urllib.parse import urlparse
 
@@ -36,6 +37,7 @@ from structlog import get_logger
 
 import GridPythia.server.state as state
 from GridPythia.config.server import MqttConfig
+from GridPythia.server.plan_utils import stitch_current_slot_from_previous_plan
 
 logger = get_logger(__name__)
 
@@ -60,6 +62,7 @@ class MqttGateway:
     def __init__(self, cfg: MqttConfig) -> None:
         self._cfg = cfg
         self._stop = Event()
+        self._last_published_steps_by_device: dict[str, list[dict]] = {}
         host, port = _parse_broker(cfg.broker)
         self._host = host
         self._port = port
@@ -198,19 +201,25 @@ class MqttGateway:
         The message is published with ``retain=True`` so that a newly
         connecting controller immediately receives the last known plan.
         """
-        from datetime import datetime, timezone
-
         published_at = datetime.now(tz=timezone.utc).isoformat()
+        published_at_dt = datetime.fromisoformat(published_at)
         for plan in inverter_plans:
             device_id = plan.get("device_id", "")
             if not device_id:
                 continue
+            raw_steps = plan.get("steps", [])
+            effective_steps = stitch_current_slot_from_previous_plan(
+                raw_steps,
+                self._last_published_steps_by_device.get(device_id, []),
+                published_at=published_at_dt,
+                dt_hours=dt_hours,
+            )
             topic = f"{self._cfg.topic_prefix}/inverters/{device_id}/plan"
             payload = {
                 "device_id": device_id,
                 "published_at": published_at,
                 "dt_hours": dt_hours,
-                "steps": plan.get("steps", []),
+                "steps": effective_steps,
             }
             try:
                 self._client.publish(
@@ -223,7 +232,11 @@ class MqttGateway:
                     "mqtt_plan_published",
                     device_id=device_id,
                     steps=len(payload["steps"]),
+                    prepended_current_slot=(1 if len(payload["steps"]) > len(raw_steps) else 0),
                 )
+                self._last_published_steps_by_device[device_id] = [
+                    dict(step) for step in payload["steps"]
+                ]
             except Exception as exc:  # noqa: BLE001
                 logger.warning("mqtt_plan_publish_failed", device_id=device_id, error=str(exc))
 

@@ -8,7 +8,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from GridPythia.prediction.plots._base import PALETTE, apply_default_layout
+from GridPythia.prediction.plots._base import PALETTE, PredictionPlotter
 
 _CHANNEL_COLORS = {
     "temperature_c": PALETTE["orange"],
@@ -47,7 +47,7 @@ _CHANNEL_TITLES: dict[str, str] = {
 }
 
 
-class WeatherPlotter:
+class WeatherPlotter(PredictionPlotter):
     """Render multi-channel weather data.
 
     When a single channel is selected (via *channels*) a simple single-axis
@@ -77,7 +77,7 @@ class WeatherPlotter:
 
         if not available:
             fig = go.Figure()
-            apply_default_layout(fig, title=title)
+            self._apply_layout(fig, timestamps, title=title)
             return fig
 
         keys = list(available.keys())
@@ -97,12 +97,10 @@ class WeatherPlotter:
                     mode="lines",
                     line={"color": color, "width": 1.8},
                     name=chan_title,
-                    hovertemplate=f"%{{x|%Y-%m-%d %H:%M}}<br>%{{y:.2f}} {ylabel}<extra>{chan_title}</extra>",
+                    hovertemplate=f"%{{y:.2f}} {ylabel}<extra>{chan_title}</extra>",
                 )
             )
-            apply_default_layout(
-                fig, title=f"{title} – {chan_title}", xaxis_title="Time", yaxis_title=ylabel
-            )
+            self._apply_layout(fig, timestamps, title=f"{title} – {chan_title}", yaxis_title=ylabel)
             return fig
 
         row_titles = [_CHANNEL_TITLES.get(k, k) for k in keys]
@@ -125,7 +123,7 @@ class WeatherPlotter:
                     mode="lines",
                     line={"color": color, "width": 1.5},
                     name=chan_title,
-                    hovertemplate=f"%{{x|%Y-%m-%d %H:%M}}<br>%{{y:.2f}} {ylabel}<extra>{chan_title}</extra>",
+                    hovertemplate=f"%{{y:.2f}} {ylabel}<extra>{chan_title}</extra>",
                 ),
                 row=row_idx,
                 col=1,
@@ -140,6 +138,16 @@ class WeatherPlotter:
             showlegend=False,
             height=max(300, 200 * n),
         )
-        fig.update_xaxes(showgrid=True, gridcolor="#e8e8e8")
+        xaxes_kwargs: dict = {
+            "showgrid": True,
+            "gridcolor": "#e8e8e8",
+            "minor": {
+                "dtick": 3_600_000,
+                "showgrid": True,
+                "gridcolor": "rgba(200,200,200,0.35)",
+                "ticks": "",
+            },
+        }
+        fig.update_xaxes(**xaxes_kwargs)
         fig.update_yaxes(showgrid=True, gridcolor="#e8e8e8")
         return fig

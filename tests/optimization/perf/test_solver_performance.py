@@ -8,6 +8,8 @@ spikes that are within normal solver variance.
 """
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from tests.optimization.solver_fixture_support import FIXTURE_PATHS, load_solver_fixture_scenario

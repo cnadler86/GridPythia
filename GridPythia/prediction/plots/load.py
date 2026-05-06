@@ -7,7 +7,7 @@ from datetime import datetime
 import numpy as np
 import plotly.graph_objects as go
 
-from GridPythia.prediction.plots._base import PALETTE, apply_default_layout
+from GridPythia.prediction.plots._base import PALETTE, PredictionPlotter
 
 # Distinct colours for individual appliance traces
 _APPLIANCE_COLORS = [
@@ -21,8 +21,10 @@ _APPLIANCE_COLORS = [
 ]
 
 
-class LoadPlotter:
+class LoadPlotter(PredictionPlotter):
     """Render a household load series with optional appliance breakdowns."""
+
+    y_label = "Wh"
 
     def plot(
         self,
@@ -54,7 +56,7 @@ class LoadPlotter:
                 fill="tozeroy",
                 fillcolor="rgba(230, 81, 0, 0.10)",
                 name="Base load",
-                hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.1f} Wh<extra></extra>",
+                hovertemplate="%{y:.1f} Wh<extra></extra>",
             )
         )
 
@@ -73,9 +75,9 @@ class LoadPlotter:
                         fill="tozeroy",
                         fillcolor=fill_color,
                         name=appliance_id,
-                        hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.1f} Wh<extra></extra>",
+                        hovertemplate="%{y:.1f} Wh<extra></extra>",
                     )
                 )
 
-        apply_default_layout(fig, title=title, xaxis_title="Time", yaxis_title="Wh")
+        self._apply_layout(fig, timestamps, title=title, yaxis_title="Wh")
         return fig

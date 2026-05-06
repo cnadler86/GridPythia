@@ -7,24 +7,75 @@ publishing even when no client window is open.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from fastapi import HTTPException
 from structlog import get_logger
 
 import GridPythia.server.state as state
 from GridPythia.coordination import next_optimization_slot
+from GridPythia.prediction.base import floor_to_slot
 from GridPythia.server import services
-from GridPythia.server.models import FetchRequest, OptimizeRequest
-from GridPythia.server.routers.optimization import optimize
-from GridPythia.server.routers.predictions import fetch_predictions
 
 logger = get_logger(__name__)
+
+_NEXT_SLOT_EPSILON_S = 1.1
 
 # Exponential-backoff delays for the startup fetch (seconds).
 # First entry is 0 → immediate first attempt; subsequent entries add wait time.
 _STARTUP_BACKOFF_DELAYS_S = [0, 5, 10, 20, 40, 60, 120, 240, 480]
+
+
+def _solver_time_limit_seconds(cfg) -> float:
+    """Return the configured solver time limit used to size the scheduler lead."""
+    raw = cfg.optimization.solver.solver_opts.get("time_limit", 30.0)
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _adaptive_dispatch_buffer_seconds(cfg, publish_lateness_s: float = 0.0) -> float:
+    """Return the current publish safety buffer.
+
+    The base buffer comes from config. If the previous cycle finished after its
+    target dispatch slot, the lateness delta is added on top, capped to the
+    configured maximum.
+    """
+    initial_buffer_s = float(cfg.server.scheduler.dispatch_buffer_seconds)
+    max_buffer_s = float(cfg.server.scheduler.dispatch_buffer_max_seconds)
+    lateness_s = max(0.0, float(publish_lateness_s))
+    return min(max_buffer_s, initial_buffer_s + lateness_s)
+
+
+def _scheduler_lead_seconds(cfg, publish_lateness_s: float = 0.0) -> float:
+    """Return how long before the dispatch slot the scheduler should fire."""
+    return _solver_time_limit_seconds(cfg) + _adaptive_dispatch_buffer_seconds(
+        cfg, publish_lateness_s
+    )
+
+
+def _next_future_dispatch_slot(reference: datetime, interval_minutes: int) -> datetime:
+    """Return the first dispatch slot strictly after *reference*."""
+    return next_optimization_slot(
+        reference + timedelta(seconds=_NEXT_SLOT_EPSILON_S),
+        interval_minutes,
+    )
+
+
+def _next_scheduler_trigger(
+    now: datetime,
+    cfg,
+    publish_lateness_s: float = 0.0,
+    last_dispatch_slot: datetime | None = None,
+) -> tuple[datetime, datetime, float]:
+    """Return ``(dispatch_slot, run_at, lead_s)`` for the next scheduler cycle."""
+    interval_min = int(cfg.server.scheduler.optimization_interval_minutes)
+    reference = last_dispatch_slot if last_dispatch_slot is not None else now
+    dispatch_slot = _next_future_dispatch_slot(reference, interval_min)
+    lead_s = _scheduler_lead_seconds(cfg, publish_lateness_s)
+    run_at = dispatch_slot - timedelta(seconds=lead_s)
+    return dispatch_slot, run_at, lead_s
 
 
 async def run_startup_fetch() -> None:
@@ -35,12 +86,8 @@ async def run_startup_fetch() -> None:
     above until either a complete (error-free) result is obtained or all
     attempts are exhausted.
 
-    A *partial* result (some providers failed) is stored in the cache with the
-    short fallback TTL so the periodic scheduler can replace it quickly on the
-    next successful cycle.  A *complete* result uses the normal TTL.
-
-    Stops early if another task (e.g. a manual /api/predictions/fetch) already
-    populated a fresh, non-fallback cache.
+    The goal is to prime the provider-internal caches so the first scheduled
+    optimization does not block on a cold-start network fetch under tight timing.
     """
     from GridPythia.prediction.prediction import Prediction
 
@@ -48,11 +95,6 @@ async def run_startup_fetch() -> None:
         if delay > 0:
             logger.info("startup_fetch_retry_wait", delay_s=delay, attempt=attempt)
             await asyncio.sleep(delay)
-
-        # Yield if a full (non-fallback) cache was set by another task in the meantime.
-        if services.get_cached_pdata() is not None and not state.pdata_is_fallback:
-            logger.info("startup_fetch_superseded_by_fresh_cache", attempt=attempt)
-            return
 
         try:
             cfg, raw_yaml = services.load_config()
@@ -73,8 +115,8 @@ async def run_startup_fetch() -> None:
 
         pred = Prediction(setup)
         try:
-            pdata, errors = await pred.fetch_partial(
-                start=services.snap_to_dt_grid(datetime.now(tz=tz), float(cfg.prediction.dt_hours)),
+            _, errors = await pred.fetch_partial(
+                start=floor_to_slot(datetime.now(tz=tz), float(cfg.prediction.dt_hours)),
                 hours=float(cfg.prediction.horizon),
                 dt_hours=float(cfg.prediction.dt_hours),
             )
@@ -82,7 +124,7 @@ async def run_startup_fetch() -> None:
             logger.warning("startup_fetch_failed", attempt=attempt, error=str(exc))
             continue
 
-        # If all core providers failed there is nothing useful to cache – retry.
+        # If all core providers failed there is nothing useful – retry.
         core_failed = {"electricprice", "feedintariff", "load"}
         if errors.keys() >= core_failed:
             logger.warning(
@@ -91,10 +133,6 @@ async def run_startup_fetch() -> None:
                 errors=list(errors.keys()),
             )
             continue
-
-        forecast_from = getattr(setup.electricprice, "last_real_ts", None)
-        is_fallback = bool(errors)
-        services.set_cached_pdata(pdata, forecast_from, is_fallback=is_fallback)
 
         if not errors:
             logger.info("startup_fetch_success", attempt=attempt)
@@ -113,51 +151,98 @@ async def run_startup_fetch() -> None:
 
 
 async def run_scheduler() -> None:
-    """Run prediction+optimization cycles at configured slot boundaries.
+    """Run optimization cycles at configured slot boundaries.
 
-    Flow per slot:
-    1) refresh prediction cache (fast-path returns cached data)
-    2) run optimization (publishes plans via MQTT when enabled)
+    Each cycle: call ``services.run_optimization_cycle()`` with the dispatch
+    slot as ``start``.  The runner floors the slot to the nearest prediction
+    boundary (no-op when the slot is already aligned) and ceils it for the
+    solver window, so every cycle is consistently anchored.
     """
+    publish_lateness_s = 0.0
+    last_dispatch_slot: datetime | None = None
+
     while True:
         try:
-            cfg, _ = services.load_config()
-            interval_min = int(cfg.server.scheduler.optimization_interval_minutes)
-            server_tz = cfg.server.timezone or "UTC"
+            cfg, raw_yaml = services.load_config()
+            server_tz_str = cfg.server.timezone or "UTC"
+            try:
+                server_tz = ZoneInfo(server_tz_str)
+            except Exception:
+                server_tz = ZoneInfo("UTC")
+
             now = datetime.now(tz=timezone.utc)
-            slot = next_optimization_slot(now, interval_min)
-            sleep_s = max(0.5, (slot - now).total_seconds())
+            slot, run_at, lead_s = _next_scheduler_trigger(
+                now,
+                cfg,
+                publish_lateness_s=publish_lateness_s,
+                last_dispatch_slot=last_dispatch_slot,
+            )
+
+            # Broadcast scheduler timing so dashboard clients can show a
+            # precise server-side countdown (not a client-computed estimate).
+            next_info = {
+                "dispatch_slot": slot.isoformat(),
+                "run_at": run_at.isoformat(),
+                "lead_s": round(lead_s, 2),
+            }
+            state.scheduler_next_info = next_info
+            await state.ws_hub.broadcast({"type": "scheduler_status", "payload": next_info})
+
+            sleep_s = max(0.0, (run_at - now).total_seconds())
             logger.debug(
                 "scheduler_waiting",
-                interval_min=interval_min,
+                interval_min=int(cfg.server.scheduler.optimization_interval_minutes),
                 next_slot=slot.isoformat(),
+                run_at=run_at.isoformat(),
+                lead_s=round(lead_s, 2),
+                publish_buffer_s=round(
+                    _adaptive_dispatch_buffer_seconds(cfg, publish_lateness_s),
+                    2,
+                ),
                 sleep_s=round(sleep_s, 2),
             )
-            await asyncio.sleep(sleep_s)
+            if sleep_s > 0.0:
+                await asyncio.sleep(sleep_s)
 
-            logger.info("scheduler_slot_reached", slot=slot.isoformat(), interval_min=interval_min)
+            last_dispatch_slot = slot
+
+            # Dispatch slot is always a 15-min boundary in UTC; shift to server TZ
+            # so that prediction timestamps use the configured local timezone.
+            slot_local = slot.astimezone(server_tz)
+            end_local = slot_local + timedelta(hours=float(cfg.prediction.horizon))
+
+            logger.info(
+                "scheduler_slot_optimization_starting",
+                slot=slot_local.isoformat(),
+                end=end_local.isoformat(),
+                interval_min=int(cfg.server.scheduler.optimization_interval_minutes),
+                lead_s=round(lead_s, 2),
+            )
 
             try:
-                await fetch_predictions(FetchRequest(timezone=server_tz))
-            except HTTPException as exc:
-                logger.warning(
-                    "scheduler_prediction_refresh_failed",
-                    status_code=exc.status_code,
-                    detail=str(exc.detail),
+                await services.run_optimization_cycle(
+                    start=slot_local,
+                    end=end_local,
+                    cfg=cfg,
+                    raw_yaml=raw_yaml,
+                    validate_with_simulation=True,
                 )
-                continue
-
-            try:
-                await optimize(OptimizeRequest(timezone=server_tz))
-            except HTTPException as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "scheduler_optimization_failed",
-                    status_code=exc.status_code,
-                    detail=str(exc.detail),
+                    slot=slot_local.isoformat(),
+                    error=str(exc),
                 )
                 continue
 
-            logger.info("scheduler_cycle_complete", slot=slot.isoformat())
+            completed_at = datetime.now(tz=timezone.utc)
+            publish_lateness_s = max(0.0, (completed_at - slot).total_seconds())
+            logger.info(
+                "scheduler_cycle_complete",
+                slot=slot_local.isoformat(),
+                completed_at=completed_at.isoformat(),
+                publish_lateness_s=round(publish_lateness_s, 2),
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001

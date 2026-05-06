@@ -7,16 +7,18 @@ from datetime import datetime
 import numpy as np
 import plotly.graph_objects as go
 
-from GridPythia.prediction.plots._base import PALETTE, add_forecast_region, apply_default_layout
+from GridPythia.prediction.plots._base import PALETTE, PredictionPlotter, add_forecast_region
 
 
-class ElecPricePlotter:
+class ElecPricePlotter(PredictionPlotter):
     """Render an electricity price series as a bar chart.
 
     The *forecast_from* parameter, when supplied, adds a light pastel
     background over the ML-predicted / statistical region so the viewer
     can distinguish real API data from predicted values.
     """
+
+    y_label = "EUR / kWh"
 
     def plot(
         self,
@@ -61,7 +63,7 @@ class ElecPricePlotter:
                     y=known_vals,
                     marker_color=PALETTE["blue"],
                     name="Price (real)",
-                    hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.4f} EUR/kWh<extra></extra>",
+                    hovertemplate="%{y:.4f} EUR/kWh<extra></extra>",
                 )
             )
 
@@ -72,13 +74,13 @@ class ElecPricePlotter:
                     y=pred_vals,
                     marker_color="rgba(179, 157, 219, 0.85)",  # lavender for predicted
                     name="Price (forecast)",
-                    hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.4f} EUR/kWh<extra></extra>",
+                    hovertemplate="%{y:.4f} EUR/kWh<extra></extra>",
                 )
             )
 
         if forecast_from is not None:
             add_forecast_region(fig, forecast_from, timestamps)
 
-        apply_default_layout(fig, title=title, xaxis_title="Time", yaxis_title="EUR / kWh")
+        self._apply_layout(fig, timestamps, title=title, yaxis_title="EUR / kWh")
         fig.update_layout(bargap=0.02, barmode="overlay")
         return fig

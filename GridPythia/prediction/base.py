@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from math import floor
 
 import numpy as np
 
@@ -24,6 +25,75 @@ def make_timestamps(start: datetime, hours: float, dt_hours: float) -> list[date
     n = max(1, round(hours / dt_hours))
     step = timedelta(hours=dt_hours)
     return [start + i * step for i in range(n)]
+
+
+def floor_to_slot(dt: datetime, dt_hours: float) -> datetime:
+    """Return the largest slot boundary that is <= *dt*.
+
+    Equivalent to ``floor(dt / dt_hours) * dt_hours``.
+
+    Args:
+        dt:       Timezone-aware datetime to floor.
+        dt_hours: Slot duration in hours (e.g. 0.25 for 15 min).
+
+    Raises:
+        ValueError: If *dt* is naive or *dt_hours* is not positive.
+    """
+    if dt.tzinfo is None:
+        raise ValueError("floor_to_slot requires a timezone-aware datetime")
+    if dt_hours <= 0:
+        raise ValueError(f"dt_hours must be > 0, got {dt_hours}")
+    step_s = dt_hours * 3600.0
+    epoch = dt.timestamp()
+    return datetime.fromtimestamp(floor(epoch / step_s) * step_s, tz=dt.tzinfo)
+
+
+def ceil_to_slot(dt: datetime, dt_hours: float) -> datetime:
+    """Return the smallest slot boundary that is >= *dt*.
+
+    If *dt* already falls exactly on a boundary, it is returned unchanged.
+
+    Args:
+        dt:       Timezone-aware datetime to ceil.
+        dt_hours: Slot duration in hours (e.g. 0.25 for 15 min).
+
+    Raises:
+        ValueError: If *dt* is naive or *dt_hours* is not positive.
+    """
+    if dt.tzinfo is None:
+        raise ValueError("ceil_to_slot requires a timezone-aware datetime")
+    if dt_hours <= 0:
+        raise ValueError(f"dt_hours must be > 0, got {dt_hours}")
+    step_s = dt_hours * 3600.0
+    epoch = dt.timestamp()
+    floor_epoch = floor(epoch / step_s) * step_s
+    if abs(epoch - floor_epoch) <= 1e-9:
+        return datetime.fromtimestamp(floor_epoch, tz=dt.tzinfo)
+    return datetime.fromtimestamp(floor_epoch + step_s, tz=dt.tzinfo)
+
+
+def round_to_slot(dt: datetime, dt_hours: float) -> datetime:
+    """Return the nearest slot boundary (ties round to the next slot).
+
+    For a 15-minute grid:
+    * 14:47 → 14:45  (7 min into slot, before midpoint 14:52:30)
+    * 14:55 → 15:00  (10 min into slot, after midpoint)
+    * 14:52:30 → 15:00  (exactly at midpoint, rounds up)
+
+    Args:
+        dt:       Timezone-aware datetime to round.
+        dt_hours: Slot duration in hours (e.g. 0.25 for 15 min).
+
+    Raises:
+        ValueError: If *dt* is naive or *dt_hours* is not positive.
+    """
+    if dt.tzinfo is None:
+        raise ValueError("round_to_slot requires a timezone-aware datetime")
+    if dt_hours <= 0:
+        raise ValueError(f"dt_hours must be > 0, got {dt_hours}")
+    step_s = dt_hours * 3600.0
+    epoch = dt.timestamp()
+    return datetime.fromtimestamp(round(epoch / step_s) * step_s, tz=dt.tzinfo)
 
 
 def resample_to_timestamps(

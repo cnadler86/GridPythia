@@ -4,13 +4,12 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from math import floor
 from typing import Any
 
 import numpy as np
 from structlog import get_logger
 
-from GridPythia.prediction.base import make_timestamps
+from GridPythia.prediction.base import floor_to_slot, make_timestamps
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 from GridPythia.prediction.feedintariff.provider import FeedInTariffProvider
 from GridPythia.prediction.load.provider import LoadProvider
@@ -239,6 +238,68 @@ class PredictionData:
         self._solver_view_cache[cache_key] = solver_view
         return solver_view
 
+    def slice_from(self, start: datetime) -> "PredictionData":
+        """Return a new PredictionData whose first timestamp is *start*.
+
+        Finds the first timestamp in this prediction whose UTC epoch is >=
+        *start*'s UTC epoch and returns all series from that index onward.
+        All values stay mapped to their original timestamps (no re-indexing
+        of prices, load, PV, etc.) – this is the timestamp-indexed slicing
+        API that prevents off-by-one errors when the optimisation dispatch
+        slot advances by one step.
+
+        Args:
+            start: Target start timestamp (timezone-aware recommended).
+                   Compared to internal timestamps in UTC.
+
+        Returns:
+            A new :class:`PredictionData` starting at or after *start*.
+
+        Raises:
+            ValueError: If *start* lies beyond the last prediction timestamp.
+        """
+        if start.tzinfo is not None:
+            start_epoch = start.astimezone(timezone.utc).timestamp()
+        else:
+            start_epoch = start.replace(tzinfo=timezone.utc).timestamp()
+
+        idx = None
+        for i, ts in enumerate(self._timestamps):
+            if ts.tzinfo is not None:
+                ts_epoch = ts.astimezone(timezone.utc).timestamp()
+            else:
+                ts_epoch = ts.replace(tzinfo=timezone.utc).timestamp()
+            # 0.5 s grace period to absorb floating-point drift in epoch arithmetic
+            if ts_epoch >= start_epoch - 0.5:
+                idx = i
+                break
+
+        if idx is None:
+            raise ValueError(
+                f"slice_from: start {start.isoformat()} is beyond the last "
+                f"prediction timestamp {self._timestamps[-1].isoformat()}"
+            )
+
+        if idx == 0:
+            return self
+
+        new_timestamps = list(self._timestamps[idx:])
+        return PredictionData(
+            requested_start=start,
+            timestamps=new_timestamps,
+            dt_hours=self.dt_hours,
+            load_wh=self._base_load_wh[idx:],
+            electricprice_eur_wh=(
+                self._electricprice_eur_wh[idx:] if self._electricprice_eur_wh is not None else None
+            ),
+            feedintariff_eur_wh=(
+                self._feedintariff_eur_wh[idx:] if self._feedintariff_eur_wh is not None else None
+            ),
+            pv_by_inverter={k: v[idx:] for k, v in self._pv_by_inverter.items()},
+            weather_by_channel={k: v[idx:] for k, v in self._weather_by_channel.items()},
+            appliance_load_by_id={k: v[idx:] for k, v in self._appliance_load_by_id.items()},
+        )
+
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "requested_start": (
@@ -299,11 +360,21 @@ class Prediction:
 
     @staticmethod
     def _normalize_start(start: datetime | None) -> datetime:
-        """Return a timezone-aware start datetime in local timezone when omitted."""
+        """Return a timezone-aware start datetime.
+
+        Raises:
+            ValueError: If *start* is a naive (timezone-unaware) datetime.
+                        Pass e.g. ``datetime.now(tz=ZoneInfo('Europe/Berlin'))`` or
+                        ``datetime.now(timezone.utc)``.
+        """
         if start is None:
             return datetime.now().astimezone()
         if start.tzinfo is None:
-            return start.astimezone()
+            raise ValueError(
+                "Prediction.fetch() requires a timezone-aware start datetime. "
+                "Pass e.g. datetime.now(tz=ZoneInfo('Europe/Berlin')) or "
+                "datetime.now(timezone.utc)."
+            )
         return start
 
     @staticmethod
@@ -312,38 +383,42 @@ class Prediction:
         hours: int | float,
         dt_hours: float,
     ) -> tuple[list[datetime], int]:
-        """Build grid-aligned timestamps starting at the floored dt-grid boundary.
+        """Build grid-aligned timestamps spanning ``[floor(start), last_slot_start]``.
 
-        Returns aligned timestamps and the index where the original requested start
-        occurs in the timestamp array. Timestamps are always at full grid boundaries;
-        the caller's start is maintained via `requested_start` metadata only.
+        The last slot is the largest slot that starts strictly before
+        ``start + hours``.  This guarantees that the returned array covers the
+        entire requested window without adding spurious extra slots when the
+        window already falls on an exact grid boundary.
 
-        For an unaligned start (e.g., 14:07 with 15-min grid), this returns
-        [14:00, 14:15, 14:30, ...] with start_idx=1 to indicate that the request
-        actually begins at index 1 (14:15).
+        Returns:
+            timestamps: Aligned list from ``floor(start)`` onward.
+            start_idx:  Index of the first complete slot (>= requested *start*).
+                        0 when *start* is already aligned, 1 when it is not.
         """
         if dt_hours <= 0:
             raise ValueError(f"dt_hours must be > 0, got {dt_hours}")
 
-        base_steps = max(1, round(hours / dt_hours))
-        step_seconds = dt_hours * 3600.0
-
+        step_s = dt_hours * 3600.0
         start_epoch = start.timestamp()
-        slot_epoch = floor(start_epoch / step_seconds) * step_seconds
-        aligned_start = datetime.fromtimestamp(slot_epoch, tz=start.tzinfo)
+        end_epoch = start_epoch + float(hours) * 3600.0
 
-        elapsed_in_slot = start_epoch - slot_epoch
-        eps = 1e-9
-        is_aligned = elapsed_in_slot <= eps
+        aligned_start = floor_to_slot(start, dt_hours)
+        floor_epoch = aligned_start.timestamp()
 
-        if is_aligned:
-            start_idx = 0
-            steps = base_steps
-        else:
-            start_idx = 1
-            steps = base_steps + 1
+        # Number of full slots from aligned_start to (but not including) end.
+        # Using int() (floor) instead of round() to avoid over-counting when
+        # the end falls on an exact boundary.
+        raw_end_steps = (end_epoch - floor_epoch) / step_s
+        n_slots = int(raw_end_steps)
+        if raw_end_steps - n_slots <= 1e-9 and n_slots > 0:
+            # end is exactly on a boundary – last slot is the one before it
+            n_slots -= 1
+        n = n_slots + 1  # inclusive count of slot-start timestamps
 
-        return make_timestamps(aligned_start, steps * dt_hours, dt_hours), start_idx
+        elapsed_in_slot = start_epoch - floor_epoch
+        start_idx = 1 if elapsed_in_slot > 1e-9 else 0
+
+        return make_timestamps(aligned_start, n * dt_hours, dt_hours), start_idx
 
     @staticmethod
     def _to_utc_timestamps(timestamps: list[datetime]) -> list[datetime]:
@@ -356,7 +431,11 @@ class Prediction:
         ]
 
     @staticmethod
-    def _validate_series(name: str, values: np.ndarray | list[float], n: int) -> np.ndarray:
+    def _validate_series(
+        name: str,
+        values: np.ndarray | list[float] | dict[str, object] | object,
+        n: int,
+    ) -> np.ndarray:
         arr = np.asarray(values, dtype=np.float32)
         if arr.ndim != 1:
             raise ValueError(f"Prediction provider result '{name}' must be 1D, got {arr.shape}")
@@ -377,22 +456,16 @@ class Prediction:
         """Fetch aligned prediction channels at grid-aligned timestamps.
 
         Alignment behavior:
-        - Prediction timestamps are aligned to the dt-grid (e.g. ``:00, :15, :30, :45`` for 15 min).
-        - All energy values are for complete grid slots (no fractional scaling).
-        - If *start* is unaligned, one extra leading slot is added so that the returned
-          window covers the requested start + horizon. The caller's original start is
-          stored in ``requested_start`` for reference.
-
-        Start contract:
-        - *start* defaults to timezone-aware local ``now``.
-        - Returned timestamps are always at grid boundaries.
-        - ``PredictionData.requested_start`` stores the original timezone-aware request start.
+        - Timestamps are aligned to the dt-grid (``:00, :15, :30, :45`` for 15 min).
+        - The fetch window spans ``[floor(start), last_slot_before(start + hours)]``.
+        - All energy values are for complete grid slots.
 
         Timezone contract:
-        - Internet-backed providers (electricity price, feed-in tariff, PV, weather)
-          are always called with UTC timestamps.
-        - Load providers are called with aligned grid timestamps
-          (load profiles are timezone-invariant by design).
+        - *start* must be timezone-aware (raises ``ValueError`` otherwise).
+        - *start* defaults to ``datetime.now().astimezone()`` when ``None``.
+        - Internet-backed providers receive UTC timestamps.
+        - Load providers receive the local-TZ-aligned timestamps
+          (load profiles are date-indexed, not UTC-offset-dependent).
         """
         requested_start = self._normalize_start(start)
         timestamps, start_idx = self._build_aligned_timestamps(

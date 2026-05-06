@@ -430,3 +430,66 @@ class TestPrediction:
 
         payload = data.to_dict()
         assert payload["requested_start"] == requested_start.isoformat()
+
+    # ── TZ enforcement ────────────────────────────────────────────────
+
+    async def test_fetch_rejects_naive_start(self):
+        """fetch() must raise ValueError when given a naive (TZ-unaware) datetime."""
+        pred = self._make_prediction()
+        naive_start = datetime(2025, 6, 15, 11, 0)  # no tzinfo
+        with pytest.raises(ValueError, match="timezone-aware"):
+            await pred.fetch(start=naive_start, hours=4, dt_hours=0.25)
+
+    async def test_fetch_partial_rejects_naive_start(self):
+        pred = self._make_prediction()
+        naive_start = datetime(2025, 6, 15, 11, 0)
+        with pytest.raises(ValueError, match="timezone-aware"):
+            await pred.fetch_partial(start=naive_start, hours=4, dt_hours=0.25)
+
+    # ── Slot alignment ────────────────────────────────────────────────
+
+    async def test_aligned_start_exact_hours_coverage(self):
+        """Aligned start + integer hours: n == hours/dt, last slot covers end exactly."""
+        pred = self._make_prediction()
+        start = datetime(2025, 6, 15, 11, 0, tzinfo=timezone.utc)  # aligned
+        data = await pred.fetch(start=start, hours=8, dt_hours=0.25)
+
+        # 8h / 0.25h = 32 slots; last timestamp at 11:00 + 31*15min = 18:45
+        assert data.steps == 32
+        assert data.timestamps[0] == start
+        expected_last = start + timedelta(hours=7, minutes=45)
+        assert data.timestamps[-1] == expected_last
+
+    async def test_unaligned_start_covers_full_range(self):
+        """Unaligned start: floored fetch start + extra slot to cover the range."""
+        pred = self._make_prediction()
+        # 11:18 → floor to 11:15; end = 19:18 → last slot start = 19:15
+        start = datetime(2025, 6, 15, 11, 18, tzinfo=timezone.utc)
+        data = await pred.fetch(start=start, hours=8, dt_hours=0.25)
+
+        # Fetch starts at 11:15 (floored), covers up to 19:15 slot [→ 19:30]
+        assert data.timestamps[0] == datetime(2025, 6, 15, 11, 15, tzinfo=timezone.utc)
+        # Last timestamp = 19:15 (slot [19:15, 19:30) covers requested end 19:18)
+        assert data.timestamps[-1] == datetime(2025, 6, 15, 19, 15, tzinfo=timezone.utc)
+
+    async def test_unaligned_start_partial_end_gets_extra_slot(self):
+        """When end falls inside a slot, that slot's start IS the last timestamp."""
+        pred = self._make_prediction()
+        # start=11:00 (aligned), hours=8.1 → end=19:06
+        # Old code (round) would give last=18:45; new code (int floor) gives last=19:00
+        start = datetime(2025, 6, 15, 11, 0, tzinfo=timezone.utc)
+        data = await pred.fetch(start=start, hours=8.1, dt_hours=0.25)
+
+        # end = 19:06; last slot containing it starts at 19:00
+        assert data.timestamps[-1] == datetime(2025, 6, 15, 19, 0, tzinfo=timezone.utc)
+        # The slot [19:00, 19:15) covers 19:06 ✓
+
+    async def test_fetch_start_idx_for_unaligned_is_one(self):
+        """Provider timestamps[0] is before the requested start for unaligned inputs."""
+        pred = self._make_prediction()
+        start = datetime(2025, 6, 15, 11, 7, tzinfo=timezone.utc)
+        data = await pred.fetch(start=start, hours=4, dt_hours=0.25)
+
+        # timestamps[0] = 11:00 (floor), timestamps[1] = 11:15 = ceil(11:07)
+        assert data.timestamps[0] == datetime(2025, 6, 15, 11, 0, tzinfo=timezone.utc)
+        assert data.timestamps[1] == datetime(2025, 6, 15, 11, 15, tzinfo=timezone.utc)

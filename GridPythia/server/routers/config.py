@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 import GridPythia.server.state as state
 from GridPythia.server import services
-from GridPythia.server.models import AppConfigResponse, BatteryInfo, InverterInfo
+from GridPythia.server.models import (
+    AppConfigResponse,
+    BackendStatusResponse,
+    BatteryInfo,
+    InverterInfo,
+)
 
 router = APIRouter(tags=["config"])
 
@@ -15,6 +22,15 @@ router = APIRouter(tags=["config"])
 class MqttStatusResponse(BaseModel):
     enabled: bool
     connected: bool
+
+
+@router.get("/backend/status", response_model=BackendStatusResponse)
+async def get_backend_status() -> BackendStatusResponse:
+    """Return a lightweight backend liveness status for the dashboard."""
+    return BackendStatusResponse(
+        healthy=True,
+        server_time=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 @router.get("/mqtt/status", response_model=MqttStatusResponse)

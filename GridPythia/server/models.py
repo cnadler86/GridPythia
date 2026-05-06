@@ -39,6 +39,15 @@ class OptimizeRequest(BaseModel):
 
     timezone: str = Field("UTC", description="IANA timezone name for the forecast start time")
 
+    start: str | None = Field(
+        None,
+        description=(
+            "ISO-8601 datetime string specifying the optimization horizon start.  "
+            "When omitted the current time in the request timezone is used.  "
+            "The runner automatically floors this to the nearest slot boundary for "
+            "the prediction fetch and ceils it for the solver window."
+        ),
+    )
     battery_soc: dict[str, float] = Field(
         default_factory=dict,
         description=(
@@ -110,14 +119,17 @@ class AppConfigResponse(BaseModel):
 
 
 class PredictionsStatusResponse(BaseModel):
-    """Cache status returned by ``GET /api/predictions/status``."""
+    """Status returned by ``GET /api/predictions/status``."""
 
-    has_cache: bool
-    age_s: float | None = None
-    ttl_s: float
     forecast_from: str | None = None
-    is_fallback: bool = False
-    """True when the cached data comes from a partial fetch (some providers failed)."""
+    """ISO-8601 timestamp of the last real (non-forecast) electricity price data point."""
+
+
+class BackendStatusResponse(BaseModel):
+    """Status returned by ``GET /api/backend/status``."""
+
+    healthy: bool = True
+    server_time: str
 
 
 # ── Optimization status response ──────────────────────────────────────────

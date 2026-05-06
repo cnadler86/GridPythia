@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import abstractmethod
 from datetime import date
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
@@ -221,4 +221,4 @@ def load_provider_from_config(cfg: LoadProfileConfig) -> LoadProvider:
     # Lazy imports to avoid circular dependency (subclasses import from this module).
     from GridPythia.prediction.load.profilecsv import LoadProfileCSV  # noqa: PLC0415
 
-    return LoadProfileCSV(cfg)
+    return cast(LoadProvider, LoadProfileCSV(cfg))

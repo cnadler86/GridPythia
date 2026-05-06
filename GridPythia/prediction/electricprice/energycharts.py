@@ -21,6 +21,7 @@ FallbackProvider) to switch to alternative providers.
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
 import aiohttp
 import numpy as np
@@ -31,6 +32,9 @@ from structlog import get_logger
 
 from GridPythia.prediction.cache import TimeBucketCache, to_utc
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
+
+if TYPE_CHECKING:
+    import plotly.graph_objects as go
 
 logger = get_logger(__name__)
 
@@ -64,7 +68,7 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
     """Fetch day-ahead electricity prices from the Energy-Charts API.
 
     Prices beyond the last available API timestamp are extended using
-    Exponential Smoothing (requires ``statsmodels``, optional).
+    additive Holt-Winters smoothing (pure NumPy fallback model).
 
     Parameters
     ----------
@@ -155,42 +159,84 @@ class ElecPriceEnergyCharts(ElecPriceProvider):
 
     # ── ETS / fallback ────────────────────────────────────────────────
 
+    @staticmethod
+    def _holt_winters_additive(
+        y: np.ndarray,
+        sp: int,
+        steps: int,
+        *,
+        alpha: float = 0.20,
+        beta: float = 0.02,
+        gamma: float = 0.15,
+    ) -> list[float]:
+        """Triple exponential smoothing (additive seasonality) – pure numpy.
+
+        Replaces the statsmodels dependency for the price-forecast fallback.
+        Parameters α/β/γ are fixed at empirically reasonable defaults for
+        quarter-hourly electricity spot prices (α=0.20, β=0.02, γ=0.15).
+
+        Args:
+            y:      Historical observations (1-D float array).
+            sp:     Seasonal period (e.g. 96 for daily at 15-min resolution).
+            steps:  Number of steps to forecast.
+            alpha:  Level smoothing (0 < α < 1).
+            beta:   Trend smoothing (0 ≤ β < 1).
+            gamma:  Seasonal smoothing (0 < γ < 1).
+
+        Returns:
+            List of *steps* non-negative forecast values.
+        """
+        n = len(y)
+        if n < sp:
+            med = float(np.median(y)) if n else 0.0
+            return [max(0.0, med)] * steps
+
+        # Initialise level, trend and seasonal from the first one or two cycles.
+        l0 = y[:sp].mean()
+        b0 = (y[sp : 2 * sp].mean() - l0) / sp if n >= 2 * sp else 0.0
+        seasonal = y[:sp] - l0  # circular buffer, length sp
+
+        L, B = l0, b0
+        for t in range(n):
+            s = seasonal[t % sp]
+            L_new = alpha * (y[t] - s) + (1.0 - alpha) * (L + B)
+            B_new = beta * (L_new - L) + (1.0 - beta) * B
+            seasonal[t % sp] = gamma * (y[t] - L_new) + (1.0 - gamma) * s
+            L, B = L_new, B_new
+
+        return [max(0.0, float(L + (h + 1) * B + seasonal[(n + h) % sp])) for h in range(steps)]
+
     def _forecast(self, history: list[float], steps: int) -> list[float]:
         """Extend *history* by *steps* 15-minute intervals using ETS or median.
 
         This is the synchronous implementation, called directly from tests or via
         :meth:`_forecast_async` in production (runs in a thread-pool executor to
-        avoid blocking the event loop during the CPU-bound statsmodels fit).
+        avoid blocking the event loop during the CPU-bound fit).
         """
-        try:
-            from statsmodels.tsa.holtwinters import ExponentialSmoothing
+        # For 15-minute data there are 4 samples per hour
+        periods_per_hour = 4
+        weekly_sp = 168 * periods_per_hour  # 168 h -> 672 periods
+        daily_sp = 24 * periods_per_hour  # 24 h -> 96 periods
 
-            # For 15-minute data there are 4 samples per hour
-            periods_per_hour = 4
-            weekly_sp = 168 * periods_per_hour  # 168 h -> 672 periods
-            daily_sp = 24 * periods_per_hour  # 24 h -> 96 periods
+        # Prefer weekly seasonality when we have at least two full weekly
+        # cycles in the history; otherwise fall back to daily if possible.
+        sp = None
+        if len(history) >= 2 * weekly_sp:
+            sp = weekly_sp
+        elif len(history) >= 2 * daily_sp:
+            sp = daily_sp
 
-            # Prefer weekly seasonality when we have at least two full weekly
-            # cycles in the history; otherwise fall back to daily if possible.
-            sp = None
-            if len(history) >= 2 * weekly_sp:
-                sp = weekly_sp
-            elif len(history) >= 2 * daily_sp:
-                sp = daily_sp
-
-            if sp is not None and len(history) >= 2 * sp:
+        if sp is not None:
+            try:
+                y = np.asarray(history, dtype=np.float64)
                 logger.debug("ets_forecast_selected", seasonal_periods=sp, history_len=len(history))
-                model = ExponentialSmoothing(history, seasonal="add", seasonal_periods=sp).fit(
-                    optimized=True
-                )
-                # Ensure forecasts are non-negative (floor at 0.0)
-                return [max(0.0, float(v)) for v in model.forecast(steps)]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("ets_forecast_failed_using_median", error=str(exc))
+                return self._holt_winters_additive(y, sp=sp, steps=steps)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ets_forecast_failed_using_median", error=str(exc))
+
         from statistics import median
 
         med = median(history) if history else 0.0
-        # Floor median fallback at 0.0 as well
         return [max(0.0, med)] * steps
 
     async def _forecast_async(self, history: list[float], steps: int) -> list[float]:
