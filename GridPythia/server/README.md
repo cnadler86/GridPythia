@@ -143,7 +143,6 @@ server:
 
   scheduler:
     optimization_interval_minutes: 15   # Must be a divisor of 60
-    prediction_refresh_minutes: 30      # How often to refresh forecast data
     dispatch_buffer_seconds: 5          # Extra safety margin on top of solver time_limit
     dispatch_buffer_max_seconds: 30     # Cap for adaptive late-publish compensation
 

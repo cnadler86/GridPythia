@@ -25,29 +25,8 @@ import GridPythia.server.state as state
 from GridPythia.config import AppConfig
 from GridPythia.optimization.solution import OptimizationObjective
 from GridPythia.optimization.solver import LinearOptimizer
-from GridPythia.prediction.electricprice.energycharts import (
-    ElecPriceEnergyCharts,
-    EnergyChartsConfig,
-)
-from GridPythia.prediction.electricprice.epexpredictor import (
-    ElecPriceEpexPredictor,
-    EpexPredictorConfig,
-)
-from GridPythia.prediction.electricprice.fixed import ElecPriceFixed
-from GridPythia.prediction.electricprice.provider import ElecPriceFallbackChain
-from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
-from GridPythia.prediction.load.config import LoadProfileConfig
-from GridPythia.prediction.load.provider import load_provider_from_config
-
-# ElecPricePlotter, FeedInTariffPlotter, LoadPlotter, PVForecastPlotter,
-# WeatherPlotter are imported lazily inside make_prediction_figures() to
-# avoid pulling plotly → narwhals at server startup.
 from GridPythia.prediction.prediction import PredictionData, PredictionSetup
-from GridPythia.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
-from GridPythia.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
-from GridPythia.prediction.pvforecast.provider import PVPlaneConfig
-from GridPythia.prediction.weather.brightsky import WeatherBrightSky
-from GridPythia.prediction.weather.openmeteo import WeatherOpenMeteo
+from GridPythia.prediction.registry import provider_registry
 from GridPythia.server.models import InverterPlanResponse, InverterPlanStep
 from GridPythia.server.plan_utils import stitch_current_slot_from_previous_plan
 from GridPythia.simulation.devices import InverterMode
@@ -87,109 +66,95 @@ def load_config() -> tuple[AppConfig, dict[str, Any]]:
 # ── Pure builder helpers ──────────────────────────────────────────────────
 
 
-def build_providers(cfg: AppConfig, raw_yaml: dict[str, Any]) -> PredictionSetup:
-    """Instantiate all prediction providers from *AppConfig*."""
+def build_providers(
+    cfg: AppConfig,
+    raw_yaml: dict[str, Any],
+    *,
+    fresh_instances: bool = False,
+) -> PredictionSetup:
+    """Instantiate all prediction providers from *AppConfig*.
+
+    Args:
+        cfg: Parsed app config.
+        raw_yaml: Raw YAML config dictionary.
+        fresh_instances: Force newly constructed provider instances and bypass
+            the registry singleton cache.
+    """
     pred_cfg = cfg.prediction
 
     # Electric price
-    ep = pred_cfg.electricprice
-    if ep.provider == "EpexPredictor":
-        primary = ElecPriceEpexPredictor(
-            EpexPredictorConfig(
-                region=ep.epexpredictor.region,
-                charges_kwh=ep.charges_kwh,
-                vat_rate=ep.vat_rate,
-                base_url=ep.epexpredictor.base_url,
-            )
-        )
-        fallback = ElecPriceEnergyCharts(
-            EnergyChartsConfig(
-                bidding_zone=ep.energycharts.bidding_zone,
-                charges_kwh=ep.charges_kwh,
-                vat_rate=ep.vat_rate,
-            )
-        )
-        electricprice = ElecPriceFallbackChain(primary=primary, fallback=fallback)
-    elif ep.provider == "EnergyCharts":
-        electricprice = ElecPriceEnergyCharts(
-            EnergyChartsConfig(
-                bidding_zone=ep.energycharts.bidding_zone,
-                charges_kwh=ep.charges_kwh,
-                vat_rate=ep.vat_rate,
-            )
-        )
-    else:
-        electricprice = ElecPriceFixed(
-            price_kwh=ep.charges_kwh,
-            charges_kwh=ep.charges_kwh,
-            vat_rate=ep.vat_rate,
-        )
+    ep_cfg = {
+        "bidding_zone": pred_cfg.electricprice.energycharts.bidding_zone,
+        "charges_kwh": pred_cfg.electricprice.charges_kwh,
+        "vat_rate": pred_cfg.electricprice.vat_rate,
+        "region": pred_cfg.electricprice.epexpredictor.region,
+        "base_url": pred_cfg.electricprice.epexpredictor.base_url,
+    }
+    electricprice = provider_registry.create_electricprice(
+        pred_cfg.electricprice.provider,
+        ep_cfg,
+        fresh=fresh_instances,
+    )
 
-    feedintariff = FeedInTariffFixed(tariff_kwh=pred_cfg.feedintariff.tariff_kwh)
+    feedintariff = provider_registry.create_feedintariff(
+        pred_cfg.feedintariff.provider,
+        {"tariff_kwh": pred_cfg.feedintariff.tariff_kwh},
+        fresh=fresh_instances,
+    )
 
     raw_load_path = Path(pred_cfg.load.path)
     load_path = (
         raw_load_path if raw_load_path.is_absolute() else (state.config_path.parent / raw_load_path)
     )
-    load_provider = load_provider_from_config(
-        LoadProfileConfig(
-            path=load_path,
-            country=pred_cfg.load.country or None,
-            subdivision=pred_cfg.load.subdivision or None,
-        )
+    load_provider = provider_registry.create_load(
+        pred_cfg.load.provider,
+        {
+            "path": str(load_path),
+            "country": pred_cfg.load.country or None,
+            "subdivision": pred_cfg.load.subdivision or None,
+        },
+        fresh=fresh_instances,
     )
 
     plane_cfg = pred_cfg.pvforecast.plane
     om_cfg = pred_cfg.pvforecast.openmeteo
-    plane = PVPlaneConfig(
-        peak_kw=plane_cfg.peak_kw,
-        tilt=plane_cfg.tilt,
-        azimuth=plane_cfg.azimuth,
-        userhorizon=tuple(plane_cfg.userhorizon) if plane_cfg.userhorizon else None,
-        loss_pct=plane_cfg.loss_pct,
-        damping_morning=om_cfg.damping_morning,
-        damping_evening=om_cfg.damping_evening,
-        partial_shading=om_cfg.partial_shading,
-        inverter_id=plane_cfg.inverter_id,
+    pv_provider = provider_registry.create_pvforecast(
+        pred_cfg.pvforecast.provider,
+        {
+            "latitude": pred_cfg.latitude,
+            "longitude": pred_cfg.longitude,
+            "plane": {
+                "peak_kw": plane_cfg.peak_kw,
+                "tilt": plane_cfg.tilt,
+                "azimuth": plane_cfg.azimuth,
+                "userhorizon": list(plane_cfg.userhorizon),
+                "loss_pct": plane_cfg.loss_pct,
+                "inverter_id": plane_cfg.inverter_id,
+            },
+            "openmeteo": {
+                "api_key": om_cfg.api_key or None,
+                "weather_model": om_cfg.weather_model or None,
+                "damping_morning": om_cfg.damping_morning,
+                "damping_evening": om_cfg.damping_evening,
+                "partial_shading": om_cfg.partial_shading,
+            },
+        },
+        fresh=fresh_instances,
     )
-    if pred_cfg.pvforecast.provider == "OpenMeteo":
-        pv_ttl_s = (
-            float(pred_cfg.pvforecast.cache_ttl_hours) * 3600.0
-            if pred_cfg.pvforecast.cache_ttl_hours is not None
-            else None
-        )
-        pv_provider = PVForecastOpenMeteo(
-            planes=[plane],
-            latitude=pred_cfg.latitude,
-            longitude=pred_cfg.longitude,
-            api_key=om_cfg.api_key or None,
-            weather_model=om_cfg.weather_model or None,
-            cache_ttl_s=pv_ttl_s,
-        )
-    else:
-        pv_provider = PVForecastAkkudoktor(
-            planes=[plane],
-            latitude=pred_cfg.latitude,
-            longitude=pred_cfg.longitude,
-        )
 
     weather_provider = None
     if "weather" in raw_yaml.get("prediction", {}):
-        w_cfg = pred_cfg.weather
-        if w_cfg.provider == "BrightSky":
-            weather_provider = WeatherBrightSky(
-                latitude=pred_cfg.latitude, longitude=pred_cfg.longitude
-            )
-        else:
-            weather_provider = WeatherOpenMeteo(
-                latitude=pred_cfg.latitude, longitude=pred_cfg.longitude
-            )
+        weather_provider = provider_registry.create_weather(
+            pred_cfg.weather.provider,
+            {"latitude": pred_cfg.latitude, "longitude": pred_cfg.longitude},
+            fresh=fresh_instances,
+        )
 
     return PredictionSetup(
         electricprice=electricprice,
         feedintariff=feedintariff,
         load=load_provider,
-        pv={plane.inverter_id: pv_provider},
+        pv={plane_cfg.inverter_id: pv_provider},
         weather=weather_provider,
     )
 
@@ -220,7 +185,7 @@ def get_providers(cfg: AppConfig, raw_yaml: dict[str, Any]) -> PredictionSetup:
     except OSError:
         mtime = 0.0
     if state.providers is None or mtime != state.providers_config_mtime:
-        state.providers = build_providers(cfg, raw_yaml)
+        state.providers = build_providers(cfg, raw_yaml, fresh_instances=True)
         state.providers_config_mtime = mtime
         logger.info("providers_rebuilt")
     return state.providers

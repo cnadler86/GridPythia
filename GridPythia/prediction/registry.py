@@ -12,9 +12,9 @@ Example:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Any, Generic, Hashable, Protocol, TypeVar
 
 from structlog import get_logger
 
@@ -46,7 +46,27 @@ class ProviderRegistry(Generic[T]):
     """
 
     _factories: dict[str, Callable[[Mapping[str, Any]], T]] = field(default_factory=dict)
+    _singletons: dict[tuple[str, Hashable], T] = field(default_factory=dict)
     _category: str = "provider"
+
+    @staticmethod
+    def _freeze_value(value: Any) -> Hashable:
+        """Convert *value* into a stable, hashable representation for cache keys."""
+        if isinstance(value, Mapping):
+            return tuple(
+                sorted((str(k), ProviderRegistry._freeze_value(v)) for k, v in value.items())
+            )
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return tuple(ProviderRegistry._freeze_value(v) for v in value)
+        if isinstance(value, (set, frozenset)):
+            return tuple(sorted(ProviderRegistry._freeze_value(v) for v in value))
+        if isinstance(value, Hashable):
+            return value
+        return repr(value)
+
+    @classmethod
+    def _default_cache_key(cls, name: str, config: Mapping[str, Any]) -> tuple[str, Hashable]:
+        return name, cls._freeze_value(config)
 
     def register(
         self,
@@ -67,12 +87,21 @@ class ProviderRegistry(Generic[T]):
         self._factories[name] = factory
         logger.debug(f"{self._category}_registered", name=name)
 
-    def create(self, name: str, config: Mapping[str, Any]) -> T:
+    def create(
+        self,
+        name: str,
+        config: Mapping[str, Any],
+        *,
+        fresh: bool = False,
+        cache_key: Hashable | None = None,
+    ) -> T:
         """Create a provider instance by name.
 
         Args:
             name: Registered provider name.
             config: Configuration dict passed to the factory.
+            fresh: When ``True``, always create a new uncached instance.
+            cache_key: Optional explicit cache key used for singleton lookup.
 
         Returns:
             Configured provider instance.
@@ -83,7 +112,27 @@ class ProviderRegistry(Generic[T]):
         if name not in self._factories:
             available = list(self._factories.keys())
             raise KeyError(f"Unknown {self._category} provider '{name}'. Available: {available}")
-        return self._factories[name](config)
+
+        if fresh:
+            return self._factories[name](config)
+
+        key = (name, cache_key) if cache_key is not None else self._default_cache_key(name, config)
+        instance = self._singletons.get(key)
+        if instance is None:
+            instance = self._factories[name](config)
+            self._singletons[key] = instance
+        return instance
+
+    def clear_singletons(self, name: str | None = None) -> None:
+        """Clear cached singleton instances.
+
+        Args:
+            name: Optional provider name. If omitted, clears the full cache.
+        """
+        if name is None:
+            self._singletons.clear()
+            return
+        self._singletons = {k: v for k, v in self._singletons.items() if k[0] != name}
 
     def available(self) -> list[str]:
         """Return list of registered provider names."""
@@ -280,20 +329,55 @@ class PredictionProviderRegistry:
     pvforecast = pvforecast_registry
     weather = weather_registry
 
-    def create_electricprice(self, name: str, config: Mapping[str, Any]) -> ElecPriceProvider:
-        return self.electricprice.create(name, config)
+    def create_electricprice(
+        self,
+        name: str,
+        config: Mapping[str, Any],
+        *,
+        fresh: bool = False,
+        cache_key: Hashable | None = None,
+    ) -> ElecPriceProvider:
+        return self.electricprice.create(name, config, fresh=fresh, cache_key=cache_key)
 
-    def create_feedintariff(self, name: str, config: Mapping[str, Any]) -> FeedInTariffProvider:
-        return self.feedintariff.create(name, config)
+    def create_feedintariff(
+        self,
+        name: str,
+        config: Mapping[str, Any],
+        *,
+        fresh: bool = False,
+        cache_key: Hashable | None = None,
+    ) -> FeedInTariffProvider:
+        return self.feedintariff.create(name, config, fresh=fresh, cache_key=cache_key)
 
-    def create_load(self, name: str, config: Mapping[str, Any]) -> LoadProvider:
-        return self.load.create(name, config)
+    def create_load(
+        self,
+        name: str,
+        config: Mapping[str, Any],
+        *,
+        fresh: bool = False,
+        cache_key: Hashable | None = None,
+    ) -> LoadProvider:
+        return self.load.create(name, config, fresh=fresh, cache_key=cache_key)
 
-    def create_pvforecast(self, name: str, config: Mapping[str, Any]) -> PVForecastProvider:
-        return self.pvforecast.create(name, config)
+    def create_pvforecast(
+        self,
+        name: str,
+        config: Mapping[str, Any],
+        *,
+        fresh: bool = False,
+        cache_key: Hashable | None = None,
+    ) -> PVForecastProvider:
+        return self.pvforecast.create(name, config, fresh=fresh, cache_key=cache_key)
 
-    def create_weather(self, name: str, config: Mapping[str, Any]) -> WeatherProvider:
-        return self.weather.create(name, config)
+    def create_weather(
+        self,
+        name: str,
+        config: Mapping[str, Any],
+        *,
+        fresh: bool = False,
+        cache_key: Hashable | None = None,
+    ) -> WeatherProvider:
+        return self.weather.create(name, config, fresh=fresh, cache_key=cache_key)
 
 
 # Singleton instance

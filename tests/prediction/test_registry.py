@@ -36,6 +36,30 @@ class TestProviderRegistry:
         provider = registry.create("Dummy", {"value": 42})
         assert provider.value == 42
 
+    def test_create_returns_singleton_for_same_config(self):
+        """Same provider+config should reuse the cached instance."""
+        registry: ProviderRegistry[TestProviderRegistry._DummyProvider] = ProviderRegistry(
+            _category="test"
+        )
+        registry.register("Dummy", lambda cfg: self._DummyProvider(cfg.get("value", 0)))
+
+        a = registry.create("Dummy", {"value": 7})
+        b = registry.create("Dummy", {"value": 7})
+
+        assert a is b
+
+    def test_create_fresh_bypasses_singleton_cache(self):
+        """fresh=True should force a new provider instance."""
+        registry: ProviderRegistry[TestProviderRegistry._DummyProvider] = ProviderRegistry(
+            _category="test"
+        )
+        registry.register("Dummy", lambda cfg: self._DummyProvider(cfg.get("value", 0)))
+
+        a = registry.create("Dummy", {"value": 7})
+        b = registry.create("Dummy", {"value": 7}, fresh=True)
+
+        assert a is not b
+
     def test_unknown_provider_raises(self):
         """Test that creating an unknown provider raises KeyError."""
         registry: ProviderRegistry[TestProviderRegistry._DummyProvider] = ProviderRegistry(

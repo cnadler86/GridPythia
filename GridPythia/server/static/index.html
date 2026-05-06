@@ -41,6 +41,17 @@
     .mqtt-dot.off { background: #c03030; }
     #mqtt-status { font-size: .7rem; color: #bbb; white-space: nowrap; }
 
+    /* ── Backend status dot ── */
+    .backend-dot {
+      width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+      vertical-align: middle; margin-right: .25rem;
+      background: #6a6f7e;
+      opacity: .9;
+    }
+    .backend-dot.on { background: #2e7d52; }
+    .backend-dot.off { background: #c03030; }
+    #backend-status { font-size: .7rem; color: #b8bdca; white-space: nowrap; }
+
     /* ── Inverter cards ── */
     #inverter-row {
       display: flex; flex-wrap: wrap; gap: .75rem;
@@ -150,6 +161,7 @@
   <span id="chip-opt"  class="gp-status-chip">Optimization: —</span>
   <span id="next-slot" class="ms-auto">Next opt: <strong id="countdown">—</strong></span>
   <span id="server-clock" style="font-size:.75rem;color:#bbb;white-space:nowrap">—</span>
+  <span id="backend-status"><span class="backend-dot" id="backend-dot"></span>Backend</span>
   <span id="mqtt-status"><span class="mqtt-dot" id="mqtt-dot"></span>MQTT</span>
   <span id="spinner-global" class="spinner-sm" style="display:none"></span>
 </header>
@@ -184,6 +196,7 @@ let CHART_DATA = {};      // tabId → plotly data
 let BUSY = false;
 let WS = null;
 let WS_RETRY_MS = 1000;
+let BACKEND_POLL_TIMER = null;
 
 // ── Scheduler timing (server-pushed) ──────────────────────────────────────
 let SCHEDULER_RUN_AT_MS = null;   // Date.getTime() of next scheduler run
@@ -439,6 +452,28 @@ function applyMqttStatus(s) {
   }
 }
 
+function setBackendStatus(ok, tooltip) {
+  const dot = document.getElementById('backend-dot');
+  const label = document.getElementById('backend-status');
+  if (!dot || !label) return;
+  dot.className = ok ? 'backend-dot on' : 'backend-dot off';
+  label.title = tooltip || (ok ? 'Backend reachable' : 'Backend unreachable');
+}
+
+async function pollBackendStatus() {
+  try {
+    const data = await apiFetch('/api/backend/status');
+    if (data && data.healthy) {
+      const ts = data.server_time ? fmtTimestamp(data.server_time) : null;
+      setBackendStatus(true, ts ? ('Backend ok · ' + ts) : 'Backend reachable');
+      return;
+    }
+    setBackendStatus(false, 'Backend returned unhealthy status');
+  } catch (e) {
+    setBackendStatus(false, 'Backend unreachable: ' + e.message);
+  }
+}
+
 // ── WebSocket live updates ─────────────────────────────────────────────────
 function wsUrl() {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -612,6 +647,7 @@ async function triggerOptimize() {
 async function init() {
   try {
     CFG = await apiFetch('/api/config');
+    setBackendStatus(true, 'Backend reachable');
     TZ  = CFG.server_timezone || 'UTC';
     buildInverterCards(CFG.inverters);
     buildTabs();
@@ -632,7 +668,13 @@ async function init() {
     // scheduler status on connect (no extra HTTP round-trips needed).
     connectWebSocket();
 
+    // Backend liveness indicator (subtle navbar dot).
+    await pollBackendStatus();
+    if (BACKEND_POLL_TIMER !== null) clearInterval(BACKEND_POLL_TIMER);
+    BACKEND_POLL_TIMER = setInterval(pollBackendStatus, 10_000);
+
   } catch (e) {
+    setBackendStatus(false, 'Init failed: ' + e.message);
     document.getElementById('inverter-row').innerHTML =
       '<span style="color:#e05050">Init failed: ' + e.message + '</span>';
     return;

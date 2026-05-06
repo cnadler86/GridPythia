@@ -230,7 +230,6 @@ server:
   
   scheduler:
     optimization_interval_minutes: 15
-    prediction_refresh_minutes: 30
   
   dashboard:
     websocket_enabled: true

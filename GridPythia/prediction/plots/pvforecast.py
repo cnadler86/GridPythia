@@ -54,10 +54,11 @@ class PVForecastPlotter(PredictionPlotter):
                 go.Bar(
                     x=timestamps,
                     y=wh.tolist(),
+                    customdata=[name] * len(wh),
                     name=label,
                     marker_color=color,
                     opacity=0.85,
-                    hovertemplate="%{y:.1f} Wh<extra>" + label + "</extra>",
+                    hovertemplate="%{customdata}: %{y:.1f} Wh<extra></extra>",
                 )
             )
 

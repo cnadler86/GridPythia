@@ -125,6 +125,13 @@ class PredictionsStatusResponse(BaseModel):
     """ISO-8601 timestamp of the last real (non-forecast) electricity price data point."""
 
 
+class BackendStatusResponse(BaseModel):
+    """Status returned by ``GET /api/backend/status``."""
+
+    healthy: bool = True
+    server_time: str
+
+
 # ── Optimization status response ──────────────────────────────────────────
 
 
