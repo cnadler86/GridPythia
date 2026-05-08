@@ -10,15 +10,18 @@ Mutated only by :mod:`GridPythia.server.services` functions.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import WebSocket
 
 if TYPE_CHECKING:
+    from GridPythia.config import AppConfig
+    from GridPythia.optimization.solution import LinearSolution
     from GridPythia.optimization.solver import LinearOptimizer
-    from GridPythia.prediction.prediction import PredictionSetup
+    from GridPythia.prediction.prediction import PredictionData, PredictionSetup
 
 from GridPythia.coordination.inverter_coordinator import InverterCoordinator
 
@@ -29,6 +32,12 @@ config_path: Path = Path("config.yaml")
 # ── Provider singleton ────────────────────────────────────────────────────
 providers: "PredictionSetup | None" = None
 providers_config_mtime: float = 0.0
+
+# ── Parsed config cache ───────────────────────────────────────────────────
+# Avoid reparsing YAML and rebuilding AppConfig on each request when unchanged.
+config_cache: "AppConfig | None" = None
+config_cache_raw: dict[str, Any] | None = None
+config_cache_mtime: float = -1.0
 
 # ── Optimizer singleton ───────────────────────────────────────────────────
 # The CVXPY model is compiled once per LinearOptimizer instance and reused
@@ -69,6 +78,23 @@ mqtt_gateway: "MqttGateway | None" = None
 solution_cache: dict | None = None
 solution_cache_ts: datetime | None = None
 SOLUTION_CACHE_TTL_S: float = 3600.0  # 1 hour
+
+# ── Chart cache (serialized Plotly JSON) ─────────────────────────────────
+# Bounded LRU to keep RSS stable on constrained targets.
+CHART_CACHE_MAX_ENTRIES: int = 16
+chart_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+
+# ── Latest prediction snapshot for lazy tab chart rendering ───────────────
+latest_prediction_data: "PredictionData | None" = None
+latest_prediction_forecast_from: datetime | None = None
+latest_prediction_chart_scope: str | None = None
+
+# ── Latest optimization snapshot for lazy inverter chart rendering ────────
+latest_optimization_solution: "LinearSolution | None" = None
+latest_optimization_optimizer: "LinearOptimizer | None" = None
+latest_optimization_fetch_pdata: "PredictionData | None" = None
+latest_optimization_forecast_from: datetime | None = None
+latest_optimization_chart_scope: str | None = None
 
 # ── Inverter coordinator ──────────────────────────────────────────────────
 # Tracks real-time inverter states (SoC, mode).  max_age_s is updated from

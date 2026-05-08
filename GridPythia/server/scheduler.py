@@ -226,6 +226,8 @@ async def run_scheduler() -> None:
                     cfg=cfg,
                     raw_yaml=raw_yaml,
                     validate_with_simulation=True,
+                    include_charts=False,
+                    include_plans=False,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

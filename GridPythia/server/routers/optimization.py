@@ -74,6 +74,8 @@ async def optimize(req: OptimizeRequest) -> JSONResponse:
             initial_modes_overrides=req.initial_modes or None,
             solver_opts_overrides=req.solver_opts,
             validate_with_simulation=True,
+            include_charts=req.include_charts,
+            include_plans=req.include_plans,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -112,3 +114,49 @@ async def get_cached_optimize() -> Response:
     if cached is None:
         return Response(status_code=204)
     return JSONResponse(cached)
+
+
+@router.get("/optimize/charts/{tab_id}")
+async def get_optimization_chart(tab_id: str) -> JSONResponse:
+    """Return one optimization-related chart for lazy dashboard tab loading."""
+    if tab_id.startswith("tab-inv-"):
+        solution = state.latest_optimization_solution
+        scope = state.latest_optimization_chart_scope
+        if solution is None or scope is None:
+            raise HTTPException(status_code=409, detail="No optimization snapshot available yet")
+        chart = services.get_or_build_inverter_chart(tab_id=tab_id, solution=solution, scope=scope)
+        if chart is None:
+            raise HTTPException(status_code=404, detail=f"Chart not available for tab '{tab_id}'")
+        return JSONResponse({"tab_id": tab_id, "chart_scope": scope, "chart": chart})
+
+    # Non-inverter tabs reuse the latest prediction snapshot created by the
+    # optimization cycle (or by explicit prediction fetch calls).
+    try:
+        cfg, raw_yaml = services.load_config()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Config error: {exc}") from exc
+    if tab_id not in services.visible_prediction_tabs(cfg, raw_yaml):
+        raise HTTPException(
+            status_code=404, detail=f"Unknown or disabled prediction tab '{tab_id}'"
+        )
+
+    pdata = state.latest_optimization_fetch_pdata or state.latest_prediction_data
+    if pdata is None:
+        raise HTTPException(status_code=409, detail="No prediction snapshot available yet")
+
+    forecast_from = state.latest_optimization_forecast_from or state.latest_prediction_forecast_from
+    scope = state.latest_prediction_chart_scope or services.prediction_chart_scope(
+        cfg,
+        pdata,
+        forecast_from,
+    )
+    chart = services.get_or_build_prediction_chart(
+        tab_id=tab_id,
+        cfg=cfg,
+        pdata=pdata,
+        forecast_from=forecast_from,
+        scope=scope,
+    )
+    if chart is None:
+        raise HTTPException(status_code=404, detail=f"Chart not available for tab '{tab_id}'")
+    return JSONResponse({"tab_id": tab_id, "chart_scope": scope, "chart": chart})

@@ -69,9 +69,6 @@ async def _retry_failed_providers(
         recovered = [pid for pid in remaining if pid not in errors]
 
         if recovered:
-            forecast_from: datetime | None = None
-            if setup.electricprice is not None:
-                forecast_from = setup.electricprice.last_real_ts
             logger.info("prediction_retry_recovered", recovered=recovered)
 
         remaining = still_failing
@@ -151,13 +148,17 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
         setup.electricprice.last_real_ts if setup.electricprice is not None else None
     )
     pdata = services.apply_appliance_loads(pdata)
-    charts = services.make_prediction_figures(pdata, forecast_from)
+    pred_scope = services.prediction_chart_scope(cfg, pdata, forecast_from)
+
+    state.latest_prediction_data = pdata
+    state.latest_prediction_forecast_from = forecast_from
+    state.latest_prediction_chart_scope = pred_scope
 
     await state.ws_hub.broadcast(
         {
             "type": "predictions_updated",
             "payload": {
-                "charts": charts,
+                "chart_scope": pred_scope,
                 "from_cache": False,
                 "errors": errors,
             },
@@ -175,8 +176,58 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
             name="prediction_retry",
         )
 
-    logger.info("predictions_fetched", charts=list(charts.keys()), errors=list(errors.keys()))
-    response: dict = {"charts": charts, "from_cache": False}
+    response: dict = {
+        "from_cache": False,
+        "chart_scope": pred_scope,
+        "summary": {
+            "steps": pdata.steps,
+            "start": pdata.timestamps[0].isoformat() if pdata.timestamps else None,
+            "end": pdata.timestamps[-1].isoformat() if pdata.timestamps else None,
+            "dt_hours": pdata.dt_hours,
+            "forecast_from": forecast_from.isoformat() if forecast_from is not None else None,
+        },
+    }
+    if req.include_charts:
+        response["charts"] = services.make_prediction_figures(
+            pdata,
+            forecast_from,
+            visible_tabs=services.visible_prediction_tabs(cfg, raw_yaml),
+        )
     if errors:
         response["errors"] = errors
     return JSONResponse(response)
+
+
+@router.get("/charts/{tab_id}")
+async def fetch_prediction_chart(tab_id: str) -> JSONResponse:
+    """Return a single prediction chart for lazy dashboard tab loading."""
+    try:
+        cfg, raw_yaml = services.load_config()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Config error: {exc}") from exc
+
+    if tab_id not in services.visible_prediction_tabs(cfg, raw_yaml):
+        raise HTTPException(
+            status_code=404, detail=f"Unknown or disabled prediction tab '{tab_id}'"
+        )
+
+    pdata = state.latest_prediction_data
+    if pdata is None:
+        raise HTTPException(status_code=409, detail="No prediction snapshot available yet")
+
+    forecast_from = state.latest_prediction_forecast_from
+    scope = state.latest_prediction_chart_scope or services.prediction_chart_scope(
+        cfg,
+        pdata,
+        forecast_from,
+    )
+    chart = services.get_or_build_prediction_chart(
+        tab_id=tab_id,
+        cfg=cfg,
+        pdata=pdata,
+        forecast_from=forecast_from,
+        scope=scope,
+    )
+    if chart is None:
+        raise HTTPException(status_code=404, detail=f"Chart not available for tab '{tab_id}'")
+    return JSONResponse({"tab_id": tab_id, "chart_scope": scope, "chart": chart})

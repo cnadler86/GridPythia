@@ -193,6 +193,9 @@ let CFG = null;           // AppConfigResponse
 let TABS = [];            // [{id, label}]
 let LAST_OPT = null;      // last optimize response
 let CHART_DATA = {};      // tabId → plotly data
+let HAS_ANY_CHART = false;
+let PRED_CHART_SCOPE = null;
+let OPT_CHART_SCOPE = null;
 let BUSY = false;
 let WS = null;
 let WS_RETRY_MS = 1000;
@@ -401,11 +404,41 @@ function showTab(id) {
   });
   const el = document.getElementById('chart-' + id);
   if (!el) return;
+  loadChartForTab(id).catch((e) => {
+    setActionStatus('Chart load failed: ' + e.message, '#f0a030');
+  });
   if (el._dirty && CHART_DATA[id]) {
     _renderChart(el, id, CHART_DATA[id]);
   } else if (el._plotly) {
     Plotly.Plots.resize(el);
   }
+}
+
+function chartScopeForTab(tabId) {
+  return tabId.startsWith('tab-inv-') ? OPT_CHART_SCOPE : PRED_CHART_SCOPE;
+}
+
+async function loadChartForTab(tabId, force = false) {
+  const el = document.getElementById('chart-' + tabId);
+  if (!el) return;
+  const expectedScope = chartScopeForTab(tabId);
+  const cached = CHART_DATA[tabId];
+  if (!force && cached && cached._scope === expectedScope) {
+    if (el._dirty || !el._plotly) {
+      _renderChart(el, tabId, cached);
+    }
+    return;
+  }
+
+  const path = tabId.startsWith('tab-inv-')
+    ? ('/api/optimize/charts/' + encodeURIComponent(tabId))
+    : ('/api/predictions/charts/' + encodeURIComponent(tabId));
+  const data = await apiFetch(path);
+  const fig = data.chart;
+  fig._scope = data.chart_scope || expectedScope || null;
+  CHART_DATA[tabId] = fig;
+  HAS_ANY_CHART = true;
+  _renderChart(el, tabId, fig);
 }
 
 function _renderChart(el, tabId, fig) {
@@ -424,6 +457,7 @@ function _renderChart(el, tabId, fig) {
 
 function renderCharts(charts) {
   for (const [tabId, fig] of Object.entries(charts)) {
+    HAS_ANY_CHART = true;
     CHART_DATA[tabId] = fig;
     const el = document.getElementById('chart-' + tabId);
     if (!el) continue;
@@ -485,8 +519,15 @@ function handleLiveEvent(msg) {
 
   switch (msg.type) {
     case 'predictions_updated':
-      if (msg.payload?.charts) {
-        renderCharts(msg.payload.charts);
+      if (msg.payload?.chart_scope) {
+        PRED_CHART_SCOPE = msg.payload.chart_scope;
+        for (const t of TABS) {
+          if (!t.id.startsWith('tab-inv-')) {
+            const el = document.getElementById('chart-' + t.id);
+            if (el) el._dirty = true;
+            delete CHART_DATA[t.id];
+          }
+        }
         updatePredChip(true);
         setActionStatus('Live: predictions updated', '#4caf82');
       }
@@ -495,7 +536,14 @@ function handleLiveEvent(msg) {
     case 'optimization_updated':
       if (msg.payload?.summary) {
         LAST_OPT = msg.payload;
-        if (msg.payload.charts) renderCharts(msg.payload.charts);
+        const scopes = msg.payload.chart_scope || {};
+        if (scopes.prediction) PRED_CHART_SCOPE = scopes.prediction;
+        if (scopes.optimization) OPT_CHART_SCOPE = scopes.optimization;
+        for (const t of TABS) {
+          const el = document.getElementById('chart-' + t.id);
+          if (el) el._dirty = true;
+          delete CHART_DATA[t.id];
+        }
         updateOptChip(LAST_OPT);
         setActionStatus('Live: optimization updated', '#4caf82');
       }
@@ -608,10 +656,22 @@ async function triggerFetch() {
   BUSY = true; setSpinner(true); setActionStatus('Fetching predictions…', '#aaa');
   document.getElementById('btn-refresh').disabled = true;
   try {
-    const data = await apiFetch('/api/predictions/fetch', 'POST', { timezone: TZ });
-    renderCharts(data.charts);
+    const data = await apiFetch('/api/predictions/fetch', 'POST', {
+      timezone: TZ,
+      include_charts: false,
+    });
+    PRED_CHART_SCOPE = data.chart_scope || PRED_CHART_SCOPE;
+    for (const t of TABS) {
+      if (!t.id.startsWith('tab-inv-')) {
+        const el = document.getElementById('chart-' + t.id);
+        if (el) el._dirty = true;
+        delete CHART_DATA[t.id];
+      }
+    }
     updatePredChip(true);
     setActionStatus('Predictions updated ✓', '#4caf82');
+    const active = TABS.find(t => document.getElementById('pane-' + t.id)?.classList.contains('active'));
+    if (active) await loadChartForTab(active.id, true);
   } catch (e) {
     setActionStatus('✗ ' + e.message, '#e05050');
   } finally {
@@ -626,15 +686,29 @@ async function triggerOptimize() {
   BUSY = true; setSpinner(true); setActionStatus('Optimizing…', '#aaa');
   document.getElementById('btn-optimize').disabled = true;
   try {
-    const data = await apiFetch('/api/optimize', 'POST', { timezone: TZ });
+    const data = await apiFetch('/api/optimize', 'POST', {
+      timezone: TZ,
+      include_charts: false,
+      include_plans: false,
+    });
     LAST_OPT = data;
-    renderCharts(data.charts);
+    const scopes = data.chart_scope || {};
+    if (scopes.prediction) PRED_CHART_SCOPE = scopes.prediction;
+    if (scopes.optimization) OPT_CHART_SCOPE = scopes.optimization;
+    for (const t of TABS) {
+      const el = document.getElementById('chart-' + t.id);
+      if (el) el._dirty = true;
+      delete CHART_DATA[t.id];
+    }
     updateOptChip(data);
     setActionStatus(data.status || 'Optimization done ✓', '#4caf82');
 
     // Jump to first inverter tab
     const firstInv = TABS.find(t => t.id.startsWith('tab-inv-'));
-    if (firstInv) showTab(firstInv.id);
+    if (firstInv) {
+      showTab(firstInv.id);
+      await loadChartForTab(firstInv.id, true);
+    }
   } catch (e) {
     setActionStatus('✗ ' + e.message, '#e05050');
   } finally {
@@ -652,21 +726,33 @@ async function init() {
     buildInverterCards(CFG.inverters);
     buildTabs();
 
-    // Always fetch fresh predictions on page load so plots start from ~now
-    try {
-      setActionStatus('Fetching predictions…', '#aaa');
-      const predData = await apiFetch('/api/predictions/fetch', 'POST', { timezone: TZ });
-      renderCharts(predData.charts);
-      updatePredChip(true);
-      setActionStatus('Ready', '#7a7a7a');
-    } catch (e) {
-      setActionStatus('Prediction fetch failed: ' + e.message, '#f0a030');
-      updatePredChip(false);
-    }
-
     // Connect WebSocket – server hydrates optimization, inverters, MQTT and
     // scheduler status on connect (no extra HTTP round-trips needed).
     connectWebSocket();
+
+    // Give websocket hydration a short head-start. If charts are already
+    // present (cached optimization/predictions), skip the expensive cold fetch.
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    if (!HAS_ANY_CHART) {
+      try {
+        setActionStatus('Fetching predictions…', '#aaa');
+        const predData = await apiFetch('/api/predictions/fetch', 'POST', {
+          timezone: TZ,
+          include_charts: false,
+        });
+        PRED_CHART_SCOPE = predData.chart_scope || PRED_CHART_SCOPE;
+        const firstTab = TABS[0];
+        if (firstTab) await loadChartForTab(firstTab.id, true);
+        updatePredChip(true);
+        setActionStatus('Ready', '#7a7a7a');
+      } catch (e) {
+        setActionStatus('Prediction fetch failed: ' + e.message, '#f0a030');
+        updatePredChip(false);
+      }
+    } else {
+      updatePredChip(true);
+      setActionStatus('Ready (hydrated)', '#7a7a7a');
+    }
 
     // Backend liveness indicator (subtle navbar dot).
     await pollBackendStatus();

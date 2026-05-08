@@ -622,45 +622,75 @@ class Prediction:
 
         zeros = np.zeros(n, dtype=np.float32)
 
-        eprice = await _safe(
-            self.setup.electricprice.fetch(internet_ts)
-            if self.setup.electricprice
-            else _return(zeros),
-            getattr(self.setup.electricprice, "provider_id", "electricprice"),
-            zeros.copy(),
+        eprice_task = asyncio.create_task(
+            _safe(
+                self.setup.electricprice.fetch(internet_ts)
+                if self.setup.electricprice
+                else _return(zeros),
+                getattr(self.setup.electricprice, "provider_id", "electricprice"),
+                zeros.copy(),
+            )
         )
-        ftariff = await _safe(
-            self.setup.feedintariff.fetch(internet_ts)
-            if self.setup.feedintariff
-            else _return(zeros),
-            getattr(self.setup.feedintariff, "provider_id", "feedintariff"),
-            zeros.copy(),
+        ftariff_task = asyncio.create_task(
+            _safe(
+                self.setup.feedintariff.fetch(internet_ts)
+                if self.setup.feedintariff
+                else _return(zeros),
+                getattr(self.setup.feedintariff, "provider_id", "feedintariff"),
+                zeros.copy(),
+            )
         )
-        load_wh = await _safe(
-            self.setup.load.fetch(timestamps) if self.setup.load else _return(zeros),
-            getattr(self.setup.load, "provider_id", "load"),
-            zeros.copy(),
+        load_task = asyncio.create_task(
+            _safe(
+                self.setup.load.fetch(timestamps) if self.setup.load else _return(zeros),
+                getattr(self.setup.load, "provider_id", "load"),
+                zeros.copy(),
+            )
         )
 
         pv_names = list(self.setup.pv)
+        pv_tasks = {
+            name: asyncio.create_task(
+                _safe(
+                    self.setup.pv[name].fetch_by_inverter(internet_ts),
+                    self.setup.pv[name].provider_id,
+                    None,
+                )
+            )
+            for name in pv_names
+        }
+
+        weather_task = (
+            asyncio.create_task(
+                _safe(
+                    self.setup.weather.fetch(internet_ts),
+                    self.setup.weather.provider_id,
+                    None,
+                )
+            )
+            if self.setup.weather
+            else None
+        )
+
+        awaitables = [eprice_task, ftariff_task, load_task, *pv_tasks.values()]
+        if weather_task is not None:
+            awaitables.append(weather_task)
+        await asyncio.gather(*awaitables)
+
+        eprice = eprice_task.result()
+        ftariff = ftariff_task.result()
+        load_wh = load_task.result()
+
         pv_arrays: dict[str, np.ndarray] = {}
         for name in pv_names:
-            result = await _safe(
-                self.setup.pv[name].fetch_by_inverter(internet_ts),
-                self.setup.pv[name].provider_id,
-                None,
-            )
+            result = pv_tasks[name].result()
             if result is not None and isinstance(result, Mapping):
                 for inv_id, arr in result.items():
                     pv_arrays[str(inv_id)] = np.asarray(arr, dtype=np.float32)
 
         weather_dict: dict[str, np.ndarray] | None = None
-        if self.setup.weather:
-            wraw = await _safe(
-                self.setup.weather.fetch(internet_ts),
-                self.setup.weather.provider_id,
-                None,
-            )
+        if weather_task is not None:
+            wraw = weather_task.result()
             if wraw is not None and isinstance(wraw, Mapping):
                 weather_dict = {str(k): np.asarray(v, dtype=np.float32) for k, v in wraw.items()}
 

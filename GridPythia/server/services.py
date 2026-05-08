@@ -8,11 +8,12 @@ module rather than embedding logic inline.
 from __future__ import annotations
 
 import bisect
+import hashlib
 import json
 from datetime import datetime, timezone
 from math import floor
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 import yaml
@@ -38,6 +39,116 @@ logger = get_logger(__name__)
 _MODE_NAMES: dict[int, str] = {m.value: m.name for m in InverterMode}
 
 
+def _json_hash(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _inverter_config_signature(cfg: AppConfig) -> str:
+    payload = {
+        "inverters": [
+            {
+                "device_id": inv.device_id,
+                "battery_id": inv.battery_id,
+                "has_pv": inv.has_pv,
+                "max_out": float(inv.max_ac_output_power_w),
+                "max_ch": float(inv.max_ac_charge_power_w),
+                "zfi": bool(inv.zero_feed_in),
+            }
+            for inv in cfg.optimization.inverters
+        ]
+    }
+    return _json_hash(payload)
+
+
+def _series_signature(arr: np.ndarray | None) -> str:
+    if arr is None:
+        return "none"
+    if arr.size == 0:
+        return "empty"
+    a = np.asarray(arr, dtype=np.float64)
+    return f"{a.size}:{a[0]:.3f}:{a[-1]:.3f}:{float(np.sum(a)):.3f}"
+
+
+def prediction_chart_scope(
+    cfg: AppConfig,
+    pdata: PredictionData,
+    forecast_from: datetime | None,
+) -> str:
+    """Create a stable prediction chart scope key.
+
+    Key dimensions intentionally include horizon start, dt, forecast stamp and
+    inverter config. Lightweight numeric signatures are added to avoid false
+    cache hits when data changes without forecast stamp changes.
+    """
+    first_ts = pdata.timestamps[0].isoformat() if pdata.timestamps else "none"
+    last_ts = pdata.timestamps[-1].isoformat() if pdata.timestamps else "none"
+    pv_sig = {
+        inv_id: _series_signature(np.asarray(vals, dtype=np.float64))
+        for inv_id, vals in sorted(pdata.pv_by_inverter.items())
+    }
+    weather_sig = {
+        ch: _series_signature(np.asarray(vals, dtype=np.float64))
+        for ch, vals in sorted((pdata.weather_by_channel or {}).items())
+    }
+    payload = {
+        "kind": "prediction",
+        "horizon_start": first_ts,
+        "horizon_end": last_ts,
+        "dt_hours": float(pdata.dt_hours),
+        "forecast_stamp": forecast_from.isoformat() if forecast_from is not None else None,
+        "inverter_cfg": _inverter_config_signature(cfg),
+        "load": _series_signature(np.asarray(pdata.base_load_wh, dtype=np.float64)),
+        "elec": _series_signature(
+            None
+            if pdata.electricprice is None
+            else np.asarray(pdata.electricprice, dtype=np.float64)
+        ),
+        "feed": _series_signature(
+            None if pdata.feedintariff is None else np.asarray(pdata.feedintariff, dtype=np.float64)
+        ),
+        "pv": pv_sig,
+        "weather": weather_sig,
+    }
+    return _json_hash(payload)
+
+
+def optimization_chart_scope(
+    cfg: AppConfig,
+    pdata: PredictionData,
+    forecast_from: datetime | None,
+    solution: Any,
+) -> str:
+    """Create a stable optimization chart scope key."""
+    base = prediction_chart_scope(cfg, pdata, forecast_from)
+    payload = {
+        "kind": "optimization",
+        "prediction_scope": base,
+        "solver_status": getattr(solution, "solver_status", None),
+        "solve_time_s": round(float(getattr(solution, "solve_time_s", 0.0)), 3),
+    }
+    return _json_hash(payload)
+
+
+def _chart_cache_get(cache_key: str) -> dict[str, Any] | None:
+    cached = state.chart_cache.get(cache_key)
+    if cached is None:
+        return None
+    state.chart_cache.move_to_end(cache_key)
+    return cached
+
+
+def _chart_cache_put(cache_key: str, chart: dict[str, Any]) -> None:
+    state.chart_cache[cache_key] = chart
+    state.chart_cache.move_to_end(cache_key)
+    while len(state.chart_cache) > state.CHART_CACHE_MAX_ENTRIES:
+        state.chart_cache.popitem(last=False)
+
+
+def clear_chart_cache() -> None:
+    state.chart_cache.clear()
+
+
 # ── Config loader ─────────────────────────────────────────────────────────
 
 
@@ -55,12 +166,63 @@ def snap_to_dt_grid(dt: datetime, dt_hours: float) -> datetime:
 
 
 def load_config() -> tuple[AppConfig, dict[str, Any]]:
-    """Parse the YAML config file; return ``(AppConfig, raw_dict)``."""
+    """Parse the YAML config file with mtime cache; return ``(AppConfig, raw_dict)``."""
     path = state.config_path
     if not path.exists():
         raise FileNotFoundError(f"Config not found: {path}")
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+
+    if (
+        state.config_cache is not None
+        and state.config_cache_raw is not None
+        and state.config_cache_mtime == mtime
+    ):
+        return state.config_cache, state.config_cache_raw
+
+    old_mtime = state.config_cache_mtime
     raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    return AppConfig.from_dict(raw), raw
+    cfg = AppConfig.from_dict(raw)
+    state.config_cache = cfg
+    state.config_cache_raw = raw
+    state.config_cache_mtime = mtime
+    if old_mtime >= 0.0 and old_mtime != mtime:
+        clear_chart_cache()
+        state.latest_prediction_data = None
+        state.latest_prediction_forecast_from = None
+        state.latest_prediction_chart_scope = None
+        state.latest_optimization_solution = None
+        state.latest_optimization_optimizer = None
+        state.latest_optimization_fetch_pdata = None
+        state.latest_optimization_forecast_from = None
+        state.latest_optimization_chart_scope = None
+    return cfg, raw
+
+
+def _config_mtime_for_singletons() -> float:
+    """Return config mtime with cache fast-path to avoid repeated stat() calls."""
+    if state.config_cache is not None and state.config_cache_mtime >= 0.0:
+        return state.config_cache_mtime
+    try:
+        return state.config_path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def visible_prediction_tabs(cfg: AppConfig, raw_yaml: dict[str, Any]) -> list[str]:
+    """Return backend-authoritative prediction tabs that should be rendered."""
+    tabs: list[str] = []
+    if cfg.prediction.electricprice.provider != "Fixed":
+        tabs.append("tab-elecprice")
+    if cfg.prediction.feedintariff.provider != "Fixed":
+        tabs.append("tab-feedin")
+    tabs.append("tab-load")
+    tabs.append("tab-pv")
+    if "weather" in raw_yaml.get("prediction", {}):
+        tabs.append("tab-weather")
+    return tabs
 
 
 # ── Pure builder helpers ──────────────────────────────────────────────────
@@ -180,10 +342,7 @@ def get_providers(cfg: AppConfig, raw_yaml: dict[str, Any]) -> PredictionSetup:
     The singleton keeps the internal ``TimeBucketCache`` of ``ElecPriceEnergyCharts``
     alive across requests, avoiding redundant HTTP fetches.
     """
-    try:
-        mtime = state.config_path.stat().st_mtime
-    except OSError:
-        mtime = 0.0
+    mtime = _config_mtime_for_singletons()
     if state.providers is None or mtime != state.providers_config_mtime:
         state.providers = build_providers(cfg, raw_yaml, fresh_instances=True)
         state.providers_config_mtime = mtime
@@ -198,10 +357,7 @@ def get_optimizer(cfg: AppConfig) -> LinearOptimizer:
     structure is compiled once and only runtime Parameters (price arrays, SoC
     start values) are updated on each call to ``solve()``.
     """
-    try:
-        mtime = state.config_path.stat().st_mtime
-    except OSError:
-        mtime = 0.0
+    mtime = _config_mtime_for_singletons()
     if state.optimizer is None or mtime != state.optimizer_config_mtime:
         objective = (
             OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
@@ -302,6 +458,8 @@ def fig_to_dict(fig: Any) -> dict[str, Any]:
 def make_prediction_figures(
     pdata: PredictionData,
     forecast_from: datetime | None = None,
+    *,
+    visible_tabs: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Build Plotly figure dicts for all available prediction channels.
 
@@ -314,28 +472,88 @@ def make_prediction_figures(
     from GridPythia.prediction.plots.pvforecast import PVForecastPlotter  # noqa: PLC0415
     from GridPythia.prediction.plots.weather import WeatherPlotter  # noqa: PLC0415
 
+    allowed_tabs = set(visible_tabs) if visible_tabs is not None else None
     ts = pdata.timestamps
     figs: dict[str, Any] = {}
-    if pdata.electricprice is not None:
+    if pdata.electricprice is not None and (
+        allowed_tabs is None or "tab-elecprice" in allowed_tabs
+    ):
         figs["tab-elecprice"] = fig_to_dict(
             ElecPricePlotter().plot(pdata.electricprice, ts, forecast_from=forecast_from)
         )
-    if pdata.feedintariff is not None:
+    if pdata.feedintariff is not None and (allowed_tabs is None or "tab-feedin" in allowed_tabs):
         figs["tab-feedin"] = fig_to_dict(FeedInTariffPlotter().plot(pdata.feedintariff, ts))
-    figs["tab-load"] = fig_to_dict(
-        LoadPlotter().plot(
-            pdata.base_load_wh,
-            ts,
-            appliance_load_by_id=pdata.appliance_load_by_id,
+    if allowed_tabs is None or "tab-load" in allowed_tabs:
+        figs["tab-load"] = fig_to_dict(
+            LoadPlotter().plot(
+                pdata.base_load_wh,
+                ts,
+                appliance_load_by_id=pdata.appliance_load_by_id,
+            )
         )
-    )
-    if pdata.pv_by_inverter:
+    if pdata.pv_by_inverter and (allowed_tabs is None or "tab-pv" in allowed_tabs):
         figs["tab-pv"] = fig_to_dict(
             PVForecastPlotter().plot(pdata.pv_by_inverter, ts, dt_hours=pdata.dt_hours)
         )
-    if pdata.weather_by_channel:
+    if pdata.weather_by_channel and (allowed_tabs is None or "tab-weather" in allowed_tabs):
         figs["tab-weather"] = fig_to_dict(WeatherPlotter().plot(pdata.weather_by_channel, ts))
     return figs
+
+
+def make_prediction_figure_for_tab(
+    tab_id: str,
+    pdata: PredictionData,
+    forecast_from: datetime | None,
+) -> dict[str, Any] | None:
+    """Build a single prediction chart for lazy tab loading."""
+    charts = make_prediction_figures(
+        pdata,
+        forecast_from,
+        visible_tabs=[tab_id],
+    )
+    return charts.get(tab_id)
+
+
+def get_or_build_prediction_chart(
+    *,
+    tab_id: str,
+    cfg: AppConfig,
+    pdata: PredictionData,
+    forecast_from: datetime | None,
+    scope: str,
+) -> dict[str, Any] | None:
+    """Return prediction chart from cache or build/store it."""
+    cache_key = f"pred:{scope}:{tab_id}"
+    cached = _chart_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    built = make_prediction_figure_for_tab(tab_id, pdata, forecast_from)
+    if built is not None:
+        _chart_cache_put(cache_key, built)
+    return built
+
+
+def get_or_build_inverter_chart(
+    *,
+    tab_id: str,
+    solution: Any,
+    scope: str,
+) -> dict[str, Any] | None:
+    """Return inverter optimization chart from cache or build/store it."""
+    if not tab_id.startswith("tab-inv-"):
+        return None
+    cache_key = f"opt:{scope}:{tab_id}"
+    cached = _chart_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    inv_id = tab_id.removeprefix("tab-inv-")
+    from GridPythia.optimization.plots import SolutionPlotter  # noqa: PLC0415
+
+    fig = SolutionPlotter().plot_inverter(solution, inv_id)
+    built = fig_to_dict(fig)
+    _chart_cache_put(cache_key, built)
+    return built
 
 
 # ── Appliance load helpers ─────────────────────────────────────────────────
@@ -470,6 +688,8 @@ async def run_optimization_cycle(
     initial_modes_overrides: dict[str, int] | None = None,
     solver_opts_overrides: dict[str, Any] | None = None,
     validate_with_simulation: bool = True,
+    include_charts: bool = False,
+    include_plans: bool = False,
 ) -> dict[str, Any]:
     """Orchestrate a full optimization cycle including server-side effects.
 
@@ -506,7 +726,6 @@ async def run_optimization_cycle(
         Exception:     Prediction fetch or solver error (re-raised as-is).
     """
     # Lazy imports to avoid circular import at module level
-    from GridPythia.optimization.plots import SolutionPlotter  # noqa: PLC0415
     from GridPythia.optimization.runner import run_optimization  # noqa: PLC0415
     from GridPythia.optimization.solution import OptimizationObjective  # noqa: PLC0415
     from GridPythia.prediction.prediction import Prediction  # noqa: PLC0415
@@ -634,13 +853,34 @@ async def run_optimization_cycle(
     forecast_from: datetime | None = (
         setup.electricprice.last_real_ts if setup.electricprice is not None else None
     )
+    pred_scope = prediction_chart_scope(cfg, fetch_pdata, forecast_from)
+    opt_scope = optimization_chart_scope(cfg, fetch_pdata, forecast_from, solution)
+
+    state.latest_prediction_data = fetch_pdata
+    state.latest_prediction_forecast_from = forecast_from
+    state.latest_prediction_chart_scope = pred_scope
+    state.latest_optimization_solution = solution
+    state.latest_optimization_optimizer = optimizer
+    state.latest_optimization_fetch_pdata = fetch_pdata
+    state.latest_optimization_forecast_from = forecast_from
+    state.latest_optimization_chart_scope = opt_scope
+
     charts: dict[str, Any] = {}
-    charts.update(make_prediction_figures(fetch_pdata, forecast_from))
-    plotter = SolutionPlotter()
-    for inv in optimizer.inverters:
-        charts[f"tab-inv-{inv.device_id}"] = fig_to_dict(
-            plotter.plot_inverter(solution, inv.device_id)
+    if include_charts:
+        from GridPythia.optimization.plots import SolutionPlotter  # noqa: PLC0415
+
+        charts.update(
+            make_prediction_figures(
+                fetch_pdata,
+                forecast_from,
+                visible_tabs=visible_prediction_tabs(cfg, raw_yaml),
+            )
         )
+        plotter = SolutionPlotter()
+        for inv in optimizer.inverters:
+            charts[f"tab-inv-{inv.device_id}"] = fig_to_dict(
+                plotter.plot_inverter(solution, inv.device_id)
+            )
 
     # ── Savings vs. naive baseline ────────────────────────────────────
     import numpy as np  # noqa: PLC0415
@@ -700,15 +940,30 @@ async def run_optimization_cycle(
 
     response_data: dict[str, Any] = {
         "summary": summary.model_dump(),
-        "inverter_plans": [p.model_dump() for p in inverter_plans],
-        "charts": charts,
+        "chart_scope": {
+            "prediction": pred_scope,
+            "optimization": opt_scope,
+        },
         "status": status,
     }
+    if include_plans:
+        response_data["inverter_plans"] = [p.model_dump() for p in inverter_plans]
+    if include_charts:
+        response_data["charts"] = charts
 
     # ── Cache + broadcast + MQTT ──────────────────────────────────────
     set_cached_solution(response_data)
 
-    await state.ws_hub.broadcast({"type": "optimization_updated", "payload": response_data})
+    await state.ws_hub.broadcast(
+        {
+            "type": "optimization_updated",
+            "payload": {
+                "summary": response_data["summary"],
+                "chart_scope": response_data["chart_scope"],
+                "status": response_data["status"],
+            },
+        }
+    )
 
     if state.mqtt_gateway is not None:
         state.mqtt_gateway.publish_plans(

@@ -13,6 +13,10 @@ class FetchRequest(BaseModel):
     """Request body for ``POST /api/predictions/fetch``."""
 
     timezone: str = Field("UTC", description="IANA timezone name for the forecast start time")
+    include_charts: bool = Field(
+        False,
+        description="Include full Plotly charts in response (legacy/heavy mode).",
+    )
 
 
 class InverterStatusRequest(BaseModel):
@@ -71,6 +75,14 @@ class OptimizeRequest(BaseModel):
             "Merged on top of the config-level solver_opts. "
             'Example: {"time_limit": 10, "mip_rel_gap": 0.05}.'
         ),
+    )
+    include_charts: bool = Field(
+        False,
+        description="Include full Plotly charts in response (legacy/heavy mode).",
+    )
+    include_plans: bool = Field(
+        False,
+        description="Include full inverter plans in response.",
     )
 
 

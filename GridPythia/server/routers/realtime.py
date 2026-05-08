@@ -27,7 +27,11 @@ async def dashboard_ws(websocket: WebSocket) -> None:
             await websocket.send_json(
                 {
                     "type": "optimization_updated",
-                    "payload": cached_solution,
+                    "payload": {
+                        "summary": cached_solution.get("summary"),
+                        "status": cached_solution.get("status"),
+                        "chart_scope": cached_solution.get("chart_scope"),
+                    },
                 }
             )
 
