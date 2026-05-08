@@ -69,12 +69,12 @@ from GridPythia.simulation.grid_simulation import GridSimulation, SimulationResu
 
 logger = get_logger(__name__)
 
-
+# Do not change these defaults without benchmarking the impact on solve time and solution quality on arm7 targets.
 _DEFAULT_HIGHS_OPTS = {
     "verbose": False,
     "warm_start": True,
     "time_limit": 30,
-    "mip_rel_gap": 0.03,
+    "mip_rel_gap": 0.01,
     "presolve": "on",
     "mip_lp_solver": "ipm",
     "mip_heuristic_effort": 0.05,
