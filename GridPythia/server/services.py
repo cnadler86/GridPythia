@@ -80,9 +80,21 @@ def prediction_chart_scope(
     Key dimensions intentionally include horizon start, dt, forecast stamp and
     inverter config. Lightweight numeric signatures are added to avoid false
     cache hits when data changes without forecast stamp changes.
+
+    Timestamps are rounded to the configured prediction grid (dt_hours) to
+    improve cache stability and keep scope semantics aligned with slot size.
     """
-    first_ts = pdata.timestamps[0].isoformat() if pdata.timestamps else "none"
-    last_ts = pdata.timestamps[-1].isoformat() if pdata.timestamps else "none"
+
+    # Round timestamps to prediction-slot boundaries for stable scope.
+    def round_to_grid(ts: datetime, dt_hours: float) -> str:
+        epoch = ts.timestamp()
+        step_s = max(1.0, float(dt_hours) * 3600.0)
+        rounded_epoch = floor(epoch / step_s) * step_s
+        rounded_ts = datetime.fromtimestamp(rounded_epoch, tz=ts.tzinfo)
+        return rounded_ts.isoformat()
+
+    first_ts = round_to_grid(pdata.timestamps[0], pdata.dt_hours) if pdata.timestamps else "none"
+    last_ts = round_to_grid(pdata.timestamps[-1], pdata.dt_hours) if pdata.timestamps else "none"
     pv_sig = {
         inv_id: _series_signature(np.asarray(vals, dtype=np.float64))
         for inv_id, vals in sorted(pdata.pv_by_inverter.items())
@@ -149,6 +161,59 @@ def clear_chart_cache() -> None:
     state.chart_cache.clear()
 
 
+# ── Prediction result cache ──────────────────────────────────────────────
+
+
+def _prediction_cache_key(start_ts: datetime, cfg_mtime: float) -> str:
+    """Generate cache key for prediction result based on start timestamp and config.
+
+    Uses slot-aligned timestamp so requests within the same slot reuse cached data.
+    """
+    # Use ISO format for stable string representation
+    slot_str = start_ts.isoformat()
+    cfg_hash = str(int(cfg_mtime * 1000))  # Convert mtime to stable string
+    return f"pred:{slot_str}:{cfg_hash}"
+
+
+def _prediction_cache_get(cache_key: str) -> dict[str, Any] | None:
+    """Get cached prediction result if fresh, else None."""
+    cached = state.prediction_result_cache.get(cache_key)
+    if cached is None:
+        return None
+
+    # Check TTL
+    cache_ts = state.prediction_result_cache_ts.get(cache_key)
+    if cache_ts is None:
+        return None
+
+    age = (datetime.now(timezone.utc) - cache_ts).total_seconds()
+    if age >= state.PREDICTION_CACHE_TTL_S:
+        return None
+
+    # Move to end (LRU behavior)
+    state.prediction_result_cache.move_to_end(cache_key)
+    return cached
+
+
+def _prediction_cache_put(cache_key: str, result: dict[str, Any]) -> None:
+    """Store prediction result and prune cache if needed."""
+    state.prediction_result_cache[cache_key] = result
+    state.prediction_result_cache_ts[cache_key] = datetime.now(timezone.utc)
+    state.prediction_result_cache.move_to_end(cache_key)
+
+    # Prune oldest entries if cache is full
+    while len(state.prediction_result_cache) > state.PREDICTION_CACHE_MAX_ENTRIES:
+        old_key = next(iter(state.prediction_result_cache))
+        state.prediction_result_cache.pop(old_key, None)
+        state.prediction_result_cache_ts.pop(old_key, None)
+
+
+def clear_prediction_cache() -> None:
+    """Invalidate prediction result cache (called on config change)."""
+    state.prediction_result_cache.clear()
+    state.prediction_result_cache_ts.clear()
+
+
 # ── Config loader ─────────────────────────────────────────────────────────
 
 
@@ -190,6 +255,7 @@ def load_config() -> tuple[AppConfig, dict[str, Any]]:
     state.config_cache_mtime = mtime
     if old_mtime >= 0.0 and old_mtime != mtime:
         clear_chart_cache()
+        clear_prediction_cache()
         state.latest_prediction_data = None
         state.latest_prediction_forecast_from = None
         state.latest_prediction_chart_scope = None

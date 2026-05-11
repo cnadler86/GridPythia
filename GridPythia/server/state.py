@@ -84,6 +84,16 @@ SOLUTION_CACHE_TTL_S: float = 3600.0  # 1 hour
 CHART_CACHE_MAX_ENTRIES: int = 16
 chart_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 
+# ── Prediction result cache (PredictionData + errors) ────────────────────
+# Caches fetch results by timestamp slot to avoid redundant HTTP calls.
+# Key format: "pred:<slot_timestamp>:<config_hash>"
+# Avoids network fetches when the same slot is requested within TTL window.
+PREDICTION_CACHE_MAX_ENTRIES: int = 8  # Keep RSS low on memory-constrained targets
+PREDICTION_CACHE_TTL_S: float = 900.0  # 15 minutes
+prediction_result_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+prediction_result_cache_ts: dict[str, datetime] = {}
+prediction_result_cache_config_mtime: float = 0.0
+
 # ── Latest prediction snapshot for lazy tab chart rendering ───────────────
 latest_prediction_data: "PredictionData | None" = None
 latest_prediction_forecast_from: datetime | None = None
