@@ -2,7 +2,32 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 from pydantic import BaseModel, Field
+
+
+class UpdateMode(str, Enum):
+    """Auto-update policy."""
+
+    OFF = "off"
+    RELEASE = "release"
+    MASTER = "master"
+
+
+class UpdateConfig(BaseModel):
+    """Auto-update settings."""
+
+    model_config = {"frozen": True}
+
+    mode: UpdateMode = UpdateMode.OFF
+    """Update policy: off | release | master."""
+
+    branch: str = "master"
+    """Remote branch to track when mode=master."""
+
+    remote: str = "origin"
+    """Name of the git remote."""
 
 
 class MqttConfig(BaseModel):
@@ -89,3 +114,5 @@ class ServerConfig(BaseModel):
     )
     mqtt: MqttConfig = Field(default_factory=MqttConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    update: UpdateConfig = Field(default_factory=UpdateConfig)
+    """Auto-update settings.  Disabled by default (mode=off)."""

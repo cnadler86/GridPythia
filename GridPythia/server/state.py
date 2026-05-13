@@ -121,6 +121,13 @@ appliance_forecasts: dict[str, list[dict]] = {}
 # Keys: dispatch_slot (ISO str), run_at (ISO str), lead_s (float).
 scheduler_next_info: "dict | None" = None
 
+# ── Auto-updater ──────────────────────────────────────────────────────────
+# Created by create_app() when update.mode != off; None otherwise.
+if TYPE_CHECKING:
+    from GridPythia.services.updater import AutoUpdater
+
+auto_updater: "AutoUpdater | None" = None
+
 
 class DashboardWebSocketHub:
     """Track dashboard websocket clients and broadcast JSON events."""

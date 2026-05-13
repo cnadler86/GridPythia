@@ -72,6 +72,22 @@ def create_app(config_path: Path) -> FastAPI:
     """
     state.config_path = config_path
 
+    # Initialise auto-updater from config (if enabled).
+    try:
+        cfg, _ = services.load_config()
+        update_cfg = cfg.server.update
+        from GridPythia.config.server import UpdateMode  # noqa: PLC0415
+        from GridPythia.services.updater import AutoUpdater  # noqa: PLC0415
+
+        if update_cfg.mode is not UpdateMode.OFF:
+            state.auto_updater = AutoUpdater(
+                mode=update_cfg.mode,
+                branch=update_cfg.branch,
+                remote=update_cfg.remote,
+            )
+    except Exception:
+        pass  # Updater is purely optional; startup must not be blocked.
+
     app = FastAPI(
         title="GridPythia API",
         description=(

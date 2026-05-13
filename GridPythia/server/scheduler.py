@@ -245,6 +245,13 @@ async def run_scheduler() -> None:
                 completed_at=completed_at.isoformat(),
                 publish_lateness_s=round(publish_lateness_s, 2),
             )
+
+            # Check for auto-update after each successful plan publish (once/day).
+            if state.auto_updater is not None:
+                try:
+                    await state.auto_updater.check_and_update()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("scheduler_update_check_failed", error=str(exc))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001

@@ -412,7 +412,7 @@ def get_providers(cfg: AppConfig, raw_yaml: dict[str, Any]) -> PredictionSetup:
     if state.providers is None or mtime != state.providers_config_mtime:
         state.providers = build_providers(cfg, raw_yaml, fresh_instances=True)
         state.providers_config_mtime = mtime
-        logger.info("providers_rebuilt")
+        logger.info("providers_rebuilt", config_path=str(state.config_path))
     return state.providers
 
 
@@ -438,7 +438,7 @@ def get_optimizer(cfg: AppConfig) -> LinearOptimizer:
         state.optimizer_config_mtime = mtime
         # Sync coordinator max-age from server config
         state.coordinator._max_age_s = cfg.server.inverter_status_max_age_s
-        logger.info("optimizer_rebuilt")
+        logger.info("optimizer_rebuilt", objective=cfg.optimization.solver.objective)
     return state.optimizer
 
 
