@@ -122,6 +122,9 @@ class AutoUpdater:
             logger.warning("updater_fetch_failed", error=str(exc))
             return False
 
+        if not self._is_on_expected_branch(repo):
+            return False
+
         has_update, ref = self._detect_update(repo)
         if not has_update:
             logger.info("updater_no_update", mode=self.mode.value)
@@ -153,6 +156,36 @@ class AutoUpdater:
 
     def _do_fetch(self, repo) -> None:
         repo.remotes[self._remote].fetch(tags=True)
+
+    def _is_on_expected_branch(self, repo) -> bool:
+        """Return True if it is safe to apply an update.
+
+        In ``master`` mode the local branch must match ``self._branch``.
+        In ``release`` mode the HEAD must either be on ``self._branch`` or
+        in a detached state (i.e. already sitting on a release tag).
+        Any other branch indicates the repo has been manually switched to a
+        development or feature branch – do not touch it.
+        """
+        try:
+            active = repo.active_branch.name
+        except TypeError:
+            # Detached HEAD – acceptable for release mode, not for master.
+            if self.mode is UpdateMode.MASTER:
+                logger.warning(
+                    "updater_head_detached_expected_branch",
+                    expected=self._branch,
+                )
+                return False
+            return True  # detached HEAD on a tag is fine for release mode
+
+        if active != self._branch:
+            logger.warning(
+                "updater_branch_mismatch",
+                current=active,
+                expected=self._branch,
+            )
+            return False
+        return True
 
     def _detect_update(self, repo) -> tuple[bool, str]:
         if self.mode is UpdateMode.RELEASE:
