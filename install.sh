@@ -81,7 +81,40 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
     exit 1
 fi
 
-# ── Locate Python (prefer venv) ───────────────────────────────────────────────
+# ── Ensure uv is available ────────────────────────────────────────────────────
+echo ""
+echo "======================================================================="
+echo "  Checking for uv"
+echo "======================================================================="
+
+UV_BIN="$(command -v uv 2>/dev/null || true)"
+if [[ -z "$UV_BIN" ]]; then
+    warn "uv not found – installing via official installer to /usr/local/bin …"
+    if ! command -v curl &>/dev/null; then
+        err "curl is required to install uv. Run: apt-get install curl"
+        exit 1
+    fi
+    curl -LsSf https://astral.sh/uv/install.sh \
+        | env UV_INSTALL_DIR=/usr/local/bin sh
+    UV_BIN="$(command -v uv 2>/dev/null || true)"
+    if [[ -z "$UV_BIN" ]]; then
+        err "uv installation failed. Install manually: https://docs.astral.sh/uv/getting-started/installation/"
+        exit 1
+    fi
+    ok "uv installed: $UV_BIN ($("$UV_BIN" --version))"
+else
+    ok "uv found: $UV_BIN ($("$UV_BIN" --version))"
+fi
+
+# ── Create venv if missing ────────────────────────────────────────────────────
+if [[ ! -d "${SCRIPT_DIR}/.venv" ]]; then
+    warn ".venv not found – creating virtual environment and installing dependencies …"
+    sudo -u "$REAL_USER" "$UV_BIN" venv "${SCRIPT_DIR}/.venv"
+    sudo -u "$REAL_USER" "$UV_BIN" sync --no-dev --project "${SCRIPT_DIR}"
+    ok "Virtual environment created and dependencies installed"
+fi
+
+# ── Locate Python ─────────────────────────────────────────────────────────────
 PYTHON_BIN=""
 for candidate in \
     "${SCRIPT_DIR}/.venv/bin/python3" \
@@ -95,8 +128,6 @@ done
 
 if [[ -z "$PYTHON_BIN" ]]; then
     err "Python3 executable not found."
-    echo "  Create a venv first:"
-    echo "    python3 -m venv .venv && .venv/bin/pip install -e ."
     exit 1
 fi
 
@@ -260,7 +291,7 @@ else
     journalctl -u "$SERVICE_NAME" -n 40 --no-pager
     echo ""
     echo "  Common causes:"
-    echo "    - venv missing or incomplete  →  python3 -m venv .venv && .venv/bin/pip install -e ."
+    echo "    - venv missing or incomplete  →  uv sync --no-dev"
     echo "    - Missing solver library      →  apt-get install libatomic1  (on ARM)"
     echo "    - Config error in $CONFIG_PATH"
     echo ""
