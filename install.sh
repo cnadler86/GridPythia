@@ -1,19 +1,29 @@
-#!/bin/bash
+﻿#!/bin/bash
 #
 # GridPythia – Service Installation Script
 #
+# Clones the repository to /opt/gridpythia (or a custom directory) and
+# installs a systemd service that starts automatically on boot.
+#
 # Usage: sudo ./install.sh [OPTIONS]
 #
-# Options:
-#   -H, --host    HOST   Bind address for the web UI  (default: 0.0.0.0)
-#   -p, --port    PORT   Web UI TCP port              (default: 8080)
-#   -c, --config  PATH   Path to config.yaml          (default: <install-dir>/config.yaml)
+# Source selection (mutually exclusive; defaults to the branch of this script):
+#       --branch  BRANCH   Git branch to check out        (default: auto-detect)
+#       --tag     TAG      Release tag to check out        (e.g. v1.2.3)
+#       --repo    URL      Repository URL                  (default: https://github.com/cnadler86/EOS2.git)
+#       --install-dir DIR  Install destination             (default: /opt/gridpythia)
+#
+# Runtime:
+#   -H, --host    HOST   Bind address for the web UI      (default: 0.0.0.0)
+#   -p, --port    PORT   Web UI TCP port                  (default: 8080)
+#   -c, --config  PATH   Path to config.yaml              (default: <install-dir>/config.yaml)
 #   -h, --help           Show this help message and exit
 #
 # Examples:
 #   sudo ./install.sh
-#   sudo ./install.sh --host 0.0.0.0 --port 8080
-#   sudo ./install.sh --config /etc/gridpythia/config.yaml
+#   sudo ./install.sh --branch master --host 0.0.0.0 --port 8080
+#   sudo ./install.sh --tag v1.2.3
+#   sudo ./install.sh --branch feat/new --install-dir /srv/gridpythia
 #
 
 set -euo pipefail
@@ -29,27 +39,55 @@ SERVICE_NAME="gridpythia"
 SERVICE_FILE="${SERVICE_NAME}.service"
 SERVICE_USER="gridpythia"
 SERVICE_GROUP="pythia"
+DEFAULT_REPO="https://github.com/cnadler86/EOS2.git"
+DEFAULT_INSTALL_DIR="/opt/gridpythia"
+
+# Auto-detect current branch from the directory this script lives in
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_detected_branch=""
+if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree &>/dev/null 2>&1; then
+    _detected_branch="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    [[ "$_detected_branch" == "HEAD" ]] && _detected_branch=""
+fi
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
+REPO_URL="$DEFAULT_REPO"
+INSTALL_DIR="$DEFAULT_INSTALL_DIR"
+REF_BRANCH="${_detected_branch}"
+REF_TAG=""
 HOST="0.0.0.0"
 PORT="8080"
-CONFIG_PATH=""   # resolved to <SCRIPT_DIR>/config.yaml below
+CONFIG_PATH=""   # resolved to <INSTALL_DIR>/config.yaml after clone
+YES=false
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 usage() {
-    grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -25
+    grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -30
     exit 0
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -H|--host)    HOST="$2";        shift 2 ;;
-        -p|--port)    PORT="$2";        shift 2 ;;
-        -c|--config)  CONFIG_PATH="$2"; shift 2 ;;
-        -h|--help)    usage ;;
+        --branch)      REF_BRANCH="$2"; REF_TAG="";    shift 2 ;;
+        --tag)         REF_TAG="$2";    REF_BRANCH=""; shift 2 ;;
+        --repo)        REPO_URL="$2";                   shift 2 ;;
+        --install-dir) INSTALL_DIR="$2";                shift 2 ;;
+        -H|--host)     HOST="$2";                       shift 2 ;;
+        -p|--port)     PORT="$2";                       shift 2 ;;
+        -c|--config)   CONFIG_PATH="$2";                shift 2 ;;
+        -y|--yes)      YES=true;                        shift   ;;
+        -h|--help)     usage ;;
         *) err "Unknown option: $1"; echo "Run with --help for usage."; exit 1 ;;
     esac
 done
+
+if [[ -n "$REF_TAG" ]]; then
+    REF_DESC="tag: $REF_TAG"
+elif [[ -n "$REF_BRANCH" ]]; then
+    REF_DESC="branch: $REF_BRANCH"
+else
+    REF_DESC="(remote default branch)"
+fi
 
 # ── Must run as root (via sudo) ───────────────────────────────────────────────
 echo "======================================================================="
@@ -68,18 +106,6 @@ if [[ -z "${SUDO_USER:-}" ]]; then
 fi
 
 REAL_USER="$SUDO_USER"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Resolve config path (default: config.yaml inside project directory)
-if [[ -z "$CONFIG_PATH" ]]; then
-    CONFIG_PATH="${SCRIPT_DIR}/config.yaml"
-fi
-
-if [[ ! -f "$CONFIG_PATH" ]]; then
-    err "Config file not found: $CONFIG_PATH"
-    echo "  Provide --config <path> or ensure config.yaml exists in the project directory."
-    exit 1
-fi
 
 # ── Ensure uv is available ────────────────────────────────────────────────────
 echo ""
@@ -106,48 +132,33 @@ else
     ok "uv found: $UV_BIN ($("$UV_BIN" --version))"
 fi
 
-# ── Create venv if missing ────────────────────────────────────────────────────
-if [[ ! -d "${SCRIPT_DIR}/.venv" ]]; then
-    warn ".venv not found – creating virtual environment and installing dependencies …"
-    sudo -u "$REAL_USER" "$UV_BIN" venv "${SCRIPT_DIR}/.venv"
-    sudo -u "$REAL_USER" "$UV_BIN" sync --no-dev --project "${SCRIPT_DIR}"
-    ok "Virtual environment created and dependencies installed"
-fi
-
-# ── Locate Python ─────────────────────────────────────────────────────────────
-PYTHON_BIN=""
-for candidate in \
-    "${SCRIPT_DIR}/.venv/bin/python3" \
-    "${SCRIPT_DIR}/venv/bin/python3" \
-    "$(command -v python3 2>/dev/null || true)"; do
-    if [[ -x "$candidate" ]]; then
-        PYTHON_BIN="$candidate"
-        break
-    fi
-done
-
-if [[ -z "$PYTHON_BIN" ]]; then
-    err "Python3 executable not found."
+if ! command -v git &>/dev/null; then
+    err "git is required. Run: apt-get install git"
     exit 1
 fi
 
-PYTHON_VERSION=$("$PYTHON_BIN" --version 2>&1)
-EXTRA_ARGS="--host ${HOST} --port ${PORT} --config ${CONFIG_PATH}"
-
 # ── Summary ───────────────────────────────────────────────────────────────────
+# Resolve config path (default: config.yaml inside install dir; evaluated after clone)
+RESOLVED_CONFIG="${CONFIG_PATH:-${INSTALL_DIR}/config.yaml}"
+EXTRA_ARGS="--host ${HOST} --port ${PORT} --config ${RESOLVED_CONFIG}"
+
 echo ""
-echo "  Install directory   : $SCRIPT_DIR"
+echo "  Repository          : $REPO_URL"
+echo "  Ref                 : $REF_DESC"
+echo "  Install directory   : $INSTALL_DIR"
 echo "  Service user/group  : $SERVICE_USER / $SERVICE_GROUP"
 echo "  Installing user     : $REAL_USER"
-echo "  Python              : $PYTHON_VERSION"
-echo "                        $PYTHON_BIN"
 echo "  Bind address        : $HOST:$PORT"
-echo "  Config file         : $CONFIG_PATH"
+echo "  Config file         : $RESOLVED_CONFIG"
 echo ""
 
-read -rp "Continue with installation? (y/N) " REPLY
-echo
-[[ "$REPLY" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+if [[ "${YES:-false}" == "true" ]]; then
+    echo "(auto-accepted)"
+else
+    read -rp "Continue with installation? (y/N) " REPLY
+    echo
+    [[ "$REPLY" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+fi
 
 # ── Create group and service user ─────────────────────────────────────────────
 echo ""
@@ -175,7 +186,6 @@ else
     warn "User '$SERVICE_USER' already exists – skipping"
 fi
 
-# Add the installer to the pythia group so they can still edit project files
 if ! id -nG "$REAL_USER" 2>/dev/null | grep -qw "$SERVICE_GROUP"; then
     usermod -aG "$SERVICE_GROUP" "$REAL_USER"
     ok "Added $REAL_USER to group $SERVICE_GROUP"
@@ -184,38 +194,97 @@ else
     warn "$REAL_USER is already a member of $SERVICE_GROUP"
 fi
 
+# ── Clone / update repository ─────────────────────────────────────────────────
+echo ""
+echo "======================================================================="
+echo "  Setting up repository at $INSTALL_DIR"
+echo "======================================================================="
+
+if [[ -d "$INSTALL_DIR/.git" ]]; then
+    warn "Repository already exists at $INSTALL_DIR – updating instead of cloning"
+    git -C "$INSTALL_DIR" config --local safe.directory "$INSTALL_DIR"
+    git -C "$INSTALL_DIR" fetch --tags origin
+    ok "Fetched latest refs from origin"
+    if [[ -n "$REF_TAG" ]]; then
+        git -C "$INSTALL_DIR" checkout "$REF_TAG"
+        ok "Checked out tag: $REF_TAG"
+    elif [[ -n "$REF_BRANCH" ]]; then
+        git -C "$INSTALL_DIR" checkout "$REF_BRANCH"
+        git -C "$INSTALL_DIR" reset --hard "origin/$REF_BRANCH"
+        ok "Updated to latest commit on branch: $REF_BRANCH"
+    else
+        git -C "$INSTALL_DIR" pull
+        ok "Pulled latest changes"
+    fi
+else
+    CLONE_ARGS=(--depth 1)
+    if [[ -n "$REF_TAG" ]]; then
+        CLONE_ARGS+=(--branch "$REF_TAG")
+    elif [[ -n "$REF_BRANCH" ]]; then
+        CLONE_ARGS+=(--branch "$REF_BRANCH")
+    fi
+    mkdir -p "$(dirname "$INSTALL_DIR")"
+    git clone -c credential.helper= "${CLONE_ARGS[@]}" "$REPO_URL" "$INSTALL_DIR"
+    ok "Cloned $REPO_URL → $INSTALL_DIR ($REF_DESC)"
+fi
+
+# Verify config file (may be external)
+if [[ ! -f "$RESOLVED_CONFIG" ]]; then
+    err "Config file not found: $RESOLVED_CONFIG"
+    echo "  Provide --config <path> or ensure config.yaml exists in the install directory."
+    exit 1
+fi
+
 # ── File ownership and permissions ────────────────────────────────────────────
 echo ""
 echo "======================================================================="
 echo "  Setting file ownership and permissions"
 echo "======================================================================="
 
-chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$SCRIPT_DIR"
+chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$INSTALL_DIR"
 ok "Ownership set to ${SERVICE_USER}:${SERVICE_GROUP}"
 
-# Directories: rwxrwsr-x (setgid so new files inherit the group)
-find "$SCRIPT_DIR" -type d -exec chmod 2775 {} \;
+find "$INSTALL_DIR" -type d -exec chmod 2775 {} \;
 ok "Directories: 2775 (rwxrwsr-x)"
 
-# Files: use capital X – preserves existing execute bits (venv bins, .so libs)
-chmod -R u=rwX,g=rwX,o=rX "$SCRIPT_DIR"
+chmod -R u=rwX,g=rwX,o=rX "$INSTALL_DIR"
 ok "Files: owner/group rw, others r (execute bits preserved)"
 
-# Ensure install/uninstall scripts are executable
-[[ -f "$SCRIPT_DIR/install.sh" ]]   && chmod 775 "$SCRIPT_DIR/install.sh"
-[[ -f "$SCRIPT_DIR/uninstall.sh" ]] && chmod 775 "$SCRIPT_DIR/uninstall.sh"
+[[ -f "$INSTALL_DIR/install.sh" ]]   && chmod 775 "$INSTALL_DIR/install.sh"
+[[ -f "$INSTALL_DIR/uninstall.sh" ]] && chmod 775 "$INSTALL_DIR/uninstall.sh"
 
-# If config lives outside the project dir, grant service user read access
-if [[ "$CONFIG_PATH" != "$SCRIPT_DIR"* ]]; then
-    chown "${SERVICE_USER}:${SERVICE_GROUP}" "$CONFIG_PATH"
-    chmod 640 "$CONFIG_PATH"
-    ok "Config file ownership set: $CONFIG_PATH"
+# If config lives outside the install dir, grant service user read access
+if [[ "$RESOLVED_CONFIG" != "$INSTALL_DIR"* ]]; then
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "$RESOLVED_CONFIG"
+    chmod 640 "$RESOLVED_CONFIG"
+    ok "Config file ownership set: $RESOLVED_CONFIG"
 fi
 
-# Allow git operations in this directory for the real user
-sudo -u "$REAL_USER" git -C "$SCRIPT_DIR" config --local safe.directory "$SCRIPT_DIR" 2>/dev/null \
+git -C "$INSTALL_DIR" config --local safe.directory "$INSTALL_DIR" 2>/dev/null || true
+sudo -u "$REAL_USER" git -C "$INSTALL_DIR" config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null \
     && ok "git safe.directory configured for $REAL_USER" \
-    || warn "git safe.directory skipped (not a git repo?)"
+    || warn "git safe.directory skipped for $REAL_USER"
+
+# ── Install / sync Python dependencies ────────────────────────────────────────
+echo ""
+echo "======================================================================="
+echo "  Installing Python dependencies (uv sync --no-dev)"
+echo "======================================================================="
+
+runuser -u "$SERVICE_USER" -- "$UV_BIN" sync --no-dev --project "$INSTALL_DIR"
+ok "Dependencies installed into $INSTALL_DIR/.venv"
+
+# Re-fix permissions after uv sync
+chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$INSTALL_DIR"
+chmod -R u=rwX,g=rwX,o=rX "$INSTALL_DIR"
+
+PYTHON_BIN="${INSTALL_DIR}/.venv/bin/python3"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+    err "Python binary not found at $PYTHON_BIN after uv sync."
+    exit 1
+fi
+PYTHON_VERSION=$("$PYTHON_BIN" --version 2>&1)
+ok "Python: $PYTHON_VERSION ($PYTHON_BIN)"
 
 # ── Install systemd service ───────────────────────────────────────────────────
 echo ""
@@ -223,12 +292,11 @@ echo "======================================================================="
 echo "  Installing systemd service"
 echo "======================================================================="
 
-if [[ ! -f "$SCRIPT_DIR/$SERVICE_FILE" ]]; then
-    err "Service template not found: $SCRIPT_DIR/$SERVICE_FILE"
+if [[ ! -f "$INSTALL_DIR/$SERVICE_FILE" ]]; then
+    err "Service template not found: $INSTALL_DIR/$SERVICE_FILE"
     exit 1
 fi
 
-# Stop and disable any existing installation
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     systemctl stop "$SERVICE_NAME"
     warn "Stopped existing running service"
@@ -237,13 +305,12 @@ if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
     systemctl disable "$SERVICE_NAME"
 fi
 
-# Generate concrete service file from template
 TMP_SERVICE="$(mktemp /tmp/${SERVICE_NAME}.XXXXXX.service)"
 sed \
-    -e "s|{{WORKING_DIR}}|${SCRIPT_DIR}|g" \
+    -e "s|{{WORKING_DIR}}|${INSTALL_DIR}|g" \
     -e "s|{{PYTHON_BIN}}|${PYTHON_BIN}|g" \
     -e "s|{{EXTRA_ARGS}}|${EXTRA_ARGS}|g" \
-    "$SCRIPT_DIR/$SERVICE_FILE" > "$TMP_SERVICE"
+    "$INSTALL_DIR/$SERVICE_FILE" > "$TMP_SERVICE"
 
 install -m 644 -o root -g root "$TMP_SERVICE" "/etc/systemd/system/${SERVICE_FILE}"
 rm -f "$TMP_SERVICE"
@@ -265,7 +332,9 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     echo -e "  ${GREEN}Installation successful!${NC}"
     echo "======================================================================="
     echo ""
-    echo "  Web UI:  http://${HOST}:${PORT}/"
+    echo "  Web UI:       http://${HOST}:${PORT}/"
+    echo "  Install dir:  $INSTALL_DIR"
+    echo "  Ref:          $REF_DESC"
     echo ""
     echo "  Useful commands:"
     echo "    sudo systemctl status  $SERVICE_NAME"
@@ -291,9 +360,9 @@ else
     journalctl -u "$SERVICE_NAME" -n 40 --no-pager
     echo ""
     echo "  Common causes:"
-    echo "    - venv missing or incomplete  →  uv sync --no-dev"
-    echo "    - Missing solver library      →  apt-get install libatomic1  (on ARM)"
-    echo "    - Config error in $CONFIG_PATH"
+    echo "    - Missing solver library  →  apt-get install libatomic1  (on ARM)"
+    echo "    - Config error in $RESOLVED_CONFIG"
+    echo "    - Dependency issue        →  cd $INSTALL_DIR && uv sync --no-dev"
     echo ""
     exit 1
 fi
