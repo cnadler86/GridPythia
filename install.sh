@@ -273,6 +273,10 @@ echo "======================================================================="
 echo "  Installing Python dependencies (uv sync --no-dev)"
 echo "======================================================================="
 
+UV_CACHE_DIR="/var/cache/gridpythia-uv"
+mkdir -p "$UV_CACHE_DIR"
+chown "${SERVICE_USER}:${SERVICE_GROUP}" "$UV_CACHE_DIR"
+
 # ── Configure uv to prefer piwheels (pre-built ARM wheels) ───────────────────
 # Only when uv was just installed, on ARM6/ARM7, and no existing config
 _arch="$(uname -m 2>/dev/null || true)"
@@ -298,7 +302,7 @@ else
     [[ -f /etc/uv/uv.toml ]] && warn "/etc/uv/uv.toml already exists – skipping"
 fi
 
-runuser -u "$SERVICE_USER" -- "$UV_BIN" sync --no-dev --project "$INSTALL_DIR"
+runuser -u "$SERVICE_USER" -- env UV_CACHE_DIR="$UV_CACHE_DIR" "$UV_BIN" sync --no-dev --project "$INSTALL_DIR"
 ok "Dependencies installed into $INSTALL_DIR/.venv"
 
 # Re-fix permissions after uv sync

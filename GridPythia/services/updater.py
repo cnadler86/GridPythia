@@ -256,9 +256,14 @@ class AutoUpdater:
 
     def _sync_dependencies(self) -> bool:
         try:
+            env = os.environ.copy()
+            # gridpythia has no home dir; ensure uv writes its cache to the
+            # persistent cache directory created by install.sh, not ~/.cache/uv.
+            env.setdefault("UV_CACHE_DIR", str(Path(self._repo_path) / ".uv-cache"))
             result = subprocess.run(  # noqa: S603
                 [self._uv, "sync", "--no-dev"],
                 cwd=self._repo_path,
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=120,

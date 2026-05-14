@@ -24,8 +24,9 @@ SyslogIdentifier=gridpythia
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths={{WORKING_DIR}}
+ReadWritePaths={{WORKING_DIR}} /var/cache/gridpythia-uv
 ProtectHome=true
+Environment=UV_CACHE_DIR=/var/cache/gridpythia-uv
 
 [Install]
 WantedBy=multi-user.target
