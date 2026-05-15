@@ -280,6 +280,17 @@ chown "${SERVICE_USER}:${SERVICE_GROUP}" "$UV_CACHE_DIR"
 # ── Configure uv to prefer piwheels (pre-built ARM wheels) ───────────────────
 # Only when uv was just installed, on ARM6/ARM7, and no existing config
 _arch="$(uname -m 2>/dev/null || true)"
+if [[ "$_arch" =~ ^armv[67] ]]; then
+    echo ""
+    echo "======================================================================="
+    echo "  Installing ARM system libraries (required by numpy/scipy piwheels wheels)"
+    echo "======================================================================="
+    apt-get install -y --no-install-recommends \
+        libopenblas0-pthread libgfortran5 libatomic1 2>/dev/null \
+        && ok "ARM system libraries installed" \
+        || warn "apt-get failed – continuing (libraries may already be present)"
+fi
+
 if [[ "$UV_FRESHLY_INSTALLED" == "true" ]] \
     && [[ "$_arch" =~ ^armv[67] ]] \
     && [[ ! -f /etc/uv/uv.toml ]]; then

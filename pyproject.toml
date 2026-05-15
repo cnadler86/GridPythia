@@ -7,19 +7,19 @@ license-files = ["LICENSE.md"]
 requires-python = ">=3.13"
 dependencies = [
     "numpy",
-    "scipy",
+    "scipy>=1.14,<=1.17.0",
     "pydantic>=2.0",
     "aiohttp>=3.9",
     "gitpython>=3.1",
     "open-meteo-solar-forecast>=0.1.29",
     "cvxpy-base>=1.8",
-    "highspy>=1.13",
+    "highspy>=1.13,<1.14",
     "holidays>=0.93",
     "pyyaml>=6.0.3",
     "structlog>=25.5.0",
     "plotly>=5.0",
     "fastapi>=0.110",
-    "uvicorn[standard]>=0.27",
+    "uvicorn>=0.27",
     "paho-mqtt>=2.1",
 ]
 
