@@ -216,7 +216,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "scipy" },
     { name = "structlog" },
-    { name = "uvicorn" },
+    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.dev-dependencies]
@@ -247,7 +247,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scipy", specifier = ">=1.14,<=1.17.0" },
     { name = "structlog", specifier = ">=25.5.0" },
-    { name = "uvicorn", specifier = ">=0.27" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
 ]
 
 [package.metadata.requires-dev]
@@ -291,6 +291,15 @@ dependencies = [
 ]
 wheels = [
     { url = "https://www.piwheels.org/simple/holidays/holidays-0.93-py3-none-any.whl", hash = "sha256:95a6e3f52fb53e3842f555f52776850750711f17294447450cdf5568807e2a01" },
+]
+
+[[package]]
+name = "httptools"
+version = "0.7.1"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/httptools/httptools-0.7.1-cp313-cp313-linux_armv6l.whl", hash = "sha256:01515998f1d618610b6b398c1943015d4b5727b77e9cd64e91a5a0fca2851172" },
+    { url = "https://www.piwheels.org/simple/httptools/httptools-0.7.1-cp313-cp313-linux_armv7l.whl", hash = "sha256:01515998f1d618610b6b398c1943015d4b5727b77e9cd64e91a5a0fca2851172" },
 ]
 
 [[package]]
@@ -548,6 +557,14 @@ wheels = [
 ]
 
 [[package]]
+name = "python-dotenv"
+version = "1.2.2"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/python-dotenv/python_dotenv-1.2.2-py3-none-any.whl", hash = "sha256:35af4568334a07b80deb78c225d90f99827aed3f5d45de17b602f6ea4274c9f5" },
+]
+
+[[package]]
 name = "pytz"
 version = "2026.1.post1"
 source = { registry = "https://www.piwheels.org/simple" }
@@ -669,6 +686,47 @@ dependencies = [
 ]
 wheels = [
     { url = "https://www.piwheels.org/simple/uvicorn/uvicorn-0.45.0-py3-none-any.whl", hash = "sha256:2db26f588131aeec7439de00f2dd52d5f210710c1f01e407a52c90b880d1fd4f" },
+]
+
+[package.optional-dependencies]
+standard = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "httptools" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "uvloop", marker = "platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'" },
+    { name = "watchfiles" },
+    { name = "websockets" },
+]
+
+[[package]]
+name = "uvloop"
+version = "0.21.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/uvloop/uvloop-0.21.0-cp313-cp313-linux_armv6l.whl", hash = "sha256:1ef5b2cc40de473e6d4cde312c1c1f05d49d25d3170f8cd2c5a35788d50f33c9" },
+    { url = "https://www.piwheels.org/simple/uvloop/uvloop-0.21.0-cp313-cp313-linux_armv7l.whl", hash = "sha256:1ef5b2cc40de473e6d4cde312c1c1f05d49d25d3170f8cd2c5a35788d50f33c9" },
+]
+
+[[package]]
+name = "watchfiles"
+version = "1.1.1"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "anyio" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/watchfiles/watchfiles-1.1.1-cp313-cp313-linux_armv6l.whl", hash = "sha256:4b02b244a045aac2938d92e75894bdfb96d893059370dede4b00637bd49dc9a9" },
+    { url = "https://www.piwheels.org/simple/watchfiles/watchfiles-1.1.1-cp313-cp313-linux_armv7l.whl", hash = "sha256:4b02b244a045aac2938d92e75894bdfb96d893059370dede4b00637bd49dc9a9" },
+]
+
+[[package]]
+name = "websockets"
+version = "16.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/websockets/websockets-16.0-cp313-cp313-linux_armv6l.whl", hash = "sha256:705c66b2380f81c025b342683fcb49c61f421aa7ab19c038d2f82d24aee888a3" },
+    { url = "https://www.piwheels.org/simple/websockets/websockets-16.0-cp313-cp313-linux_armv7l.whl", hash = "sha256:705c66b2380f81c025b342683fcb49c61f421aa7ab19c038d2f82d24aee888a3" },
 ]
 
 [[package]]
