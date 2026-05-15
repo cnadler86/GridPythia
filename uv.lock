@@ -1,0 +1,686 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.14' and sys_platform == 'win32'",
+    "python_full_version < '3.14' and sys_platform == 'emscripten'",
+    "python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+]
+
+[[package]]
+name = "aiohappyeyeballs"
+version = "2.6.1"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/aiohappyeyeballs/aiohappyeyeballs-2.6.1-py3-none-any.whl", hash = "sha256:f349ba8f4b75cb25c99c5c2d84e997e485204d2902a9597802b0371f09331fb8" },
+]
+
+[[package]]
+name = "aiohttp"
+version = "3.13.5"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "aiohappyeyeballs" },
+    { name = "aiosignal" },
+    { name = "attrs" },
+    { name = "frozenlist" },
+    { name = "multidict" },
+    { name = "propcache" },
+    { name = "yarl" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/aiohttp/aiohttp-3.13.5-cp313-cp313-linux_armv6l.whl", hash = "sha256:198b0028d40ddf85a4481c20f9887790696400c9095127ae6899951efa64226f" },
+    { url = "https://www.piwheels.org/simple/aiohttp/aiohttp-3.13.5-cp313-cp313-linux_armv7l.whl", hash = "sha256:198b0028d40ddf85a4481c20f9887790696400c9095127ae6899951efa64226f" },
+]
+
+[[package]]
+name = "aiosignal"
+version = "1.4.0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "frozenlist" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/aiosignal/aiosignal-1.4.0-py3-none-any.whl", hash = "sha256:d13357e13bf4ff9b838e98eb33898353789a8fe6c1dba2d250f7acb46307efcc" },
+]
+
+[[package]]
+name = "annotated-doc"
+version = "0.0.4"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/annotated-doc/annotated_doc-0.0.4-py3-none-any.whl", hash = "sha256:571ac1dc6991c450b25a9c2d84a3705e2ae7a53467b5d111c24fa8baabbed320" },
+]
+
+[[package]]
+name = "annotated-types"
+version = "0.7.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/annotated-types/annotated_types-0.7.0-py3-none-any.whl", hash = "sha256:1f02e8b43a8fbbc3f3e0d4f0f4bfc8131bcb4eebe8849b8e5c773f3a1c582a53" },
+]
+
+[[package]]
+name = "anyio"
+version = "4.13.0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "idna" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/anyio/anyio-4.13.0-py3-none-any.whl", hash = "sha256:70161bf10068a03c1bf1b87ee75c39a26c36121245576caf154583f676a36a55" },
+]
+
+[[package]]
+name = "attrs"
+version = "26.1.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/attrs/attrs-26.1.0-py3-none-any.whl", hash = "sha256:94d456bc1957108a0fb6036f263231863fa167bffcf1d4a5d4452aace9413195" },
+]
+
+[[package]]
+name = "click"
+version = "8.3.2"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/click/click-8.3.2-py3-none-any.whl", hash = "sha256:716988ead5d3faa0575c2195681554df5ff22dfb90e36d5ad02f0ac2bfc4c59c" },
+]
+
+[[package]]
+name = "colorama"
+version = "0.4.6"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/colorama/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6" },
+]
+
+[[package]]
+name = "contourpy"
+version = "1.3.3"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/contourpy/contourpy-1.3.3-cp313-cp313-linux_armv6l.whl", hash = "sha256:5e6fd32d051458354fdd2beb03fb7024447d245e8b1bc92a0808219e737d4283" },
+    { url = "https://www.piwheels.org/simple/contourpy/contourpy-1.3.3-cp313-cp313-linux_armv7l.whl", hash = "sha256:5e6fd32d051458354fdd2beb03fb7024447d245e8b1bc92a0808219e737d4283" },
+]
+
+[[package]]
+name = "coverage"
+version = "7.13.5"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/coverage/coverage-7.13.5-cp313-cp313-linux_armv6l.whl", hash = "sha256:8b7c8e0b9d8aa86e4ef63d87ae21711d4af072616d8639dc5c428297487da0d8" },
+    { url = "https://www.piwheels.org/simple/coverage/coverage-7.13.5-cp313-cp313-linux_armv7l.whl", hash = "sha256:8b7c8e0b9d8aa86e4ef63d87ae21711d4af072616d8639dc5c428297487da0d8" },
+]
+
+[[package]]
+name = "cvxpy-base"
+version = "1.8.2"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+]
+wheels = [
+    { url = "https://archive1.piwheels.org/simple/cvxpy-base/cvxpy_base-1.8.2-cp313-cp313-linux_armv6l.whl", hash = "sha256:4f1172e84bd688333d8b4031b8e1d0481d329444b2e390665f6e520be0ffcc02" },
+    { url = "https://archive1.piwheels.org/simple/cvxpy-base/cvxpy_base-1.8.2-cp313-cp313-linux_armv7l.whl", hash = "sha256:4f1172e84bd688333d8b4031b8e1d0481d329444b2e390665f6e520be0ffcc02" },
+]
+
+[[package]]
+name = "cycler"
+version = "0.12.1"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/cycler/cycler-0.12.1-py3-none-any.whl", hash = "sha256:2ca9a3163f1c60f8aeffb32166caf0ef10fa1596b8437fd1fa693cb7daa029ab" },
+]
+
+[[package]]
+name = "fastapi"
+version = "0.136.0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "annotated-doc" },
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/fastapi/fastapi-0.136.0-py3-none-any.whl", hash = "sha256:8793d44ec7378e2be07f8a013cf7f7aa47d6327d0dfe9804862688ec4541a6b4" },
+]
+
+[[package]]
+name = "fonttools"
+version = "4.62.1"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/fonttools/fonttools-4.62.1-py3-none-any.whl", hash = "sha256:590742e32b53d61426a180801669bed7a51c8ed12657b600e9ee34684deef305" },
+]
+
+[[package]]
+name = "frozenlist"
+version = "1.8.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/frozenlist/frozenlist-1.8.0-cp313-cp313-linux_armv6l.whl", hash = "sha256:f5ad78ea96d5a99be273c26ca6fc1005b434f664b7d3e6a9e3c9ca8af6d90a9c" },
+    { url = "https://www.piwheels.org/simple/frozenlist/frozenlist-1.8.0-cp313-cp313-linux_armv7l.whl", hash = "sha256:f5ad78ea96d5a99be273c26ca6fc1005b434f664b7d3e6a9e3c9ca8af6d90a9c" },
+]
+
+[[package]]
+name = "gitdb"
+version = "4.0.12"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "smmap" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/gitdb/gitdb-4.0.12-py3-none-any.whl", hash = "sha256:1bffff7459f38d0a7d720594352154cb7ad87e9ab1a9df9bdd16233cdcb0f911" },
+]
+
+[[package]]
+name = "gitpython"
+version = "3.1.50"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "gitdb" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/gitpython/gitpython-3.1.50-py3-none-any.whl", hash = "sha256:057e81945aa68b89d7d90cff3931345e8fd0a791399850460ab41b68b28e04ef" },
+]
+
+[[package]]
+name = "gridpythia"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "cvxpy-base" },
+    { name = "fastapi" },
+    { name = "gitpython" },
+    { name = "highspy" },
+    { name = "holidays" },
+    { name = "numpy" },
+    { name = "open-meteo-solar-forecast" },
+    { name = "paho-mqtt" },
+    { name = "plotly" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "scipy" },
+    { name = "structlog" },
+    { name = "uvicorn" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "matplotlib" },
+    { name = "psutil" },
+    { name = "pympler" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9" },
+    { name = "cvxpy-base", specifier = ">=1.8" },
+    { name = "fastapi", specifier = ">=0.110" },
+    { name = "gitpython", specifier = ">=3.1" },
+    { name = "highspy", specifier = ">=1.13,<1.14" },
+    { name = "holidays", specifier = ">=0.93" },
+    { name = "numpy" },
+    { name = "open-meteo-solar-forecast", specifier = ">=0.1.29" },
+    { name = "paho-mqtt", specifier = ">=2.1" },
+    { name = "plotly", specifier = ">=5.0" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "scipy", specifier = ">=1.14,<=1.17.0" },
+    { name = "structlog", specifier = ">=25.5.0" },
+    { name = "uvicorn", specifier = ">=0.27" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "matplotlib" },
+    { name = "psutil" },
+    { name = "pympler" },
+    { name = "pytest", specifier = ">=7.0" },
+    { name = "pytest-asyncio", specifier = ">=0.23" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[[package]]
+name = "h11"
+version = "0.16.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/h11/h11-0.16.0-py3-none-any.whl", hash = "sha256:9e54505b012527625f54dcc591e3e253276327e8a9c86f55bdb9012e9000e462" },
+]
+
+[[package]]
+name = "highspy"
+version = "1.13.0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://archive1.piwheels.org/simple/highspy/highspy-1.13.0-cp313-cp313-linux_armv6l.whl", hash = "sha256:6d5fc32a8686d4548b77430e02b38098a9efd8cbb40a613edc2f09bec32ab807" },
+    { url = "https://archive1.piwheels.org/simple/highspy/highspy-1.13.0-cp313-cp313-linux_armv7l.whl", hash = "sha256:6d5fc32a8686d4548b77430e02b38098a9efd8cbb40a613edc2f09bec32ab807" },
+]
+
+[[package]]
+name = "holidays"
+version = "0.93"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/holidays/holidays-0.93-py3-none-any.whl", hash = "sha256:95a6e3f52fb53e3842f555f52776850750711f17294447450cdf5568807e2a01" },
+]
+
+[[package]]
+name = "idna"
+version = "3.11"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/idna/idna-3.11-py3-none-any.whl", hash = "sha256:771a87f49d9defaf64091e6e6fe9c18d4833f140bd19464795bc32d966ca37ea" },
+]
+
+[[package]]
+name = "iniconfig"
+version = "2.3.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/iniconfig/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:37680c0f1772719bc5b2d31e6a2eedafb053ee6c6546169f12dd24361988c104" },
+]
+
+[[package]]
+name = "kiwisolver"
+version = "1.5.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/kiwisolver/kiwisolver-1.5.0-cp313-cp313-linux_armv6l.whl", hash = "sha256:ee16838bd62bcaa989618b62b122afc1970bdaefa12e17a1cd3470112fc0807d" },
+    { url = "https://www.piwheels.org/simple/kiwisolver/kiwisolver-1.5.0-cp313-cp313-linux_armv7l.whl", hash = "sha256:ee16838bd62bcaa989618b62b122afc1970bdaefa12e17a1cd3470112fc0807d" },
+]
+
+[[package]]
+name = "matplotlib"
+version = "3.10.8"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "contourpy" },
+    { name = "cycler" },
+    { name = "fonttools" },
+    { name = "kiwisolver" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pillow" },
+    { name = "pyparsing" },
+    { name = "python-dateutil" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/matplotlib/matplotlib-3.10.8-cp313-cp313-linux_armv6l.whl", hash = "sha256:8c1605a491f5141731a111fa3f6eda14f734e8852a77db3b1bb3a64f0654cdd9" },
+    { url = "https://www.piwheels.org/simple/matplotlib/matplotlib-3.10.8-cp313-cp313-linux_armv7l.whl", hash = "sha256:8c1605a491f5141731a111fa3f6eda14f734e8852a77db3b1bb3a64f0654cdd9" },
+]
+
+[[package]]
+name = "multidict"
+version = "6.7.1"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/multidict/multidict-6.7.1-cp313-cp313-linux_armv6l.whl", hash = "sha256:fba245df2f83663b7a03f1d9475e96e1e96083fb99ab25a37030b15cc0489b72" },
+    { url = "https://www.piwheels.org/simple/multidict/multidict-6.7.1-cp313-cp313-linux_armv7l.whl", hash = "sha256:fba245df2f83663b7a03f1d9475e96e1e96083fb99ab25a37030b15cc0489b72" },
+]
+
+[[package]]
+name = "narwhals"
+version = "2.20.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/narwhals/narwhals-2.20.0-py3-none-any.whl", hash = "sha256:16e750ea5507d4ba6e8d03455b5f93a535e0405976561baea235bca5dc9f475d" },
+]
+
+[[package]]
+name = "numpy"
+version = "2.4.4"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/numpy/numpy-2.4.4-cp313-cp313-linux_armv6l.whl", hash = "sha256:e1424260cd8f2262ff072ea138a956b2528512f5f0995be15056fe2084ab8f5f" },
+    { url = "https://www.piwheels.org/simple/numpy/numpy-2.4.4-cp313-cp313-linux_armv7l.whl", hash = "sha256:e1424260cd8f2262ff072ea138a956b2528512f5f0995be15056fe2084ab8f5f" },
+]
+
+[[package]]
+name = "open-meteo-solar-forecast"
+version = "0.1.29"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "numpy" },
+    { name = "pytz" },
+    { name = "suncalc" },
+]
+wheels = [
+    { url = "https://archive1.piwheels.org/simple/open-meteo-solar-forecast/open_meteo_solar_forecast-0.1.29-py3-none-any.whl", hash = "sha256:09249ee22a344a8cdd9f9733426ce272b54ba17f41f6ca4de7b8b443ab07fee5" },
+]
+
+[[package]]
+name = "packaging"
+version = "26.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/packaging/packaging-26.0-py3-none-any.whl", hash = "sha256:b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37529" },
+]
+
+[[package]]
+name = "paho-mqtt"
+version = "2.1.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/paho-mqtt/paho_mqtt-2.1.0-py3-none-any.whl", hash = "sha256:6db9ba9b34ed5bc6b6e3812718c7e06e2fd7444540df2455d2c51bd58808feee" },
+]
+
+[[package]]
+name = "pillow"
+version = "12.2.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/pillow/pillow-12.2.0-cp313-cp313-linux_armv6l.whl", hash = "sha256:d4ff90fbce9831907b35a54405d8b1312c1b83e29f72cc45cf02e60ee55dd48b" },
+    { url = "https://www.piwheels.org/simple/pillow/pillow-12.2.0-cp313-cp313-linux_armv7l.whl", hash = "sha256:d4ff90fbce9831907b35a54405d8b1312c1b83e29f72cc45cf02e60ee55dd48b" },
+]
+
+[[package]]
+name = "plotly"
+version = "6.7.0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "narwhals" },
+    { name = "packaging" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/plotly/plotly-6.7.0-py3-none-any.whl", hash = "sha256:ac8aca1c25c663a59b5b9140a549264a5badde2e057d79b8c772ae2920e32ff0" },
+]
+
+[[package]]
+name = "pluggy"
+version = "1.6.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/pluggy/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:63a2dfa6b0fd4b668b7627eaf4ec69e53201be1015648600410db4f8c3bc317e" },
+]
+
+[[package]]
+name = "propcache"
+version = "0.4.1"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/propcache/propcache-0.4.1-cp313-cp313-linux_armv6l.whl", hash = "sha256:8aec270477f63b01de167ff9cc0672cfaa1f5a47cacbd881a45a958107465a09" },
+    { url = "https://www.piwheels.org/simple/propcache/propcache-0.4.1-cp313-cp313-linux_armv7l.whl", hash = "sha256:8aec270477f63b01de167ff9cc0672cfaa1f5a47cacbd881a45a958107465a09" },
+]
+
+[[package]]
+name = "psutil"
+version = "6.0.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://archive1.piwheels.org/simple/psutil/psutil-6.0.0-cp311-abi3-linux_armv6l.whl", hash = "sha256:43f60d9a345b18e67fa88a663cd3f7f3f818584a665d737c5a5b237fcec05964" },
+    { url = "https://archive1.piwheels.org/simple/psutil/psutil-6.0.0-cp311-abi3-linux_armv7l.whl", hash = "sha256:43f60d9a345b18e67fa88a663cd3f7f3f818584a665d737c5a5b237fcec05964" },
+    { url = "https://www.piwheels.org/simple/psutil/psutil-6.0.0-cp313-abi3-linux_armv6l.whl", hash = "sha256:40c65f4ad79ff6badff3f6a3ca0ceaf8b431b97102a0f48ada7fd6a1bf8910a0" },
+    { url = "https://www.piwheels.org/simple/psutil/psutil-6.0.0-cp313-abi3-linux_armv7l.whl", hash = "sha256:40c65f4ad79ff6badff3f6a3ca0ceaf8b431b97102a0f48ada7fd6a1bf8910a0" },
+    { url = "https://archive1.piwheels.org/simple/psutil/psutil-6.0.0-cp37-abi3-linux_armv6l.whl", hash = "sha256:bd13558e0a37e6c8700c95d3da6e89f3f9605a6d745e52da81210dd07f40dc26" },
+    { url = "https://archive1.piwheels.org/simple/psutil/psutil-6.0.0-cp37-abi3-linux_armv7l.whl", hash = "sha256:bd13558e0a37e6c8700c95d3da6e89f3f9605a6d745e52da81210dd07f40dc26" },
+    { url = "https://archive1.piwheels.org/simple/psutil/psutil-6.0.0-cp39-abi3-linux_armv6l.whl", hash = "sha256:f6b05fb308e1a7a369bd86feabe0342773a0604172d27781e6cac76010f5fdbe" },
+    { url = "https://archive1.piwheels.org/simple/psutil/psutil-6.0.0-cp39-abi3-linux_armv7l.whl", hash = "sha256:f6b05fb308e1a7a369bd86feabe0342773a0604172d27781e6cac76010f5fdbe" },
+]
+
+[[package]]
+name = "pydantic"
+version = "2.12.5"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "annotated-types" },
+    { name = "pydantic-core" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/pydantic/pydantic-2.12.5-py3-none-any.whl", hash = "sha256:e561593fccf61e8a20fc46dfc2dfe075b8be7d0188df33f221ad1f0139180f9d" },
+]
+
+[[package]]
+name = "pydantic-core"
+version = "2.41.5"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/pydantic-core/pydantic_core-2.41.5-cp313-cp313-linux_armv6l.whl", hash = "sha256:596a85a1b889f5046ec6720c3aeaf119eac0b591ed4e5bba9609ce597b247288" },
+    { url = "https://www.piwheels.org/simple/pydantic-core/pydantic_core-2.41.5-cp313-cp313-linux_armv7l.whl", hash = "sha256:596a85a1b889f5046ec6720c3aeaf119eac0b591ed4e5bba9609ce597b247288" },
+]
+
+[[package]]
+name = "pygments"
+version = "2.20.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/pygments/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176" },
+]
+
+[[package]]
+name = "pympler"
+version = "1.0.1"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://archive1.piwheels.org/simple/pympler/Pympler-1.0.1-py3-none-any.whl", hash = "sha256:38e662dab3fd9e2f8f5f9972c7fe1b869899f701f6c9e0e3bc1b3d111d815721" },
+]
+
+[[package]]
+name = "pyparsing"
+version = "3.3.2"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/pyparsing/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:59ead4d4b7fe3625437648aa72133e4e6e26a9ceafa1499353af8be9b4a01722" },
+]
+
+[[package]]
+name = "pytest"
+version = "9.0.2"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "iniconfig" },
+    { name = "packaging" },
+    { name = "pluggy" },
+    { name = "pygments" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/pytest/pytest-9.0.2-py3-none-any.whl", hash = "sha256:7d746bf25e3d9c44cdffaed17524c2c211c7da0a52bc12ec64662531e6532def" },
+]
+
+[[package]]
+name = "pytest-asyncio"
+version = "1.3.0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/pytest-asyncio/pytest_asyncio-1.3.0-py3-none-any.whl", hash = "sha256:a803e7cb841b2f7d4dae8da455ddf04ada7d68b3e9a1435824b6a69da42a1c57" },
+]
+
+[[package]]
+name = "pytest-cov"
+version = "7.1.0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "coverage" },
+    { name = "pluggy" },
+    { name = "pytest" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/pytest-cov/pytest_cov-7.1.0-py3-none-any.whl", hash = "sha256:9ef1612a02d7d5d5469f01fe969aa2a894e7d73d5a1419f1be2e9c3465e9db72" },
+]
+
+[[package]]
+name = "python-dateutil"
+version = "2.9.0.post0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/python-dateutil/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:5d23f9d7e398684c7dac22b46a93fb71de568cfdcd004512f7072819e41ef54c" },
+]
+
+[[package]]
+name = "pytz"
+version = "2026.1.post1"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/pytz/pytz-2026.1.post1-py3-none-any.whl", hash = "sha256:92b1a6880599cc204c37ee6d896e7749e81c7b2239ddee717df1aa9453c41085" },
+]
+
+[[package]]
+name = "pyyaml"
+version = "6.0.3"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/pyyaml/pyyaml-6.0.3-cp313-cp313-linux_armv6l.whl", hash = "sha256:9a459cfba03e7ce1a708172de8764f8e581096ad21af84ec92c03507b328ca3c" },
+    { url = "https://www.piwheels.org/simple/pyyaml/pyyaml-6.0.3-cp313-cp313-linux_armv7l.whl", hash = "sha256:9a459cfba03e7ce1a708172de8764f8e581096ad21af84ec92c03507b328ca3c" },
+]
+
+[[package]]
+name = "ruff"
+version = "0.14.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://archive1.piwheels.org/simple/ruff/ruff-0.14.0-py3-none-linux_armv6l.whl", hash = "sha256:b4918c54ae70f33a4b689566596d60121abf3877052ada4ceb87d5a28f28ac78" },
+    { url = "https://archive1.piwheels.org/simple/ruff/ruff-0.14.0-py3-none-linux_armv7l.whl", hash = "sha256:b4918c54ae70f33a4b689566596d60121abf3877052ada4ceb87d5a28f28ac78" },
+]
+
+[[package]]
+name = "scipy"
+version = "1.17.0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/scipy/scipy-1.17.0-cp313-cp313-linux_armv6l.whl", hash = "sha256:1f2f102a89b7672fb3ba292156a7ff0b02f227532b0ba5cce5c0bff2ebaf56d6" },
+    { url = "https://www.piwheels.org/simple/scipy/scipy-1.17.0-cp313-cp313-linux_armv7l.whl", hash = "sha256:1f2f102a89b7672fb3ba292156a7ff0b02f227532b0ba5cce5c0bff2ebaf56d6" },
+]
+
+[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/six/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:cb514bebb7be30e172d571b0e5035990437dd202f3c9f6e911d9406254151b92" },
+]
+
+[[package]]
+name = "smmap"
+version = "5.0.3"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/smmap/smmap-5.0.3-py3-none-any.whl", hash = "sha256:d6980a9051ab618e8f00497b56f3e31fa4f241b40e81b83a4972a8bd9b0582c7" },
+]
+
+[[package]]
+name = "starlette"
+version = "1.0.0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "anyio" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/starlette/starlette-1.0.0-py3-none-any.whl", hash = "sha256:d3ec55e0bb321692d275455ddfd3df75fff145d009685eb40dc91fc66b03d38b" },
+]
+
+[[package]]
+name = "structlog"
+version = "25.5.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/structlog/structlog-25.5.0-py3-none-any.whl", hash = "sha256:d7b4e8ad8daa0828afa8983972db18c112204c116e852880118b084db6e26ce5" },
+]
+
+[[package]]
+name = "suncalc"
+version = "0.1.3"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/suncalc/suncalc-0.1.3-py3-none-any.whl", hash = "sha256:01a0c7a103d544422b83303399c1331bf12be3849bef2a26e4c1731a5f100c52" },
+]
+
+[[package]]
+name = "ty"
+version = "0.0.1a22"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://archive1.piwheels.org/simple/ty/ty-0.0.1a22-py3-none-linux_armv6l.whl", hash = "sha256:64252be3221440a8494b0dd997fca98d8d19c50c26cc813fc6e46ec46c1a8e70" },
+    { url = "https://archive1.piwheels.org/simple/ty/ty-0.0.1a22-py3-none-linux_armv7l.whl", hash = "sha256:64252be3221440a8494b0dd997fca98d8d19c50c26cc813fc6e46ec46c1a8e70" },
+]
+
+[[package]]
+name = "typing-extensions"
+version = "4.15.0"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/typing-extensions/typing_extensions-4.15.0-py3-none-any.whl", hash = "sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548" },
+]
+
+[[package]]
+name = "typing-inspection"
+version = "0.4.2"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/typing-inspection/typing_inspection-0.4.2-py3-none-any.whl", hash = "sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7" },
+]
+
+[[package]]
+name = "uvicorn"
+version = "0.45.0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "h11" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/uvicorn/uvicorn-0.45.0-py3-none-any.whl", hash = "sha256:2db26f588131aeec7439de00f2dd52d5f210710c1f01e407a52c90b880d1fd4f" },
+]
+
+[[package]]
+name = "yarl"
+version = "1.22.0"
+source = { registry = "https://www.piwheels.org/simple" }
+dependencies = [
+    { name = "idna" },
+    { name = "multidict" },
+    { name = "propcache" },
+]
+wheels = [
+    { url = "https://www.piwheels.org/simple/yarl/yarl-1.22.0-cp313-cp313-linux_armv6l.whl", hash = "sha256:f0205fcf720708f058b13dc58a3f3b27ee213aa0e69e541f1fcb5c15daa255c0" },
+    { url = "https://www.piwheels.org/simple/yarl/yarl-1.22.0-cp313-cp313-linux_armv7l.whl", hash = "sha256:f0205fcf720708f058b13dc58a3f3b27ee213aa0e69e541f1fcb5c15daa255c0" },
+]

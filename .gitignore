@@ -1,6 +1,5 @@
 cache/
 output/
-uv.lock
 *.csv
 *.log
 *.pdf
