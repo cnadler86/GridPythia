@@ -89,7 +89,7 @@ _LAYOUT = {
     "template": "plotly_white",
     "hovermode": "x unified",
     "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
-    "margin": {"l": 60, "r": 20, "t": 60, "b": 40},
+    "margin": {"l": 45, "r": 20, "t": 60, "b": 40},
 }
 
 
@@ -239,7 +239,7 @@ class SolutionPlotter:
             go.Bar(
                 x=timestamps,
                 y=result.self_consumption_wh_per_dt.tolist(),
-                name="Self-consumption",
+                name="Self-cons.",
                 marker_color=_C_SELF,
                 opacity=0.85,
                 hovertemplate="%{y:.1f} Wh<extra>Self-consumption</extra>",
@@ -311,7 +311,6 @@ class SolutionPlotter:
             if wh_min < wh_max:
                 tick0_wh, dtick_wh, max_wh = _calc_pretty_ticks(wh_min, wh_max, target_nticks=6)
                 fig.update_yaxes(
-                    title_text="Wh",
                     tickmode="linear",
                     tick0=tick0_wh,
                     dtick=dtick_wh,
@@ -319,10 +318,6 @@ class SolutionPlotter:
                     row=1,
                     col=1,
                 )
-            else:
-                fig.update_yaxes(title_text="Wh", row=1, col=1)
-        else:
-            fig.update_yaxes(title_text="Wh", row=1, col=1)
 
         fig.update_layout(barmode="relative")
 
@@ -355,7 +350,7 @@ class SolutionPlotter:
                     row=soc_row,
                     col=1,
                 )
-            fig.update_yaxes(title_text="%", range=[0, 105], row=soc_row, col=1)
+            fig.update_yaxes(range=[0, 105], row=soc_row, col=1)
 
         # ── last row: cumulative balance ──────────────────────────────
         balance_row = n_rows
@@ -376,7 +371,7 @@ class SolutionPlotter:
             row=balance_row,
             col=1,
         )
-        fig.update_yaxes(title_text="EUR", row=balance_row, col=1)
+        fig.update_yaxes(row=balance_row, col=1)
 
         # ── inverter-mode backgrounds (charge/discharge shading) ──────
         # Use the first plan with a battery; fall back to the first plan available.
@@ -407,6 +402,7 @@ class SolutionPlotter:
             height=max(500, 220 * n_rows),
         )
         fig.update_xaxes(
+            tickformat="%d.%m.%y",
             showgrid=True,
             gridcolor="#e8e8e8",
             minor={
@@ -486,6 +482,7 @@ class SolutionPlotter:
                 x=timestamps,
                 y=result.grid_import_wh_per_dt.tolist(),
                 name="Grid Import",
+                legend="legend",
                 marker_color=_C_IMPORT,
                 opacity=0.85,
                 hovertemplate="%{y:.1f} Wh<extra>Grid Import</extra>",
@@ -497,7 +494,8 @@ class SolutionPlotter:
             go.Bar(
                 x=timestamps,
                 y=result.self_consumption_wh_per_dt.tolist(),
-                name="Self-consumption",
+                name="Self-cons.",
+                legend="legend",
                 marker_color=_C_SELF,
                 opacity=0.85,
                 hovertemplate="%{y:.1f} Wh<extra>Self-consumption</extra>",
@@ -510,6 +508,7 @@ class SolutionPlotter:
                 x=timestamps,
                 y=(-np.asarray(result.feedin_wh_per_dt)).tolist(),
                 name="Feed-in",
+                legend="legend",
                 marker_color=_C_FEEDIN,
                 opacity=0.85,
                 customdata=np.asarray(result.feedin_wh_per_dt).tolist(),
@@ -524,6 +523,7 @@ class SolutionPlotter:
                     x=timestamps,
                     y=np.asarray(pdata.pv_by_inverter[inv_device_id]).tolist(),
                     name="PV",
+                    legend="legend",
                     mode="lines",
                     line={"color": _C_PV, "width": 1.5, "dash": "dot"},
                     hovertemplate="%{y:.1f} Wh<extra>PV</extra>",
@@ -544,7 +544,6 @@ class SolutionPlotter:
             if wh_min < wh_max:
                 tick0_wh, dtick_wh, max_wh = _calc_pretty_ticks(wh_min, wh_max, target_nticks=6)
                 fig.update_yaxes(
-                    title_text="Wh",
                     tickmode="linear",
                     tick0=tick0_wh,
                     dtick=dtick_wh,
@@ -552,10 +551,6 @@ class SolutionPlotter:
                     row=1,
                     col=1,
                 )
-            else:
-                fig.update_yaxes(title_text="Wh", row=1, col=1)
-        else:
-            fig.update_yaxes(title_text="Wh", row=1, col=1)
 
         fig.update_layout(barmode="relative")
 
@@ -591,6 +586,7 @@ class SolutionPlotter:
                     x=timestamps_shifted,
                     y=soc_shifted.tolist(),
                     name="SoC",
+                    legend="legend2",
                     mode="lines",
                     line={"color": _C_SOC, "width": 2.2},
                     hovertemplate="%{y:.1f} %<extra>SoC</extra>",
@@ -599,7 +595,7 @@ class SolutionPlotter:
                 col=1,
                 secondary_y=False,
             )
-            fig.update_yaxes(title_text="SoC (%)", range=[-2, 107], row=2, col=1, secondary_y=False)
+            fig.update_yaxes(range=[-2, 107], row=2, col=1, secondary_y=False)
 
             # Per-slot power flows → bars (right axis)
             if np.any(plan.charge_ac_wh):
@@ -607,7 +603,8 @@ class SolutionPlotter:
                     go.Bar(
                         x=timestamps,
                         y=(np.asarray(plan.charge_ac_wh) / dt_hours).tolist(),
-                        name="AC Charge (W)",
+                        name="AC Charge",
+                        legend="legend2",
                         marker_color=_C_CHARGE_BAR,
                         opacity=0.85,
                         hovertemplate="%{y:.0f} W<extra>AC Charge</extra>",
@@ -621,7 +618,8 @@ class SolutionPlotter:
                     go.Bar(
                         x=timestamps,
                         y=(np.asarray(plan.discharge_ac_wh) / dt_hours).tolist(),
-                        name="Discharge (W)",
+                        name="Discharge",
+                        legend="legend2",
                         marker_color=_C_DISCHARGE_BAR,
                         opacity=0.85,
                         hovertemplate="%{y:.0f} W<extra>Discharge</extra>",
@@ -635,7 +633,8 @@ class SolutionPlotter:
                     go.Bar(
                         x=timestamps,
                         y=(np.asarray(plan.pv_to_battery_wh) / dt_hours).tolist(),
-                        name="PV\u2192Bat (W)",
+                        name="PV→Bat",
+                        legend="legend2",
                         marker_color=_C_PV_BAT_BAR,
                         opacity=0.85,
                         hovertemplate="%{y:.0f} W<extra>PV→Bat</extra>",
@@ -661,7 +660,6 @@ class SolutionPlotter:
                         power_min, power_max, target_nticks=5
                     )
                     fig.update_yaxes(
-                        title_text="Power (W)",
                         tickmode="linear",
                         tick0=tick0_p,
                         dtick=dtick_p,
@@ -671,14 +669,36 @@ class SolutionPlotter:
                         secondary_y=True,
                     )
                 else:
-                    fig.update_yaxes(title_text="Power (W)", row=2, col=1, secondary_y=True)
+                    fig.update_yaxes(row=2, col=1, secondary_y=True)
             else:
-                fig.update_yaxes(title_text="Power (W)", row=2, col=1, secondary_y=True)
+                fig.update_yaxes(row=2, col=1, secondary_y=True)
 
         # Build layout with per-inverter-specific overrides (wider margins for secondary y-axis)
         layout_params = {
             **_LAYOUT,
-            "margin": {"l": 65, "r": 65, "t": 60, "b": 40},
+            "margin": {"l": 45, "r": 45, "t": 60, "b": 40},
+            "legend": {
+                "orientation": "v",
+                "yanchor": "top",
+                "y": 0.99,
+                "xanchor": "right",
+                "x": 0.99,
+                "bgcolor": "rgba(255,255,255,0.75)",
+                "bordercolor": "#ccc",
+                "borderwidth": 1,
+                "font": {"size": 10},
+            },
+            "legend2": {
+                "orientation": "v",
+                "yanchor": "top",
+                "y": 0.56,
+                "xanchor": "right",
+                "x": 0.99,
+                "bgcolor": "rgba(255,255,255,0.75)",
+                "bordercolor": "#ccc",
+                "borderwidth": 1,
+                "font": {"size": 10},
+            },
             "title": {
                 "text": (
                     f"{title}<br>"
@@ -693,6 +713,7 @@ class SolutionPlotter:
         }
         fig.update_layout(**layout_params)
         fig.update_xaxes(
+            tickformat="%d.%m.%y",
             showgrid=True,
             gridcolor="#e8e8e8",
             minor={

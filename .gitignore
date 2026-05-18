@@ -5,6 +5,7 @@ output/
 *.pdf
 *.xlsx
 *.yaml
+*.code-workspace
 
 .agents
 skills-lock.json

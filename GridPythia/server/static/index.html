@@ -136,7 +136,7 @@
     }
     .tab-btn:hover { color: #333; }
     .tab-btn.active { color: #1565c0; border-bottom-color: #1565c0; }
-    .tab-pane { display: none; padding: .5rem 1rem; }
+    .tab-pane { display: none; padding: .5rem .25rem; }
     .tab-pane.active { display: block; }
     .gp-chart { min-height: 350px; }
     .chart-placeholder {
@@ -150,6 +150,15 @@
       animation: spin .7s linear infinite; display: inline-block;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Footer ── */
+    .gp-footer {
+      display: flex; align-items: center; gap: .75rem; flex-wrap: wrap;
+      padding: .3rem 1rem;
+      background: #1e2230;
+      border-top: 1px solid #2e3340;
+      font-size: .7rem; color: #bbb;
+    }
   </style>
 </head>
 <body>
@@ -157,12 +166,8 @@
 <!-- ── Navbar ──────────────────────────────────────────────────────────── -->
 <header class="gp-navbar">
   <span class="gp-brand">⚡ GridPythia</span>
-  <span id="chip-pred" class="gp-status-chip">Predictions: —</span>
   <span id="chip-opt"  class="gp-status-chip">Optimization: —</span>
   <span id="next-slot" class="ms-auto">Next opt: <strong id="countdown">—</strong></span>
-  <span id="server-clock" style="font-size:.75rem;color:#bbb;white-space:nowrap">—</span>
-  <span id="backend-status"><span class="backend-dot" id="backend-dot"></span>Backend</span>
-  <span id="mqtt-status"><span class="mqtt-dot" id="mqtt-dot"></span>MQTT</span>
   <span id="spinner-global" class="spinner-sm" style="display:none"></span>
 </header>
 
@@ -183,6 +188,12 @@
 <!-- ── Chart tabs ────────────────────────────────────────────────────── -->
 <div id="tabs-nav"></div>
 <div id="tabs-content"></div>
+
+<footer class="gp-footer">
+  <span id="server-clock">—</span>
+  <span id="backend-status"><span class="backend-dot" id="backend-dot"></span>Server</span>
+  <span id="mqtt-status"><span class="mqtt-dot" id="mqtt-dot"></span>MQTT</span>
+</footer>
 
 <script>
 'use strict';
@@ -617,6 +628,7 @@ function connectWebSocket() {
 // ── Prediction / opt status chips ──────────────────────────────────────────
 function updatePredChip(ok) {
   const chip = document.getElementById('chip-pred');
+  if (!chip) return;
   chip.className  = ok ? 'gp-status-chip ok' : 'gp-status-chip warn';
   chip.textContent = ok ? 'Predictions: ok' : 'Predictions: no cache';
 }

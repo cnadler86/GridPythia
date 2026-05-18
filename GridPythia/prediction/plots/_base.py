@@ -24,7 +24,7 @@ FORECAST_LINE_COLOR = "rgba(200, 140, 40, 0.55)"
 
 _LAYOUT_DEFAULTS: dict[str, Any] = {
     "template": "plotly_white",
-    "margin": {"l": 60, "r": 20, "t": 40, "b": 40},
+    "margin": {"l": 45, "r": 20, "t": 40, "b": 40},
     "hovermode": "x unified",
     "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
 }
@@ -43,18 +43,21 @@ def apply_default_layout(
         fig:          Plotly figure.
         title:        Chart title.
         xaxis_title:  Label for the x-axis.
-        yaxis_title:  Label for the y-axis.
+        yaxis_title:  Unit label appended to the chart title in brackets.
         The x-axis keeps Plotly's automatic major tick labeling so labels are
         responsive to available width; hourly vertical guide lines are rendered
         via minor ticks.
     """
+    full_title = (
+        f"{title} [{yaxis_title}]" if title and yaxis_title else title or yaxis_title or None
+    )
     fig.update_layout(
         **_LAYOUT_DEFAULTS,
-        title=title or None,
+        title=full_title,
         xaxis_title=xaxis_title or None,
-        yaxis_title=yaxis_title or None,
     )
     xaxes_kwargs: dict[str, Any] = {
+        "tickformat": "%d.%m.%y",
         "showgrid": True,
         "gridcolor": "#e8e8e8",
         "minor": {

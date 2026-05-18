@@ -103,7 +103,12 @@ class WeatherPlotter(PredictionPlotter):
             self._apply_layout(fig, timestamps, title=f"{title} – {chan_title}", yaxis_title=ylabel)
             return fig
 
-        row_titles = [_CHANNEL_TITLES.get(k, k) for k in keys]
+        row_titles = [
+            f"{_CHANNEL_TITLES.get(k, k)} [{_CHANNEL_YLABELS.get(k, '')}]"
+            if _CHANNEL_YLABELS.get(k)
+            else _CHANNEL_TITLES.get(k, k)
+            for k in keys
+        ]
         fig = make_subplots(
             rows=n,
             cols=1,
@@ -128,17 +133,18 @@ class WeatherPlotter(PredictionPlotter):
                 row=row_idx,
                 col=1,
             )
-            fig.update_yaxes(title_text=ylabel, row=row_idx, col=1)
+            # unit already in subplot title – no separate y-axis label needed
 
         fig.update_layout(
             title=title,
             template="plotly_white",
-            margin={"l": 60, "r": 20, "t": 60, "b": 40},
+            margin={"l": 45, "r": 20, "t": 60, "b": 40},
             hovermode="x unified",
             showlegend=False,
             height=max(300, 200 * n),
         )
         xaxes_kwargs: dict = {
+            "tickformat": "%d.%m.%y",
             "showgrid": True,
             "gridcolor": "#e8e8e8",
             "minor": {
