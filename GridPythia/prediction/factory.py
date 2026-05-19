@@ -64,6 +64,7 @@ def build_prediction_setup(
             "country": pred_cfg.load.country or None,
             "subdivision": pred_cfg.load.subdivision or None,
             "vacation_percentile": pred_cfg.load.vacation_percentile,
+            "adaptive": pred_cfg.load.adaptive.model_dump(),
         },
         fresh=fresh_instances,
     )

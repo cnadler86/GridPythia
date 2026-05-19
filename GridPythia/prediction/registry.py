@@ -225,11 +225,16 @@ def _register_builtin_providers() -> None:
     feedintariff_registry.register("Fixed", _feedin_fixed_factory)
 
     # --- Load ---
-    from GridPythia.prediction.load.config import LoadProfileConfig
+    from GridPythia.prediction.load.config import AdaptiveLoadConfig, LoadProfileConfig
     from GridPythia.prediction.load.provider import load_provider_from_config
 
     def _profilecsv_factory(cfg: Mapping[str, Any]) -> LoadProvider:
         from pathlib import Path
+
+        adaptive_dict = cfg.get("adaptive", {})
+        adaptive_cfg = (
+            AdaptiveLoadConfig(**adaptive_dict) if adaptive_dict else AdaptiveLoadConfig()
+        )
 
         return load_provider_from_config(
             LoadProfileConfig(
@@ -237,6 +242,7 @@ def _register_builtin_providers() -> None:
                 country=cfg.get("country"),
                 subdivision=cfg.get("subdivision"),
                 vacation_percentile=float(cfg.get("vacation_percentile", 5.0)),
+                adaptive=adaptive_cfg,
             )
         )
 
