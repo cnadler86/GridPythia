@@ -89,6 +89,11 @@ _MODULES_TO_PROBE = [
     "GridPythia.prediction.weather.openmeteo",
     "GridPythia.prediction.weather.brightsky",
     "GridPythia.prediction.load.profilecsv",
+    "GridPythia.prediction.load.adaptive",
+    "GridPythia.prediction.load.accumulator",
+    "GridPythia.prediction.load.appliance_tracker",
+    "GridPythia.tsdb.storage",
+    "GridPythia.tsdb.policies",
     "GridPythia.optimization.solver",
     "GridPythia.simulation.grid_simulation",
     "GridPythia.server.services",
@@ -255,6 +260,141 @@ def phase_arrays() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 6 – Adaptive Load / TSDB RAM-Footprint
+# ---------------------------------------------------------------------------
+
+
+def phase_adaptive() -> None:
+    """Misst den RAM-Footprint der neuen adaptiven Load-Komponenten.
+
+    Erzeugt temporäre SQLite-DBs und Accumulator-Instanzen, befüllt sie mit
+    synthetischen Daten und misst den Speicherverbrauch je Komponente.
+    """
+    _hr("PHASE 6 – Adaptive Load / TSDB RAM-Footprint")
+
+    import tempfile
+    import time
+    from pathlib import Path as _Path
+
+    try:
+        import numpy as np
+
+        from GridPythia.prediction.load.accumulator import MeasurementAccumulator
+        from GridPythia.prediction.load.appliance_tracker import ApplianceTracker
+        from GridPythia.tsdb.storage import TimeSeriesDB
+    except ImportError as exc:
+        print(f"  Adaptive-Module nicht verfügbar – übersprungen ({exc})")
+        return
+
+    gc.collect()
+    base_rss = _rss_mb()
+
+    # ── TSDB ────────────────────────────────────────────────────────────────
+    tmp = _Path(tempfile.mkdtemp())
+    rss0 = _rss_mb()
+    db = TimeSeriesDB(db_path=tmp / "bench.sqlite")
+    gc.collect()
+    _row("TimeSeriesDB (leer)", _rss_mb() - rss0)
+
+    # Fülle 1 Jahr × 96 Slots (15-min) × 2 Metriken = 70 080 Zeilen
+    N_DAYS = 365
+    N_SLOTS_PER_DAY = 96
+    now = int(time.time())
+    print(
+        f"\n  Befülle DB mit {N_DAYS * N_SLOTS_PER_DAY * 2:,} Zeilen ({N_DAYS} Tage × 2 Metriken)…"
+    )
+    rss_before_fill = _rss_mb()
+    for d in range(N_DAYS):
+        day_start = now - (N_DAYS - d) * 86400
+        samples = [(float(day_start + s * 900), 300.0 + s % 10) for s in range(N_SLOTS_PER_DAY)]
+        db.insert_batch("load_w", samples, level=1)  # level=1 → already 15-min
+        db.insert_batch("base_load_w", samples, level=1)
+    gc.collect()
+    _row("DB nach 1-Jahr-Befüllung (Delta RSS)", _rss_mb() - rss_before_fill)
+
+    db_file_kb = (tmp / "bench.sqlite").stat().st_size / 1024
+    print(f"  {'SQLite-Dateigröße':<45} {db_file_kb:>8.0f} KB")
+
+    # ── Maintenance (Compaction) ────────────────────────────────────────────
+    rss_before_maint = _rss_mb()
+    stats = db.run_maintenance()
+    gc.collect()
+    _row("Maintenance-Peak-Delta", _rss_mb() - rss_before_maint)
+    print(f"  {'Komprimierte Zeilen':<45} {stats['compacted']:>8}")
+    print(f"  {'Gelöschte Zeilen':<45} {stats['deleted']:>8}")
+
+    # ── Accumulator ─────────────────────────────────────────────────────────
+    _hr("PHASE 6 – Accumulator RAM")
+    rss_acc0 = _rss_mb()
+    acc = MeasurementAccumulator(db, "load_w", flush_interval_s=300)
+    gc.collect()
+    _row("MeasurementAccumulator (leer)", _rss_mb() - rss_acc0)
+
+    # Befülle mit 1 Stunde Samples (alle 10 s = 360 Messwerte)
+    t0 = float(now - 3600)
+    for i in range(360):
+        acc.add_power(350.0 + i % 50, t0 + i * 10.0)
+    gc.collect()
+    _row("Accumulator nach 360 Samples (1h)", _rss_mb() - rss_acc0)
+    print(f"  {'Pending Buckets':<45} {acc.pending_buckets:>8}")
+
+    flushed = acc.flush(force_all=True)
+    gc.collect()
+    _row("Accumulator nach Flush", _rss_mb() - rss_acc0)
+    print(f"  {'Geflusht':<45} {flushed:>8} Buckets")
+
+    # ── ApplianceTracker ────────────────────────────────────────────────────
+    _hr("PHASE 6 – ApplianceTracker RAM")
+    rss_at0 = _rss_mb()
+    tracker = ApplianceTracker(db=db)
+    gc.collect()
+    _row("ApplianceTracker (leer)", _rss_mb() - rss_at0)
+
+    # Synthetische Geräteläufe: 5 Geräte × 50 Läufe = 250 Runs
+    appliances = ["dishwasher", "washing_machine", "dryer", "oven", "ev_charger"]
+    for app in appliances:
+        for run in range(50):
+            # Läufe über die letzten 90 Tage verteilt
+            start = float(now - (90 - run) * 86400 - run * 1800)
+            end = start + 3600.0 + run * 120
+            db.record_appliance_run(app, start, end, 800.0 + run * 5)
+    gc.collect()
+    _row("Nach 250 Appliance-Runs (DB)", _rss_mb() - rss_at0)
+
+    # Pattern-Lernen auslösen
+    tracker._refresh_patterns()
+    gc.collect()
+    _row("Nach Pattern-Lernen (5 Geräte)", _rss_mb() - rss_at0)
+
+    # Pattern-Forecast über 96 Slots
+    from datetime import datetime, timedelta, timezone
+
+    ts_list = [
+        datetime(2025, 4, 28, 0, 0, tzinfo=timezone.utc) + timedelta(minutes=15 * i)
+        for i in range(96)
+    ]
+    _ = tracker.predict_contributions(ts_list)
+    gc.collect()
+    _row("Nach predict_contributions (96 Slots)", _rss_mb() - rss_at0)
+
+    # ── Gesamtbilanz ────────────────────────────────────────────────────────
+    _hr("PHASE 6 – Gesamtbilanz")
+    total_adaptive = _rss_mb() - base_rss
+    _row("Gesamt-Delta adaptive Komponenten", total_adaptive)
+    print()
+    if total_adaptive < 5.0:
+        print("  ✓ Adaptive Load < 5 MB – gut für embedded")
+    elif total_adaptive < 20.0:
+        print("  ⚠ Adaptive Load 5–20 MB – akzeptabel")
+    else:
+        print("  ✗ Adaptive Load > 20 MB – zu viel für embedded")
+
+    # Aufräumen
+    del db, acc, tracker
+    gc.collect()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -263,7 +403,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="GridPythia RAM Profiler")
     parser.add_argument(
         "--phase",
-        choices=["imports", "full", "objects", "modules", "arrays", "all"],
+        choices=["imports", "full", "objects", "modules", "arrays", "adaptive", "all"],
         default="all",
         help="Welche Analyse-Phase ausführen (default: all)",
     )
@@ -288,6 +428,9 @@ def main() -> None:
 
     if phase in ("arrays", "all"):
         phase_arrays()
+
+    if phase in ("adaptive", "all"):
+        phase_adaptive()
 
     if phase in ("objects", "all"):
         phase_objects()

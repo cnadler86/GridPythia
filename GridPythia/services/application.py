@@ -234,11 +234,25 @@ class GridPythiaService:
             if raw_load_path.is_absolute()
             else (self.config_path.parent / raw_load_path)
         )
+
+        from GridPythia.prediction.load.config import AdaptiveLoadConfig
+
+        adaptive_cfg = AdaptiveLoadConfig(
+            enabled=pred_cfg.load.adaptive.enabled,
+            decay_days=pred_cfg.load.adaptive.decay_days,
+            min_samples=pred_cfg.load.adaptive.min_samples,
+            blend_factor=pred_cfg.load.adaptive.blend_factor,
+            db_path=pred_cfg.load.adaptive.db_path,
+            flush_interval_s=pred_cfg.load.adaptive.flush_interval_s,
+            mqtt_topic=pred_cfg.load.adaptive.mqtt_topic,
+        )
+
         load_provider = load_provider_from_config(
             LoadProfileConfig(
                 path=load_path,
                 country=pred_cfg.load.country or None,
                 subdivision=pred_cfg.load.subdivision or None,
+                adaptive=adaptive_cfg,
             )
         )
 

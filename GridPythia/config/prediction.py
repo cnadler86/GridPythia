@@ -47,6 +47,23 @@ class FeedInTariffConfig(BaseModel):
     )
 
 
+class AdaptiveLoadConfigModel(BaseModel):
+    """Configuration for the adaptive (learning) load provider.
+
+    Note:
+        ``vacation_mode`` is a runtime-only flag and is NOT part of the
+        config file.  Toggle it via the REST API.
+    """
+
+    enabled: bool = False
+    decay_days: int = Field(default=30, ge=7, le=365)
+    min_samples: int = Field(default=7, ge=1)
+    blend_factor: float = Field(default=0.7, ge=0.0, le=1.0)
+    db_path: str = "data/tsdb_load.sqlite"
+    flush_interval_s: int = Field(default=300, ge=30, le=3600)
+    mqtt_topic: str = "gridpythia/sensors/load_w"
+
+
 class LoadConfigModel(BaseModel):
     """Configuration for household load profile providers."""
 
@@ -59,6 +76,7 @@ class LoadConfigModel(BaseModel):
         ge=0.0,
         description="Provider cache TTL in hours. None = always fetch fresh.",
     )
+    adaptive: AdaptiveLoadConfigModel = Field(default_factory=AdaptiveLoadConfigModel)
 
 
 class PVPlaneConfigModel(BaseModel):

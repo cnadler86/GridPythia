@@ -217,8 +217,15 @@ def load_provider_from_config(cfg: LoadProfileConfig) -> LoadProvider:
     """Instantiate the correct :class:`LoadProvider` from a :class:`LoadProfileConfig`.
 
     CSV files map to :class:`~GridPythia.prediction.load.profilecsv.LoadProfileCSV`.
+    When ``cfg.adaptive.enabled`` is True, wraps the base provider with
+    :class:`~GridPythia.prediction.load.adaptive.AdaptiveLoadProvider`.
     """
     # Lazy imports to avoid circular dependency (subclasses import from this module).
     from GridPythia.prediction.load.profilecsv import LoadProfileCSV  # noqa: PLC0415
+
+    if cfg.adaptive.enabled:
+        from GridPythia.prediction.load.adaptive import AdaptiveLoadProvider  # noqa: PLC0415
+
+        return cast(LoadProvider, AdaptiveLoadProvider(cfg, cfg.adaptive))
 
     return cast(LoadProvider, LoadProfileCSV(cfg))

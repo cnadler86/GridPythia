@@ -43,9 +43,18 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     scheduler_task = asyncio.create_task(run_scheduler(), name="server-scheduler")
     asyncio.create_task(run_startup_fetch(), name="startup-prediction-fetch")
 
+    # Start plugins
+    plugin_registry = getattr(app.state, "plugin_registry", None)
+    if plugin_registry is not None:
+        await plugin_registry.startup_all()
+
     try:
         yield
     finally:
+        # Shutdown plugins
+        if plugin_registry is not None:
+            await plugin_registry.shutdown_all()
+
         if mqtt_task is not None and not mqtt_task.done():
             mqtt_task.cancel()
             try:
@@ -107,6 +116,20 @@ def create_app(config_path: Path) -> FastAPI:
     app.include_router(optimization_router, prefix="/api")
     app.include_router(realtime_router, prefix="/api")
     app.include_router(appliance_router, prefix="/api")
+
+    # ── Plugin system (lazy-loaded based on config) ───────────────────
+    try:
+        cfg, _ = services.load_config()
+    except Exception:
+        cfg = None
+
+    if cfg is not None:
+        from GridPythia.server.plugins.registry import PluginRegistry
+
+        registry = PluginRegistry()
+        registry.discover(cfg)
+        registry.register_all(app, cfg)
+        app.state.plugin_registry = registry
 
     # Static frontend – mounted last so all /api/* routes take precedence.
     app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")
