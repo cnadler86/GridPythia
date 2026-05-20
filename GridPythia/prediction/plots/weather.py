@@ -144,7 +144,9 @@ class WeatherPlotter(PredictionPlotter):
             height=max(300, 200 * n),
         )
         xaxes_kwargs: dict = {
-            "tickformat": "%d.%m.%y",
+            "tickformat": "%H:%M",
+            "dtick": 21_600_000,
+            "hoverformat": "%d.%m.%Y %H:%M",
             "showgrid": True,
             "gridcolor": "#e8e8e8",
             "minor": {

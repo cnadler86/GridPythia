@@ -402,7 +402,9 @@ class SolutionPlotter:
             height=max(500, 220 * n_rows),
         )
         fig.update_xaxes(
-            tickformat="%d.%m.%y",
+            tickformat="%H:%M",
+            dtick=21_600_000,
+            hoverformat="%d.%m.%Y %H:%M",
             showgrid=True,
             gridcolor="#e8e8e8",
             minor={
@@ -713,7 +715,9 @@ class SolutionPlotter:
         }
         fig.update_layout(**layout_params)
         fig.update_xaxes(
-            tickformat="%d.%m.%y",
+            tickformat="%H:%M",
+            dtick=21_600_000,
+            hoverformat="%d.%m.%Y %H:%M",
             showgrid=True,
             gridcolor="#e8e8e8",
             minor={

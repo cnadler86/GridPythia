@@ -29,6 +29,22 @@ _LAYOUT_DEFAULTS: dict[str, Any] = {
     "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
 }
 
+_XAXIS_TIME_DEFAULTS: dict[str, Any] = {
+    # Keep the axis compact for mobile: major ticks every 6 hours.
+    "tickformat": "%H:%M",
+    "dtick": 21_600_000,
+    # Hover always shows full date + time, independent of axis labels.
+    "hoverformat": "%d.%m.%Y %H:%M",
+    "showgrid": True,
+    "gridcolor": "#e8e8e8",
+    "minor": {
+        "dtick": 3_600_000,
+        "showgrid": True,
+        "gridcolor": "rgba(200,200,200,0.35)",
+        "ticks": "",
+    },
+}
+
 
 def apply_default_layout(
     fig: Any,
@@ -44,9 +60,8 @@ def apply_default_layout(
         title:        Chart title.
         xaxis_title:  Label for the x-axis.
         yaxis_title:  Unit label appended to the chart title in brackets.
-        The x-axis keeps Plotly's automatic major tick labeling so labels are
-        responsive to available width; hourly vertical guide lines are rendered
-        via minor ticks.
+        The x-axis uses compact 6-hour major ticks with time labels, while
+        hover always includes full date and time.
     """
     full_title = (
         f"{title} [{yaxis_title}]" if title and yaxis_title else title or yaxis_title or None
@@ -56,18 +71,7 @@ def apply_default_layout(
         title=full_title,
         xaxis_title=xaxis_title or None,
     )
-    xaxes_kwargs: dict[str, Any] = {
-        "tickformat": "%d.%m.%y",
-        "showgrid": True,
-        "gridcolor": "#e8e8e8",
-        "minor": {
-            "dtick": 3_600_000,
-            "showgrid": True,
-            "gridcolor": "rgba(200,200,200,0.35)",
-            "ticks": "",
-        },
-    }
-    fig.update_xaxes(**xaxes_kwargs)
+    fig.update_xaxes(**_XAXIS_TIME_DEFAULTS)
     fig.update_yaxes(showgrid=True, gridcolor="#e8e8e8")
 
 
