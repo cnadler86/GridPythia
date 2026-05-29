@@ -220,3 +220,19 @@ class OptimizeSummary(BaseModel):
     savings_eur: float
     parity_ok: bool | None = None
     solved_at: str | None = None
+
+
+# ── Vacation mode ─────────────────────────────────────────────────────────
+
+
+class VacationModeRequest(BaseModel):
+    """Request body for ``PUT /api/vacation_mode``."""
+
+    enabled: bool = Field(..., description="True to activate vacation mode, False to deactivate")
+
+
+class VacationModeResponse(BaseModel):
+    """Response for vacation mode GET / PUT."""
+
+    enabled: bool
+    description: str = ""

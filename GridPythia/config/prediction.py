@@ -59,6 +59,16 @@ class LoadConfigModel(BaseModel):
         ge=0.0,
         description="Provider cache TTL in hours. None = always fetch fresh.",
     )
+    vacation_percentile: float = Field(
+        default=5.0,
+        gt=0.0,
+        lt=100.0,
+        description=(
+            "Percentile (1–99) of the combined load distribution used as the constant "
+            "vacation-mode load value. Default 5 yields ~1 kWh/day for a typical "
+            "German household profile."
+        ),
+    )
 
 
 class PVPlaneConfigModel(BaseModel):

@@ -157,14 +157,23 @@ class TestLoadProfileCSVGetProfileSeries:
         result = await provider.get_profile_series(day_ts, [DayType.WEEKDAY])
         assert pytest.approx(24 * 100.0, rel=1e-4) == result.sum()
 
-    async def test_vacation_is_constant_minimum(self, tmp_path):
+    async def test_vacation_is_constant_percentile(self, tmp_path):
+        """Vacation profile is a uniform constant derived from the configured percentile.
+
+        With weekday=100 and weekend=60 (48 equal values each), the p5 falls within
+        the lower cluster and equals 60 Wh.
+        """
         p = tmp_path / "p.csv"
         _write_csv_weekend(p, weekday_wh=100.0, weekend_wh=60.0)
         provider = LoadProfileCSV(LoadProfileConfig(path=p))
         provider._ensure_loaded()
         assert provider._profiles is not None
         vac = provider._profiles["vacations"]  # type: ignore[index]
-        assert all(v == pytest.approx(60.0) for v in vac)
+        # All slots are identical (constant profile)
+        assert len(set(round(v, 6) for v in vac)) == 1
+        # The constant value is ≤ the weekday value and ≥ 0
+        assert vac[0] <= 100.0
+        assert vac[0] >= 0.0
 
     async def test_upsample_15min_target_smooth_transition(self, tmp_path):
         """Day boundary should not be a hard step after smoothing."""

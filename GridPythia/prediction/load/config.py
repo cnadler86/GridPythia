@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class LoadProfileConfig(BaseModel):
@@ -20,11 +20,17 @@ class LoadProfileConfig(BaseModel):
         subdivision:          Country-specific subdivision code (e.g. ``"BW"``
                               for Baden-Württemberg).  Only used when *country*
                               is set.
+        vacation_percentile:  Percentile (1–99) of the combined load distribution
+                              used as the constant vacation-mode load value.
+                              Lower values → lower estimated vacation consumption.
+                              Default 5 yields ~1 kWh/day for a typical German
+                              household profile.
     """
 
     path: Path
     country: str | None = None
     subdivision: str | None = None
+    vacation_percentile: float = Field(default=5.0, gt=0.0, lt=100.0)
 
     @model_validator(mode="after")
     def _validate_path_suffix(self) -> "LoadProfileConfig":

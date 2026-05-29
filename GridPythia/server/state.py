@@ -116,6 +116,11 @@ coordinator: InverterCoordinator = InverterCoordinator()
 # Updated by the MQTT gateway (retained topic) or via the HTTP appliance endpoint.
 appliance_forecasts: dict[str, list[dict]] = {}
 
+# ── Vacation mode ─────────────────────────────────────────────────────────
+# When True the load forecast uses the minimum (vacation) profile instead of
+# the regular weekday/weekend profile.  Toggled via PUT /api/vacation_mode.
+vacation_mode: bool = False
+
 # ── Scheduler next-run info ───────────────────────────────────────────────
 # Set by run_scheduler() each cycle so WS clients can be hydrated on connect.
 # Keys: dispatch_slot (ISO str), run_at (ISO str), lead_s (float).

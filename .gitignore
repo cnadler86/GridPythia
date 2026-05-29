@@ -6,6 +6,7 @@ output/
 *.xlsx
 *.yaml
 *.code-workspace
+*.sqlite
 
 .agents
 skills-lock.json

@@ -7,6 +7,7 @@ GET  /api/predictions/status – cache status (age, TTL, forecast_from).
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace as _dc_replace
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -130,6 +131,8 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
 
     try:
         setup = services.get_providers(cfg, raw_yaml)
+        if state.vacation_mode:
+            setup = _dc_replace(setup, use_vacation_profile=True)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Provider build error: {exc}") from exc
 

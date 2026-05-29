@@ -236,6 +236,7 @@ def _register_builtin_providers() -> None:
                 path=Path(cfg.get("path", "")),
                 country=cfg.get("country"),
                 subdivision=cfg.get("subdivision"),
+                vacation_percentile=float(cfg.get("vacation_percentile", 5.0)),
             )
         )
 

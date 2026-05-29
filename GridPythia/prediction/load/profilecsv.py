@@ -10,8 +10,10 @@ Expected file format
   * ``weekday`` – mean energy in Wh for the corresponding time slot on a weekday.
   * Either ``weekend`` **or** both ``saturday`` and ``sunday``.
 
-* The **vacation** profile is computed automatically as the minimum Wh value
-  found anywhere in the data, spread uniformly across all time slots.
+* The **vacation** profile is computed automatically as the *p*-th percentile
+  (default p\u202f=\u202f5) of all Wh values across all profiles, spread uniformly
+  across all time slots.  The percentile is configurable via
+  :attr:`~GridPythia.prediction.load.config.LoadProfileConfig.vacation_percentile`.
 
 All source values are treated as energy in Wh per source time step.
 :meth:`fetch` and :meth:`get_profile_series` convert to the requested
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import csv
 import io
+import statistics
 
 import numpy as np
 from structlog import get_logger
@@ -60,6 +63,7 @@ class LoadProfileCSV(LoadProvider):
     def __init__(self, config: LoadProfileConfig) -> None:
         super().__init__(country=config.country, subdivision=config.subdivision)
         self._file_path = config.path
+        self._vacation_percentile: float = config.vacation_percentile
         self._profiles: dict[str, list[float]] | None = None
         self._source_dt_hours: float | None = None
 
@@ -119,10 +123,17 @@ class LoadProfileCSV(LoadProvider):
                 f"{self._file_path.name}: need 'weekend' or 'saturday'+'sunday' column(s)"
             )
 
-        # Vacation = constant minimum of all energy values across all profiles
+        # Vacation profile = p-th percentile of all energy values across all profiles,
+        # spread uniformly.  Uses only the built-in statistics module.
         all_values = [v for vals in profiles.values() for v in vals]
-        min_wh = float(np.min(all_values)) if all_values else 0.0
-        profiles["vacations"] = [min_wh] * expected_slots
+        if all_values:
+            # statistics.quantiles(data, n=100) returns 99 cut-points (1st – 99th pct).
+            # Index k-1 gives the k-th percentile.
+            pct_idx = max(0, min(98, round(self._vacation_percentile) - 1))
+            vacation_wh = statistics.quantiles(all_values, n=100)[pct_idx]
+        else:
+            vacation_wh = 0.0
+        profiles["vacations"] = [vacation_wh] * expected_slots
 
         self._profiles = profiles
 

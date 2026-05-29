@@ -10,6 +10,7 @@ from __future__ import annotations
 import bisect
 import hashlib
 import json
+from dataclasses import replace as _dc_replace
 from datetime import datetime, timezone
 from math import floor
 from pathlib import Path
@@ -168,11 +169,13 @@ def _prediction_cache_key(start_ts: datetime, cfg_mtime: float) -> str:
     """Generate cache key for prediction result based on start timestamp and config.
 
     Uses slot-aligned timestamp so requests within the same slot reuse cached data.
+    Includes vacation_mode so toggling always produces a distinct cache entry.
     """
     # Use ISO format for stable string representation
     slot_str = start_ts.isoformat()
     cfg_hash = str(int(cfg_mtime * 1000))  # Convert mtime to stable string
-    return f"pred:{slot_str}:{cfg_hash}"
+    vac = "v1" if state.vacation_mode else "v0"
+    return f"pred:{slot_str}:{cfg_hash}:{vac}"
 
 
 def _prediction_cache_get(cache_key: str) -> dict[str, Any] | None:
@@ -340,6 +343,7 @@ def build_providers(
             "path": str(load_path),
             "country": pred_cfg.load.country or None,
             "subdivision": pred_cfg.load.subdivision or None,
+            "vacation_percentile": pred_cfg.load.vacation_percentile,
         },
         fresh=fresh_instances,
     )
@@ -800,6 +804,8 @@ async def run_optimization_cycle(
     dt_hours = float(cfg.prediction.dt_hours)
 
     setup = get_providers(cfg, raw_yaml)
+    if state.vacation_mode:
+        setup = _dc_replace(setup, use_vacation_profile=True)
     optimizer = get_optimizer(cfg)
 
     # ── Inverter readiness check ──────────────────────────────────────

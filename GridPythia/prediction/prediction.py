@@ -332,6 +332,10 @@ class PredictionSetup:
 
     All fields are optional — omitted numeric core domains become zero arrays.
     *pv* maps plant-name prefixes to their forecast provider.
+
+    *use_vacation_profile* instructs the load provider to use the minimum
+    (vacation) profile for every slot instead of the regular weekday/weekend
+    profile.  Set this flag when nobody is home to reduce the forecasted load.
     """
 
     electricprice: ElecPriceProvider | None = None
@@ -339,6 +343,7 @@ class PredictionSetup:
     load: LoadProvider | None = None
     pv: dict[str, PVForecastProvider] = field(default_factory=dict)
     weather: WeatherProvider | None = None
+    use_vacation_profile: bool = False
 
 
 class Prediction:
@@ -466,6 +471,8 @@ class Prediction:
         - Internet-backed providers receive UTC timestamps.
         - Load providers receive the local-TZ-aligned timestamps
           (load profiles are date-indexed, not UTC-offset-dependent).
+
+        The vacation-profile flag is read from :attr:`PredictionSetup.use_vacation_profile`.
         """
         requested_start = self._normalize_start(start)
         timestamps, start_idx = self._build_aligned_timestamps(
@@ -511,7 +518,14 @@ class Prediction:
             if self.setup.feedintariff
             else _zeros()
         )
-        load_coro = self.setup.load.fetch(load_provider_timestamps) if self.setup.load else _zeros()
+        load_coro = (
+            self.setup.load.fetch(
+                load_provider_timestamps,
+                use_vacation_profile=self.setup.use_vacation_profile,
+            )
+            if self.setup.load
+            else _zeros()
+        )
         weather_coro = (
             self.setup.weather.fetch(internet_provider_timestamps) if self.setup.weather else None
         )
@@ -603,6 +617,8 @@ class Prediction:
         are returned as a :class:`PredictionData` with zeros for the failed
         ones.
 
+        The vacation-profile flag is read from :attr:`PredictionSetup.use_vacation_profile`.
+
         Returns:
             ``(PredictionData, errors)`` where *errors* is empty on full success.
         """
@@ -642,7 +658,12 @@ class Prediction:
         )
         load_task = asyncio.create_task(
             _safe(
-                self.setup.load.fetch(timestamps) if self.setup.load else _return(zeros),
+                self.setup.load.fetch(
+                    timestamps,
+                    use_vacation_profile=self.setup.use_vacation_profile,
+                )
+                if self.setup.load
+                else _return(zeros),
                 getattr(self.setup.load, "provider_id", "load"),
                 zeros.copy(),
             )
