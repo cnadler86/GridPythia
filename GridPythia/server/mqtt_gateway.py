@@ -119,12 +119,24 @@ class MqttGateway:
             if not isinstance(payload, list):
                 logger.warning("mqtt_appliance_not_list", topic=topic_str)
                 return
-            if payload:
-                state.appliance_forecasts[appliance_id] = payload
+            # Validate slot structure: each entry must have 'time' and 'load_wh'
+            valid_slots = []
+            for slot in payload:
+                if not isinstance(slot, dict):
+                    continue
+                if "time" not in slot or "load_wh" not in slot:
+                    continue
+                try:
+                    float(slot["load_wh"])
+                except (TypeError, ValueError):
+                    continue
+                valid_slots.append(slot)
+            if valid_slots:
+                state.appliance_forecasts[appliance_id] = valid_slots
                 logger.info(
                     "mqtt_appliance_forecast_updated",
                     appliance_id=appliance_id,
-                    slots=len(payload),
+                    slots=len(valid_slots),
                 )
             else:
                 # Empty payload = clear the retained forecast
@@ -154,6 +166,16 @@ class MqttGateway:
             mode = int(payload.get("mode", 0))
         except (TypeError, ValueError) as exc:
             logger.warning("mqtt_invalid_values", topic=topic_str, error=str(exc))
+            return
+
+        from math import isfinite  # noqa: PLC0415
+
+        if not isfinite(soc) or not (0.0 <= soc <= 100.0):
+            logger.warning("mqtt_soc_out_of_range", topic=topic_str, soc=soc)
+            return
+
+        if mode not in (0, 1, 2, 3, 4):
+            logger.warning("mqtt_mode_out_of_range", topic=topic_str, mode=mode)
             return
 
         try:

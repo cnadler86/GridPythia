@@ -25,6 +25,19 @@ _NEXT_SLOT_EPSILON_S = 1.1
 # First entry is 0 → immediate first attempt; subsequent entries add wait time.
 _STARTUP_BACKOFF_DELAYS_S = [0, 5, 10, 20, 40, 60, 120, 240, 480]
 
+# Cache ZoneInfo instances to avoid re-creating each scheduler cycle.
+_zoneinfo_cache: dict[str, ZoneInfo] = {}
+
+
+def _get_zoneinfo(tz_name: str) -> ZoneInfo:
+    """Return a cached ZoneInfo for *tz_name*."""
+    cached = _zoneinfo_cache.get(tz_name)
+    if cached is not None:
+        return cached
+    zi = ZoneInfo(tz_name)
+    _zoneinfo_cache[tz_name] = zi
+    return zi
+
 
 def _solver_time_limit_seconds(cfg) -> float:
     """Return the configured solver time limit used to size the scheduler lead."""
@@ -103,9 +116,9 @@ async def run_startup_fetch() -> None:
             continue
 
         try:
-            tz = ZoneInfo(cfg.server.timezone or "UTC")
+            tz = _get_zoneinfo(cfg.server.timezone or "UTC")
         except Exception:
-            tz = ZoneInfo("UTC")
+            tz = _get_zoneinfo("UTC")
 
         try:
             setup = services.get_providers(cfg, raw_yaml)
@@ -166,7 +179,7 @@ async def run_scheduler() -> None:
             cfg, raw_yaml = services.load_config()
             server_tz_str = cfg.server.timezone or "UTC"
             try:
-                server_tz = ZoneInfo(server_tz_str)
+                server_tz = _get_zoneinfo(server_tz_str)
             except Exception:
                 server_tz = ZoneInfo("UTC")
 

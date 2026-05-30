@@ -209,3 +209,22 @@ class TestNextOptimizationSlot:
         assert slot >= self._dt(14, 7)
         total_minutes = slot.hour * 60 + slot.minute
         assert total_minutes % interval == 0, f"slot {slot} not aligned to {interval} min grid"
+
+    def test_just_past_grace_period_advances(self):
+        """1.5 s past slot boundary → must advance to next slot (grace is 1 s)."""
+        t = datetime(2026, 4, 23, 14, 0, 1, 500_000, tzinfo=self.UTC)
+        slot = next_optimization_slot(t, 15)
+        assert slot == self._dt(14, 15)
+
+    def test_exactly_on_boundary_with_subsecond(self):
+        """0.5 s past slot → within grace → stays on current slot."""
+        t = datetime(2026, 4, 23, 14, 0, 0, 500_000, tzinfo=self.UTC)
+        slot = next_optimization_slot(t, 15)
+        assert slot == self._dt(14, 0)
+
+    def test_midnight_rollover(self):
+        """23:55 with 15 min interval → should roll to 00:00 next day."""
+        t = datetime(2026, 4, 23, 23, 55, 0, tzinfo=self.UTC)
+        slot = next_optimization_slot(t, 15)
+        expected = datetime(2026, 4, 24, 0, 0, 0, tzinfo=self.UTC)
+        assert slot == expected

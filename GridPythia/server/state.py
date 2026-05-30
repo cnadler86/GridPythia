@@ -45,13 +45,17 @@ config_cache_mtime: float = -1.0
 optimizer: "LinearOptimizer | None" = None
 optimizer_config_mtime: float = 0.0
 _optimizer_lock: "asyncio.Lock | None" = None
+_optimizer_lock_init_guard = __import__("threading").Lock()
 
 
 def get_optimizer_lock() -> asyncio.Lock:
     """Return (creating lazily) the asyncio lock that serialises solver calls."""
     global _optimizer_lock  # noqa: PLW0603
-    if _optimizer_lock is None:
-        _optimizer_lock = asyncio.Lock()
+    if _optimizer_lock is not None:
+        return _optimizer_lock
+    with _optimizer_lock_init_guard:
+        if _optimizer_lock is None:
+            _optimizer_lock = asyncio.Lock()
     return _optimizer_lock
 
 

@@ -173,6 +173,8 @@ class Battery:
         Returns:
             tuple[float, float]: (delivered_wh, losses_wh)
         """
+        if not isfinite(wh) or wh < 0.0:
+            return 0.0, 0.0
         s = self._soc_wh
         min_s = self.min_soc_wh
         eff = self.discharging_efficiency
@@ -193,6 +195,9 @@ class Battery:
         s -= raw_used
         if s < min_s:
             s = min_s
+        if not isfinite(s):
+            self._log.error("battery_discharge_nan", soc_wh=s, raw_used=raw_used)
+            s = min_s
         self._set_soc_wh_unchecked(s)
 
         return delivered, losses
@@ -203,6 +208,8 @@ class Battery:
         Returns:
             tuple[float, float]: (stored_wh, losses_wh)
         """
+        if not isfinite(wh) or wh < 0.0:
+            return 0.0, 0.0
         s = self._soc_wh
         max_s = self.max_soc_wh
         eff = self.charging_efficiency
@@ -219,6 +226,9 @@ class Battery:
 
         s += stored
         if s > max_s:
+            s = max_s
+        if not isfinite(s):
+            self._log.error("battery_charge_nan", soc_wh=s, stored=stored)
             s = max_s
         self._set_soc_wh_unchecked(s)
 
