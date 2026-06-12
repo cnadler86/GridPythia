@@ -13,7 +13,6 @@ import json
 from dataclasses import replace as _dc_replace
 from datetime import datetime, timezone
 from math import floor
-from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
@@ -27,8 +26,8 @@ import GridPythia.server.state as state
 from GridPythia.config import AppConfig
 from GridPythia.optimization.solution import OptimizationObjective
 from GridPythia.optimization.solver import LinearOptimizer
+from GridPythia.prediction.factory import build_prediction_setup
 from GridPythia.prediction.prediction import PredictionData, PredictionSetup
-from GridPythia.prediction.registry import provider_registry
 from GridPythia.server.models import InverterPlanResponse, InverterPlanStep
 from GridPythia.server.plan_utils import stitch_current_slot_from_previous_plan
 from GridPythia.simulation.devices import InverterMode
@@ -42,7 +41,7 @@ _MODE_NAMES: dict[int, str] = {m.value: m.name for m in InverterMode}
 
 def _json_hash(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(raw.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def _inverter_config_signature(cfg: AppConfig) -> str:
@@ -305,89 +304,14 @@ def build_providers(
 ) -> PredictionSetup:
     """Instantiate all prediction providers from *AppConfig*.
 
-    Args:
-        cfg: Parsed app config.
-        raw_yaml: Raw YAML config dictionary.
-        fresh_instances: Force newly constructed provider instances and bypass
-            the registry singleton cache.
+    Thin wrapper around :func:`~GridPythia.prediction.factory.build_prediction_setup`
+    that resolves relative paths against the server config location.
     """
-    pred_cfg = cfg.prediction
-
-    # Electric price
-    ep_cfg = {
-        "bidding_zone": pred_cfg.electricprice.energycharts.bidding_zone,
-        "charges_kwh": pred_cfg.electricprice.charges_kwh,
-        "vat_rate": pred_cfg.electricprice.vat_rate,
-        "region": pred_cfg.electricprice.epexpredictor.region,
-        "base_url": pred_cfg.electricprice.epexpredictor.base_url,
-    }
-    electricprice = provider_registry.create_electricprice(
-        pred_cfg.electricprice.provider,
-        ep_cfg,
-        fresh=fresh_instances,
-    )
-
-    feedintariff = provider_registry.create_feedintariff(
-        pred_cfg.feedintariff.provider,
-        {"tariff_kwh": pred_cfg.feedintariff.tariff_kwh},
-        fresh=fresh_instances,
-    )
-
-    raw_load_path = Path(pred_cfg.load.path)
-    load_path = (
-        raw_load_path if raw_load_path.is_absolute() else (state.config_path.parent / raw_load_path)
-    )
-    load_provider = provider_registry.create_load(
-        pred_cfg.load.provider,
-        {
-            "path": str(load_path),
-            "country": pred_cfg.load.country or None,
-            "subdivision": pred_cfg.load.subdivision or None,
-            "vacation_percentile": pred_cfg.load.vacation_percentile,
-        },
-        fresh=fresh_instances,
-    )
-
-    plane_cfg = pred_cfg.pvforecast.plane
-    om_cfg = pred_cfg.pvforecast.openmeteo
-    pv_provider = provider_registry.create_pvforecast(
-        pred_cfg.pvforecast.provider,
-        {
-            "latitude": pred_cfg.latitude,
-            "longitude": pred_cfg.longitude,
-            "plane": {
-                "peak_kw": plane_cfg.peak_kw,
-                "tilt": plane_cfg.tilt,
-                "azimuth": plane_cfg.azimuth,
-                "userhorizon": list(plane_cfg.userhorizon),
-                "loss_pct": plane_cfg.loss_pct,
-                "inverter_id": plane_cfg.inverter_id,
-            },
-            "openmeteo": {
-                "api_key": om_cfg.api_key or None,
-                "weather_model": om_cfg.weather_model or None,
-                "damping_morning": om_cfg.damping_morning,
-                "damping_evening": om_cfg.damping_evening,
-                "partial_shading": om_cfg.partial_shading,
-            },
-        },
-        fresh=fresh_instances,
-    )
-
-    weather_provider = None
-    if "weather" in raw_yaml.get("prediction", {}):
-        weather_provider = provider_registry.create_weather(
-            pred_cfg.weather.provider,
-            {"latitude": pred_cfg.latitude, "longitude": pred_cfg.longitude},
-            fresh=fresh_instances,
-        )
-
-    return PredictionSetup(
-        electricprice=electricprice,
-        feedintariff=feedintariff,
-        load=load_provider,
-        pv={plane_cfg.inverter_id: pv_provider},
-        weather=weather_provider,
+    return build_prediction_setup(
+        cfg,
+        raw_yaml,
+        state.config_path.parent,
+        fresh_instances=fresh_instances,
     )
 
 
@@ -441,7 +365,7 @@ def get_optimizer(cfg: AppConfig) -> LinearOptimizer:
         )
         state.optimizer_config_mtime = mtime
         # Sync coordinator max-age from server config
-        state.coordinator._max_age_s = cfg.server.inverter_status_max_age_s
+        state.coordinator.max_age_s = cfg.server.inverter_status_max_age_s
         logger.info("optimizer_rebuilt", objective=cfg.optimization.solver.objective)
     return state.optimizer
 
@@ -797,7 +721,6 @@ async def run_optimization_cycle(
     """
     # Lazy imports to avoid circular import at module level
     from GridPythia.optimization.runner import run_optimization  # noqa: PLC0415
-    from GridPythia.optimization.solution import OptimizationObjective  # noqa: PLC0415
     from GridPythia.prediction.prediction import Prediction  # noqa: PLC0415
     from GridPythia.server.models import OptimizeSummary  # noqa: PLC0415
 
@@ -832,10 +755,11 @@ async def run_optimization_cycle(
 
     initial_modes = state.coordinator.get_initial_modes(optimizer.inverters)
     if initial_modes_overrides:
-        from GridPythia.simulation.devices import InverterMode as _IM  # noqa: PLC0415
-
         initial_modes.update(
-            {inv_id: _IM(int(mode)) for inv_id, mode in initial_modes_overrides.items()}
+            {
+                inv_id: InverterMode(int(mode))
+                for inv_id, mode in initial_modes_overrides.items()
+            }
         )
 
     # ── Solver opts ───────────────────────────────────────────────────
@@ -955,8 +879,6 @@ async def run_optimization_cycle(
             )
 
     # ── Savings vs. naive baseline ────────────────────────────────────
-    import numpy as np  # noqa: PLC0415
-
     pv_total = np.zeros(solver_pdata.steps, dtype=float)
     for arr in solver_pdata.pv_by_inverter.values():
         pv_total += np.asarray(arr, dtype=float)
@@ -980,8 +902,6 @@ async def run_optimization_cycle(
     parity_ok = solution.parity_report.ok if solution.parity_report is not None else None
 
     # ── Summary ───────────────────────────────────────────────────────
-    from GridPythia.server.models import OptimizeSummary  # noqa: PLC0415, F811
-
     summary = OptimizeSummary(
         solver_status=solution.solver_status,
         solve_time_s=round(solution.solve_time_s, 2),

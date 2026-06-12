@@ -115,8 +115,8 @@ async def fetch_predictions(req: FetchRequest) -> JSONResponse:
             ...
           },
           "from_cache": false|true,
-          "errors": {"EnergyCharts": "..."}   // only present when partial failure
-        }
+          "errors": {"electricprice": "..."}  // only present when partial failure
+        }                                     // (keys: channel ids from fetch_partial)
     """
     try:
         cfg, raw_yaml = services.load_config()

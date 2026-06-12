@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from structlog import get_logger
 
 import GridPythia.server.state as state
 from GridPythia.server import services
 from GridPythia.server.models import InverterStatusResponse
 from GridPythia.simulation.devices import InverterMode
+
+logger = get_logger(__name__)
 
 router = APIRouter(tags=["realtime"])
 
@@ -68,8 +71,9 @@ async def dashboard_ws(websocket: WebSocket) -> None:
                     },
                 }
             )
-        except Exception:
-            pass  # non-critical – client can fall back to polling
+        except Exception as exc:
+            # non-critical – client can fall back to polling
+            logger.debug("websocket hydration failed", error=str(exc))
 
         while True:
             # We currently ignore incoming frames and only use this loop

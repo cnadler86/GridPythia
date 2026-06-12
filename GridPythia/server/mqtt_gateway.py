@@ -26,9 +26,11 @@ are GIL-protected and are safe to call from a non-async thread.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timezone
+from math import isfinite
 from threading import Event
 from urllib.parse import urlparse
 
@@ -168,8 +170,6 @@ class MqttGateway:
             logger.warning("mqtt_invalid_values", topic=topic_str, error=str(exc))
             return
 
-        from math import isfinite  # noqa: PLC0415
-
         if not isfinite(soc) or not (0.0 <= soc <= 100.0):
             logger.warning("mqtt_soc_out_of_range", topic=topic_str, soc=soc)
             return
@@ -223,8 +223,8 @@ class MqttGateway:
         The message is published with ``retain=True`` so that a newly
         connecting controller immediately receives the last known plan.
         """
-        published_at = datetime.now(tz=timezone.utc).isoformat()
-        published_at_dt = datetime.fromisoformat(published_at)
+        published_at_dt = datetime.now(tz=timezone.utc)
+        published_at = published_at_dt.isoformat()
         for plan in inverter_plans:
             device_id = plan.get("device_id", "")
             if not device_id:
@@ -264,8 +264,6 @@ class MqttGateway:
 
 
 # ── Async adapter used from the FastAPI lifespan ──────────────────────────
-
-import asyncio
 
 
 async def run_gateway(cfg: MqttConfig) -> None:

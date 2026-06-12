@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from GridPythia.config.optimization import OptimizationConfig
@@ -42,6 +43,8 @@ def load_solver_fixture_scenario(
             raise ValueError(f"Unknown fixture_key={key!r}. Expected one of {sorted(FIXTURE_PATHS)}")
         fixture = FIXTURE_PATHS[key]
     config_file = config_path or Path("config.yaml")
+    if not config_file.is_file():
+        pytest.skip(f"{config_file} not found")
 
     payload = json.loads(fixture.read_text(encoding="utf-8"))
     config = yaml.safe_load(config_file.read_text(encoding="utf-8"))

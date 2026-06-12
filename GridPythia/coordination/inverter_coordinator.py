@@ -57,6 +57,15 @@ class InverterCoordinator:
         self._max_age_s = max_age_s
         self._states: dict[str, InverterState] = {}
 
+    @property
+    def max_age_s(self) -> float:
+        """Maximum allowed status age in seconds before a state counts as stale."""
+        return self._max_age_s
+
+    @max_age_s.setter
+    def max_age_s(self, value: float) -> None:
+        self._max_age_s = float(value)
+
     # ── State ingestion ────────────────────────────────────────────────
 
     def update_status(

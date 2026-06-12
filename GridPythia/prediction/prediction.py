@@ -613,9 +613,14 @@ class Prediction:
         """Like :meth:`fetch` but tolerates individual provider failures.
 
         Each provider is fetched independently.  Failures are collected in
-        *errors* (provider_id → error message) and the remaining channels
+        *errors* (channel key → error message) and the remaining channels
         are returned as a :class:`PredictionData` with zeros for the failed
         ones.
+
+        Channel keys are stable identifiers independent of the configured
+        provider: ``electricprice``, ``feedintariff``, ``load``, ``weather``
+        and ``pv:{plant_name}``.  Callers (e.g. the core-failure guards in
+        the server) rely on these exact keys.
 
         The vacation-profile flag is read from :attr:`PredictionSetup.use_vacation_profile`.
 
@@ -628,12 +633,17 @@ class Prediction:
         internet_ts = self._to_utc_timestamps(timestamps)
         errors: dict[str, str] = {}
 
-        async def _safe(coro, provider_id: str, fallback):
+        async def _safe(coro, channel_key: str, provider_id: str | None, fallback):
             try:
                 return await coro
             except Exception as exc:  # noqa: BLE001
-                errors[provider_id] = str(exc)
-                logger.warning("provider_fetch_failed", provider=provider_id, error=str(exc))
+                errors[channel_key] = str(exc)
+                logger.warning(
+                    "provider_fetch_failed",
+                    channel=channel_key,
+                    provider=provider_id,
+                    error=str(exc),
+                )
                 return fallback
 
         zeros = np.zeros(n, dtype=np.float32)
@@ -643,7 +653,8 @@ class Prediction:
                 self.setup.electricprice.fetch(internet_ts)
                 if self.setup.electricprice
                 else _return(zeros),
-                getattr(self.setup.electricprice, "provider_id", "electricprice"),
+                "electricprice",
+                getattr(self.setup.electricprice, "provider_id", None),
                 zeros.copy(),
             )
         )
@@ -652,7 +663,8 @@ class Prediction:
                 self.setup.feedintariff.fetch(internet_ts)
                 if self.setup.feedintariff
                 else _return(zeros),
-                getattr(self.setup.feedintariff, "provider_id", "feedintariff"),
+                "feedintariff",
+                getattr(self.setup.feedintariff, "provider_id", None),
                 zeros.copy(),
             )
         )
@@ -664,7 +676,8 @@ class Prediction:
                 )
                 if self.setup.load
                 else _return(zeros),
-                getattr(self.setup.load, "provider_id", "load"),
+                "load",
+                getattr(self.setup.load, "provider_id", None),
                 zeros.copy(),
             )
         )
@@ -674,6 +687,7 @@ class Prediction:
             name: asyncio.create_task(
                 _safe(
                     self.setup.pv[name].fetch_by_inverter(internet_ts),
+                    f"pv:{name}",
                     self.setup.pv[name].provider_id,
                     None,
                 )
@@ -685,6 +699,7 @@ class Prediction:
             asyncio.create_task(
                 _safe(
                     self.setup.weather.fetch(internet_ts),
+                    "weather",
                     self.setup.weather.provider_id,
                     None,
                 )
@@ -698,30 +713,48 @@ class Prediction:
             awaitables.append(weather_task)
         await asyncio.gather(*awaitables)
 
-        eprice = eprice_task.result()
-        ftariff = ftariff_task.result()
-        load_wh = load_task.result()
+        def _validated_or_zeros(name: str, values, channel_key: str) -> np.ndarray:
+            """Validate a series; on malformed data record the error and fall back to zeros."""
+            try:
+                return self._validate_series(name, values, n)
+            except Exception as exc:  # noqa: BLE001
+                errors.setdefault(channel_key, str(exc))
+                logger.warning("provider_result_invalid", channel=channel_key, error=str(exc))
+                return zeros.copy()
+
+        eprice = _validated_or_zeros(
+            "electricprice_eur_wh", eprice_task.result(), "electricprice"
+        )
+        ftariff = _validated_or_zeros("feedintariff_eur_wh", ftariff_task.result(), "feedintariff")
+        load_wh = _validated_or_zeros("load_wh", load_task.result(), "load")
 
         pv_arrays: dict[str, np.ndarray] = {}
         for name in pv_names:
             result = pv_tasks[name].result()
             if result is not None and isinstance(result, Mapping):
+                channel_key = f"pv:{name}"
                 for inv_id, arr in result.items():
-                    pv_arrays[str(inv_id)] = np.asarray(arr, dtype=np.float32)
+                    try:
+                        pv_arrays[str(inv_id)] = self._validate_series(f"pv_{inv_id}_wh", arr, n)
+                    except Exception as exc:  # noqa: BLE001
+                        errors.setdefault(channel_key, str(exc))
+                        logger.warning(
+                            "provider_result_invalid", channel=channel_key, error=str(exc)
+                        )
 
         weather_dict: dict[str, np.ndarray] | None = None
         if weather_task is not None:
             wraw = weather_task.result()
             if wraw is not None and isinstance(wraw, Mapping):
-                weather_dict = {str(k): np.asarray(v, dtype=np.float32) for k, v in wraw.items()}
-
-        # Load is required; if it failed, substitute zeros and keep error
-        eprice = self._validate_series("electricprice_eur_wh", eprice, n)
-        ftariff = self._validate_series("feedintariff_eur_wh", ftariff, n)
-        try:
-            load_wh = self._validate_series("load_wh", load_wh, n)
-        except Exception:
-            load_wh = zeros.copy()
+                weather_dict = {}
+                for k, v in wraw.items():
+                    try:
+                        weather_dict[str(k)] = self._validate_series(f"weather_{k}", v, n)
+                    except Exception as exc:  # noqa: BLE001
+                        errors.setdefault("weather", str(exc))
+                        logger.warning(
+                            "provider_result_invalid", channel="weather", error=str(exc)
+                        )
 
         logger.info(
             "prediction_fetch_partial_complete",

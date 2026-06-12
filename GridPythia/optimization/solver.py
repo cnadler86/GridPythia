@@ -11,13 +11,10 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from platform import machine
 from typing import TYPE_CHECKING, Any, cast
 
-# ARM libatomic preloading is handled in main.py (before any CVXPY import).
-# The message below is kept for visibility when the solver is loaded.
-if machine() in ("armv7l", "armv6l"):
-    pass  # libatomic already loaded by main.py via ctypes.CDLL(RTLD_GLOBAL)
+# ARM note: libatomic preloading (required by HiGHS on armv6/armv7) is handled
+# in main.py via ctypes.CDLL(RTLD_GLOBAL) before any CVXPY import.
 
 # cvxpy (~47 MB) is imported lazily on first LinearOptimizer instantiation to
 # keep the server-startup RSS low on memory-constrained targets (e.g. ARMv7).

@@ -10,6 +10,7 @@ Mutated only by :mod:`GridPythia.server.services` functions.
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
@@ -45,7 +46,7 @@ config_cache_mtime: float = -1.0
 optimizer: "LinearOptimizer | None" = None
 optimizer_config_mtime: float = 0.0
 _optimizer_lock: "asyncio.Lock | None" = None
-_optimizer_lock_init_guard = __import__("threading").Lock()
+_optimizer_lock_init_guard = threading.Lock()
 
 
 def get_optimizer_lock() -> asyncio.Lock:
@@ -60,9 +61,7 @@ def get_optimizer_lock() -> asyncio.Lock:
 
 
 # ── Partial-fetch retry state ─────────────────────────────────────────────
-# Maps provider name → next retry datetime when that provider failed on the last fetch.
-# The retry background task reads + clears this dict.
-failed_provider_retry_at: dict[str, datetime] = {}
+# Background task retrying failed providers; cancelled and replaced on each new fetch.
 _retry_task: "asyncio.Task | None" = None
 
 # ── MQTT connection state ─────────────────────────────────────────────────
@@ -96,7 +95,6 @@ PREDICTION_CACHE_MAX_ENTRIES: int = 8  # Keep RSS low on memory-constrained targ
 PREDICTION_CACHE_TTL_S: float = 900.0  # 15 minutes
 prediction_result_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 prediction_result_cache_ts: dict[str, datetime] = {}
-prediction_result_cache_config_mtime: float = 0.0
 
 # ── Latest prediction snapshot for lazy tab chart rendering ───────────────
 latest_prediction_data: "PredictionData | None" = None

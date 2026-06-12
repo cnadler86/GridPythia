@@ -88,6 +88,12 @@ def run() -> None:
         help="TCP port (overrides config server.bind_port)",
     )
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload (dev mode)")
+    parser.add_argument(
+        "--log-level",
+        default="debug",
+        choices=["debug", "info", "warning", "error"],
+        help="Application log level (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     _reload_config_path = Path(args.config).expanduser().resolve()
@@ -97,6 +103,7 @@ def run() -> None:
 
     import structlog
 
+    app_log_level = getattr(logging, args.log_level.upper(), logging.DEBUG)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -104,7 +111,7 @@ def run() -> None:
             structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
             structlog.dev.ConsoleRenderer(),
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+        wrapper_class=structlog.make_filtering_bound_logger(app_log_level),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(),
     )

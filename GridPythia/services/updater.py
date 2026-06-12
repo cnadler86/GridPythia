@@ -30,7 +30,7 @@ import os
 import re
 import signal
 import subprocess
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -102,7 +102,7 @@ class AutoUpdater:
         if self.mode is UpdateMode.OFF:
             return False
 
-        today = date.today()
+        today = datetime.now(timezone.utc).date()
         if self._last_check_date == today:
             logger.debug("updater_already_checked_today", date=str(today))
             return False
@@ -117,7 +117,7 @@ class AutoUpdater:
             return False
 
         try:
-            await asyncio.get_event_loop().run_in_executor(None, self._do_fetch, repo)
+            await asyncio.to_thread(self._do_fetch, repo)
         except Exception as exc:  # noqa: BLE001
             logger.warning("updater_fetch_failed", error=str(exc))
             return False
@@ -132,12 +132,12 @@ class AutoUpdater:
 
         logger.info("updater_applying", ref=ref, mode=self.mode.value)
         try:
-            await asyncio.get_event_loop().run_in_executor(None, self._apply_update, repo, ref)
+            await asyncio.to_thread(self._apply_update, repo, ref)
         except Exception as exc:  # noqa: BLE001
             logger.error("updater_apply_failed", ref=ref, error=str(exc))
             return False
 
-        dep_ok = await asyncio.get_event_loop().run_in_executor(None, self._sync_dependencies)
+        dep_ok = await asyncio.to_thread(self._sync_dependencies)
         if not dep_ok:
             logger.warning("updater_dep_sync_failed_restarting_anyway")
 
@@ -257,8 +257,10 @@ class AutoUpdater:
     def _sync_dependencies(self) -> bool:
         try:
             env = os.environ.copy()
-            # gridpythia has no home dir; ensure uv writes its cache to the
-            # persistent cache directory created by install.sh, not ~/.cache/uv.
+            # Under systemd, UV_CACHE_DIR is set via gridpythia.service
+            # (/var/cache/gridpythia-uv).  The service user has no home dir, so
+            # when run outside systemd fall back to a repo-local cache instead
+            # of ~/.cache/uv.
             env.setdefault("UV_CACHE_DIR", str(Path(self._repo_path) / ".uv-cache"))
             result = subprocess.run(  # noqa: S603
                 [self._uv, "sync", "--no-dev"],

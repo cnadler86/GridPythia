@@ -9,6 +9,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from structlog import get_logger
 
 import GridPythia.server.state as state
 from GridPythia.server import services
@@ -19,6 +20,8 @@ from GridPythia.server.routers.optimization import router as optimization_router
 from GridPythia.server.routers.predictions import router as predictions_router
 from GridPythia.server.routers.realtime import router as realtime_router
 from GridPythia.server.routers.vacation import router as vacation_router
+
+logger = get_logger(__name__)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -86,8 +89,9 @@ def create_app(config_path: Path) -> FastAPI:
                 branch=update_cfg.branch,
                 remote=update_cfg.remote,
             )
-    except Exception:
-        pass  # Updater is purely optional; startup must not be blocked.
+    except Exception as exc:
+        # Updater is purely optional; startup must not be blocked.
+        logger.warning("auto-updater initialisation skipped", error=str(exc))
 
     app = FastAPI(
         title="GridPythia API",

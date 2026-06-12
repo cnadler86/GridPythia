@@ -216,6 +216,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "scipy" },
     { name = "structlog" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -247,6 +248,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scipy", specifier = ">=1.14,<=1.17.0" },
     { name = "structlog", specifier = ">=25.5.0" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
 ]
 
@@ -674,6 +676,14 @@ dependencies = [
 ]
 wheels = [
     { url = "https://www.piwheels.org/simple/typing-inspection/typing_inspection-0.4.2-py3-none-any.whl", hash = "sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7" },
+]
+
+[[package]]
+name = "tzdata"
+version = "2026.2"
+source = { registry = "https://www.piwheels.org/simple" }
+wheels = [
+    { url = "https://www.piwheels.org/simple/tzdata/tzdata-2026.2-py2.py3-none-any.whl", hash = "sha256:7b8f88f479d7f8a93088b2d1631078eae76a7f414603b6131003f2e9251ef773" },
 ]
 
 [[package]]

@@ -126,12 +126,15 @@ class TestSnapApplianceForecastsToGrid:
         assert result == {}
 
     def test_valid_slots_snapped_to_grid(self):
-        start = datetime(2026, 5, 30, 10, 0, tzinfo=timezone.utc)
+        # Future start so the slots are not dropped as "in the past".
+        start = (datetime.now(tz=timezone.utc) + timedelta(days=1)).replace(
+            minute=0, second=0, microsecond=0
+        )
         ts = make_timestamps(start, 2, 0.25)
         forecasts = {
             "washer": [
-                {"time": "2026-05-30T10:00:00+00:00", "load_wh": 100.0},
-                {"time": "2026-05-30T10:15:00+00:00", "load_wh": 200.0},
+                {"time": ts[0].isoformat(), "load_wh": 100.0},
+                {"time": ts[1].isoformat(), "load_wh": 200.0},
             ]
         }
         result = snap_appliance_forecasts_to_grid(forecasts, ts, 0.25)
@@ -140,11 +143,13 @@ class TestSnapApplianceForecastsToGrid:
         assert result["washer"][1] == pytest.approx(200.0)
 
     def test_malformed_slot_skipped(self):
-        start = datetime(2026, 5, 30, 10, 0, tzinfo=timezone.utc)
+        start = (datetime.now(tz=timezone.utc) + timedelta(days=1)).replace(
+            minute=0, second=0, microsecond=0
+        )
         ts = make_timestamps(start, 1, 0.25)
         forecasts = {
             "dev": [
-                {"time": "2026-05-30T10:00:00+00:00", "load_wh": 50.0},
+                {"time": ts[0].isoformat(), "load_wh": 50.0},
                 {"load_wh": 100.0},  # missing time
                 {"time": "bad-iso", "load_wh": 100.0},  # bad time
             ]

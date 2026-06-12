@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +53,7 @@ class PredictionCache:
         """Check if cached data is still within TTL."""
         if self.data is None or self.timestamp is None:
             return False
-        age = (datetime.now() - self.timestamp).total_seconds()
+        age = (datetime.now(timezone.utc) - self.timestamp).total_seconds()
         return age < self.ttl_seconds
 
     def get(self) -> tuple[PredictionData, datetime | None] | None:
@@ -65,7 +65,7 @@ class PredictionCache:
     def set(self, data: PredictionData, forecast_from: datetime | None = None) -> None:
         """Update cache with new prediction data."""
         self.data = data
-        self.timestamp = datetime.now()
+        self.timestamp = datetime.now(timezone.utc)
         self.forecast_from = forecast_from
 
     def invalidate(self) -> None:
@@ -187,109 +187,14 @@ class GridPythiaService:
         return self._inverters
 
     def _build_providers(self) -> PredictionSetup:
-        """Build all prediction providers from config.
+        """Build all prediction providers from config via the shared factory."""
+        from GridPythia.prediction.factory import build_prediction_setup
 
-        Uses the registry pattern when available, falls back to direct
-        construction for compatibility.
-        """
-        from GridPythia.prediction.electricprice.energycharts import (
-            ElecPriceEnergyCharts,
-            EnergyChartsConfig,
-        )
-        from GridPythia.prediction.electricprice.fixed import ElecPriceFixed
-        from GridPythia.prediction.feedintariff.fixed import FeedInTariffFixed
-        from GridPythia.prediction.load.config import LoadProfileConfig
-        from GridPythia.prediction.load.provider import load_provider_from_config
-        from GridPythia.prediction.pvforecast.akkudoktor import PVForecastAkkudoktor
-        from GridPythia.prediction.pvforecast.openmeteo import PVForecastOpenMeteo
-        from GridPythia.prediction.pvforecast.provider import PVPlaneConfig
-        from GridPythia.prediction.weather.brightsky import WeatherBrightSky
-        from GridPythia.prediction.weather.openmeteo import WeatherOpenMeteo
-
-        pred_cfg = self.config.prediction
-
-        # Electric price
-        ep = pred_cfg.electricprice
-        if ep.provider == "EnergyCharts":
-            electricprice = ElecPriceEnergyCharts(
-                EnergyChartsConfig(
-                    bidding_zone=ep.energycharts.bidding_zone,
-                    charges_kwh=ep.charges_kwh,
-                    vat_rate=ep.vat_rate,
-                )
-            )
-        else:
-            electricprice = ElecPriceFixed(
-                price_kwh=ep.charges_kwh,
-                charges_kwh=ep.charges_kwh,
-                vat_rate=ep.vat_rate,
-            )
-
-        feedintariff = FeedInTariffFixed(tariff_kwh=pred_cfg.feedintariff.tariff_kwh)
-
-        # Load provider
-        raw_load_path = Path(pred_cfg.load.path)
-        load_path = (
-            raw_load_path
-            if raw_load_path.is_absolute()
-            else (self.config_path.parent / raw_load_path)
-        )
-        load_provider = load_provider_from_config(
-            LoadProfileConfig(
-                path=load_path,
-                country=pred_cfg.load.country or None,
-                subdivision=pred_cfg.load.subdivision or None,
-            )
-        )
-
-        # PV provider
-        plane_cfg = pred_cfg.pvforecast.plane
-        om_cfg = pred_cfg.pvforecast.openmeteo
-        plane = PVPlaneConfig(
-            peak_kw=plane_cfg.peak_kw,
-            tilt=plane_cfg.tilt,
-            azimuth=plane_cfg.azimuth,
-            userhorizon=tuple(plane_cfg.userhorizon) if plane_cfg.userhorizon else None,
-            loss_pct=plane_cfg.loss_pct,
-            damping_morning=om_cfg.damping_morning,
-            damping_evening=om_cfg.damping_evening,
-            partial_shading=om_cfg.partial_shading,
-            inverter_id=plane_cfg.inverter_id,
-        )
-        if pred_cfg.pvforecast.provider == "OpenMeteo":
-            pv_provider = PVForecastOpenMeteo(
-                planes=[plane],
-                latitude=pred_cfg.latitude,
-                longitude=pred_cfg.longitude,
-                api_key=om_cfg.api_key or None,
-                weather_model=om_cfg.weather_model or None,
-            )
-        else:
-            pv_provider = PVForecastAkkudoktor(
-                planes=[plane],
-                latitude=pred_cfg.latitude,
-                longitude=pred_cfg.longitude,
-            )
-
-        # Weather provider (optional)
-        weather_provider = None
-        if "weather" in self.raw_yaml.get("prediction", {}):
-            w_cfg = pred_cfg.weather
-            if w_cfg.provider == "BrightSky":
-                weather_provider = WeatherBrightSky(
-                    latitude=pred_cfg.latitude, longitude=pred_cfg.longitude
-                )
-            else:
-                weather_provider = WeatherOpenMeteo(
-                    latitude=pred_cfg.latitude, longitude=pred_cfg.longitude
-                )
-
-        return PredictionSetup(
-            electricprice=electricprice,
-            feedintariff=feedintariff,
-            load=load_provider,
-            pv={plane.inverter_id: pv_provider},
-            weather=weather_provider,
+        return build_prediction_setup(
+            self.config,
+            self.raw_yaml,
+            self.config_path.parent,
+            fresh_instances=True,
         )
 
     async def fetch_predictions(

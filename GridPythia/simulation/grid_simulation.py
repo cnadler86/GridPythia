@@ -507,20 +507,20 @@ class GridSimulation:
                 continue
             switch_cost = inv.parameters.mode_switch_cost
 
-            # Prepend initial state (vor Simulation) für korrekte erste Mode-Wechsel-Berechnung
+            # Prepend the pre-simulation initial state so the first transition is counted.
             arr = np.asarray(modes, dtype=np.int8)
             initial_int = int(self._initial_inverter_states[inv.device_id])
             arr_with_initial = np.concatenate([np.array([initial_int], dtype=np.int8), arr])
             prev = arr_with_initial[:-1]
             curr = arr_with_initial[1:]
 
-            # Kosten pro Wechsel bestimmen mit vorkompilierten Arrays
-            # 1. Idle <-> aktiv
+            # Classify transitions using the precompiled mode arrays.
+            # 1. Idle <-> active
             IDLE_INT = self._IDLE_INT
             idle_to_active = ((prev == IDLE_INT) & (curr != IDLE_INT)) | (
                 (prev != IDLE_INT) & (curr == IDLE_INT)
             )
-            # 2. Charge <-> Discharge (mit numpy array statt isin())
+            # 2. Charge <-> discharge (double switch: counted at 2x cost)
             in_charge_prev = np.isin(prev, self._CHARGE_MODES_ARRAY)
             in_discharge_prev = np.isin(prev, self._DISCHARGE_MODES_ARRAY)
             in_charge_curr = np.isin(curr, self._CHARGE_MODES_ARRAY)
@@ -529,7 +529,7 @@ class GridSimulation:
                 in_discharge_prev & in_charge_curr
             )
 
-            # Direkt in costs_per_dt schreiben (Index 0 ist jetzt initial->first, Index 1+ sind die normalen)
+            # Write directly into costs_per_dt (index 0 is initial->first transition).
             costs_per_dt[: len(prev)][idle_to_active] += switch_cost
             costs_per_dt[: len(prev)][charge_to_discharge] += 2 * switch_cost
 
