@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from threading import RLock
 from typing import TYPE_CHECKING
 
 from structlog import get_logger
@@ -38,16 +39,17 @@ _BUCKET_S = 900  # 15-minute buckets
 
 @dataclass
 class _Bucket:
-    """Running sum / count for one 15-min bucket."""
+    """Running sum / count for one 15-min bucket.
+
+    A bucket is fed either by instantaneous power samples (``sum_w`` / ``count``)
+    or by energy measurements (``watt_seconds`` / ``covered_s``).  Energy inputs
+    take precedence in :meth:`MeasurementAccumulator._bucket_avg_w`.
+    """
 
     sum_w: float = 0.0
     count: int = 0
-    watt_seconds: float = 0.0  # for energy-based inputs
-
-    def avg_w(self) -> float:
-        if self.count == 0:
-            return 0.0
-        return self.sum_w / self.count
+    watt_seconds: float = 0.0  # for energy-based inputs (W·s in covered window)
+    covered_s: float = 0.0  # seconds of this bucket actually covered by energy inputs
 
 
 class MeasurementAccumulator:
@@ -71,6 +73,11 @@ class MeasurementAccumulator:
         # buckets: {bucket_start_ts: _Bucket}
         self._buckets: dict[int, _Bucket] = {}
         self._last_flush: float = 0.0
+        # Guards _buckets against concurrent access: MQTT runs callbacks in
+        # paho's network thread while the asyncio maintenance loop / REST
+        # endpoints flush from another thread.  Re-entrant so add_* can call
+        # flush() while holding the lock.
+        self._lock = RLock()
 
     # ------------------------------------------------------------------
     # Ingestion
@@ -89,9 +96,10 @@ class MeasurementAccumulator:
         if ts is None:
             ts = time.time()
         bucket = (int(ts) // _BUCKET_S) * _BUCKET_S
-        b = self._buckets.setdefault(bucket, _Bucket())
-        b.sum_w += watts
-        b.count += 1
+        with self._lock:
+            b = self._buckets.setdefault(bucket, _Bucket())
+            b.sum_w += watts
+            b.count += 1
         self._maybe_flush()
 
     def add_energy(self, wh: float, duration_h: float, ts: float | None = None) -> None:
@@ -114,19 +122,21 @@ class MeasurementAccumulator:
         duration_s = duration_h * 3600.0
         end_ts = ts + duration_s
 
-        # Distribute across covered 15-min buckets
-        t = ts
-        while t < end_ts:
-            bucket = (int(t) // _BUCKET_S) * _BUCKET_S
-            bucket_end = float(bucket + _BUCKET_S)
-            overlap_s = min(bucket_end, end_ts) - t
-            weight = overlap_s / duration_s
-            b = self._buckets.setdefault(bucket, _Bucket())
-            b.sum_w += avg_w * weight * (duration_s / overlap_s) * overlap_s / overlap_s
-            # Simpler: accumulate power weighted by overlap fraction
-            b.watt_seconds += avg_w * overlap_s
-            b.count += 1
-            t = bucket_end
+        # Distribute across the covered 15-min buckets, accumulating energy
+        # (W·s) and the actually-covered seconds per bucket.  The bucket
+        # average is then watt_seconds / covered_s (see _bucket_avg_w), which
+        # is correct even when a window only partially overlaps a bucket.
+        with self._lock:
+            t = ts
+            while t < end_ts:
+                bucket = (int(t) // _BUCKET_S) * _BUCKET_S
+                bucket_end = float(bucket + _BUCKET_S)
+                overlap_s = min(bucket_end, end_ts) - t
+                b = self._buckets.setdefault(bucket, _Bucket())
+                b.watt_seconds += avg_w * overlap_s
+                b.covered_s += overlap_s
+                b.count += 1
+                t = bucket_end
 
         self._maybe_flush()
 
@@ -148,23 +158,28 @@ class MeasurementAccumulator:
 
         Returns the number of buckets written.
         """
-        if not self._buckets:
-            return 0
-
         now = int(time.time())
         current_bucket = (now // _BUCKET_S) * _BUCKET_S
 
         samples: list[tuple[float, float]] = []
-        flushed_keys: list[int] = []
 
-        for bucket_ts, b in sorted(self._buckets.items()):
-            if not force_all and bucket_ts >= current_bucket:
-                # Bucket still open – don't flush yet
-                continue
-            avg = self._bucket_avg_w(b)
-            if avg >= 0:
-                samples.append((float(bucket_ts), avg))
-            flushed_keys.append(bucket_ts)
+        with self._lock:
+            if not self._buckets:
+                return 0
+
+            flushed_keys: list[int] = []
+            for bucket_ts, b in sorted(self._buckets.items()):
+                if not force_all and bucket_ts >= current_bucket:
+                    # Bucket still open – don't flush yet
+                    continue
+                avg = self._bucket_avg_w(b)
+                if avg >= 0:
+                    samples.append((float(bucket_ts), avg))
+                flushed_keys.append(bucket_ts)
+
+            for k in flushed_keys:
+                del self._buckets[k]
+            self._last_flush = time.time()
 
         if samples:
             self._db.insert_batch(self._metric, samples, level=0)
@@ -174,20 +189,17 @@ class MeasurementAccumulator:
                 buckets=len(samples),
             )
 
-        for k in flushed_keys:
-            del self._buckets[k]
-
-        self._last_flush = time.time()
         return len(samples)
 
     @staticmethod
     def _bucket_avg_w(b: _Bucket) -> float:
         """Compute average W for a bucket from either power or energy inputs."""
+        # Energy-based inputs take precedence: average power over the seconds
+        # actually covered by the energy windows (not the full 15-min bucket).
+        if b.watt_seconds > 0 and b.covered_s > 0:
+            return b.watt_seconds / b.covered_s
         if b.count == 0:
             return 0.0
-        # If energy-based (watt_seconds populated): use that
-        if b.watt_seconds > 0:
-            return b.watt_seconds / _BUCKET_S
         return b.sum_w / b.count
 
     # ------------------------------------------------------------------
@@ -197,4 +209,5 @@ class MeasurementAccumulator:
     @property
     def pending_buckets(self) -> int:
         """Number of in-memory buckets not yet flushed."""
-        return len(self._buckets)
+        with self._lock:
+            return len(self._buckets)
