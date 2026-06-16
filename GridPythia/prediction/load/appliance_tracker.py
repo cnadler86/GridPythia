@@ -39,6 +39,7 @@ Forecast generation
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -490,5 +491,6 @@ def _norm_cdf(x: float) -> float:
     poly = k * (
         0.319381530 + k * (-0.356563782 + k * (1.781477937 + k * (-1.821255978 + k * 1.330274429)))
     )
-    val = 1.0 - (1.0 / (2.506628274631 * 1.0)) * (2.718281828 ** (-0.5 * x * x)) * poly
+    pdf = math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+    val = 1.0 - pdf * poly
     return val if x >= 0 else 1.0 - val
