@@ -72,7 +72,9 @@ class MeasurementAccumulator:
         self._flush_interval_s = flush_interval_s
         # buckets: {bucket_start_ts: _Bucket}
         self._buckets: dict[int, _Bucket] = {}
-        self._last_flush: float = 0.0
+        # Seed with "now" so the very first ingest does not immediately flush
+        # (a 0.0 sentinel would make `now - last_flush` exceed any interval).
+        self._last_flush: float = time.time()
         # Guards _buckets against concurrent access: MQTT runs callbacks in
         # paho's network thread while the asyncio maintenance loop / REST
         # endpoints flush from another thread.  Re-entrant so add_* can call

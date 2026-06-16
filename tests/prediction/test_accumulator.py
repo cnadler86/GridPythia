@@ -20,19 +20,21 @@ def db(tmp_path) -> TimeSeriesDB:
 
 
 def _accumulator(db: TimeSeriesDB) -> MeasurementAccumulator:
-    """Build an accumulator that never auto-flushes during a test.
-
-    ``_last_flush`` defaults to 0.0, which makes the very first ingest trigger
-    an immediate flush (harmless in production where the current bucket is
-    still open).  Seed it with "now" so tests control flushing explicitly.
-    """
-    acc = MeasurementAccumulator(db, "load_w", flush_interval_s=10**9)
-    acc._last_flush = time.time()
-    return acc
+    """Build an accumulator that never auto-flushes during a test."""
+    return MeasurementAccumulator(db, "load_w", flush_interval_s=10**9)
 
 
 def _rows(db: TimeSeriesDB, metric: str = "load_w") -> list[tuple[int, float]]:
     return db.query(metric, min_level=0)
+
+
+def test_first_ingest_does_not_auto_flush(db: TimeSeriesDB) -> None:
+    # Default flush interval; a past-dated (closed) bucket must still be
+    # buffered rather than flushed immediately on the first measurement.
+    acc = MeasurementAccumulator(db, "load_w")
+    acc.add_power(500.0, ts=_BASE)
+    assert acc.pending_buckets == 1
+    assert _rows(db) == []
 
 
 def test_add_power_averages_samples_in_bucket(db: TimeSeriesDB) -> None:
