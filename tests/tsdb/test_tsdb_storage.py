@@ -41,6 +41,21 @@ def test_query_15min_averages_groups_into_buckets(db: TimeSeriesDB) -> None:
     assert result == [(0, 200.0), (900, 50.0)]
 
 
+def test_query_15min_averages_expands_hourly_compacted_rows(db: TimeSeriesDB) -> None:
+    # A compacted level-2 (1-hour) row must fill all four 15-min buckets of its
+    # hour instead of leaving three gaps.
+    db.insert_batch("m", [(0, 500.0)], level=2)
+    result = db.query_15min_averages("m")
+    assert result == [(0, 500.0), (900, 500.0), (1800, 500.0), (2700, 500.0)]
+
+
+def test_query_15min_averages_respects_end_bound_when_expanding(db: TimeSeriesDB) -> None:
+    db.insert_batch("m", [(0, 500.0)], level=2)
+    # end_ts clips expanded sub-buckets so none leak past the requested window.
+    result = db.query_15min_averages("m", end_ts=1800)
+    assert result == [(0, 500.0), (900, 500.0)]
+
+
 def test_count_metrics_and_latest(db: TimeSeriesDB) -> None:
     db.insert("a", 1.0, ts=10)
     db.insert("a", 2.0, ts=20)

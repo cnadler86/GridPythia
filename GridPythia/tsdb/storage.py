@@ -217,8 +217,10 @@ class TimeSeriesDB:
     ) -> list[tuple[int, float]]:
         """Return 15-minute-bucket averages as ``[(bucket_start_ts, avg_w), ...]``.
 
-        Groups all levels together so the result is consistent regardless of
-        what compaction has already run.
+        Rows are expanded across the 15-min buckets they represent before
+        averaging, so the result stays gap-free regardless of compaction:
+        a level-2 (1-hour) row contributes its value to all four 15-min
+        buckets of its hour, while raw/level-1 rows map to a single bucket.
         """
         clauses = ["metric = ?"]
         params: list = [metric]
@@ -230,13 +232,25 @@ class TimeSeriesDB:
             params.append(int(end_ts))
 
         where = " AND ".join(clauses)
-        sql = (
-            f"SELECT (ts / {_15MIN}) * {_15MIN} AS bucket, AVG(value) "
-            f"FROM measurements WHERE {where} "
-            f"GROUP BY bucket ORDER BY bucket"
-        )
+        sql = f"SELECT ts, value, level FROM measurements WHERE {where}"
         with self._conn() as conn:
-            return conn.execute(sql, params).fetchall()
+            rows = conn.execute(sql, params).fetchall()
+
+        upper = int(end_ts) if end_ts is not None else None
+        sums: dict[int, float] = {}
+        counts: dict[int, int] = {}
+        for ts, value, level in rows:
+            # Coarser (compacted) rows cover a whole hour; finer rows one bucket.
+            span = _1HOUR if level >= 2 else _15MIN
+            start_bucket = (int(ts) // _15MIN) * _15MIN
+            bucket = start_bucket
+            while bucket < start_bucket + span:
+                if upper is None or bucket < upper:
+                    sums[bucket] = sums.get(bucket, 0.0) + value
+                    counts[bucket] = counts.get(bucket, 0) + 1
+                bucket += _15MIN
+
+        return [(b, sums[b] / counts[b]) for b in sorted(sums)]
 
     # ------------------------------------------------------------------
     # Read – appliance runs
