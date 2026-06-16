@@ -15,8 +15,10 @@ _BASE = 1_000_000 // _BUCKET_S * _BUCKET_S  # 1970-01-12, bucket aligned
 
 
 @pytest.fixture
-def db(tmp_path) -> TimeSeriesDB:
-    return TimeSeriesDB(tmp_path / "acc.sqlite")
+def db(tmp_path):
+    database = TimeSeriesDB(tmp_path / "acc.sqlite")
+    yield database
+    database.close()
 
 
 def _accumulator(db: TimeSeriesDB) -> MeasurementAccumulator:

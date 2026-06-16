@@ -27,9 +27,10 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Generator
 
 from structlog import get_logger
@@ -84,6 +85,14 @@ class TimeSeriesDB:
             merged.update(policies)
         self._policies = merged
 
+        # A single long-lived connection is reused for all operations to avoid
+        # opening the SQLite file (and re-applying PRAGMAs) on every call — a
+        # meaningful saving on embedded ARM.  Access is serialised with a lock
+        # because the connection is touched from several threads (MQTT network
+        # thread, asyncio maintenance loop, request handlers).
+        self._db_lock = Lock()
+        self._connection: sqlite3.Connection | None = None
+
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -95,22 +104,46 @@ class TimeSeriesDB:
         return self._policies.get(metric, DEFAULT_POLICY)
 
     # ------------------------------------------------------------------
-    # Connection context manager
+    # Connection management
     # ------------------------------------------------------------------
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Return the shared connection, creating it on first use."""
+        if self._connection is None:
+            conn = sqlite3.connect(str(self._db_path), timeout=5.0, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._connection = conn
+        return self._connection
 
     @contextmanager
     def _conn(self) -> Generator[sqlite3.Connection, None, None]:
-        conn = sqlite3.connect(str(self._db_path), timeout=5.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        with self._db_lock:
+            conn = self._get_connection()
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection (idempotent)."""
+        with self._db_lock:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+
+    def __enter__(self) -> TimeSeriesDB:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        # Best-effort cleanup; the interpreter may already be tearing down.
+        with suppress(Exception):
+            self.close()
 
     def _init_db(self) -> None:
         with self._conn() as conn:

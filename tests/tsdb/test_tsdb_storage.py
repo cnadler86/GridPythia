@@ -13,8 +13,10 @@ _DAY = 86_400
 
 
 @pytest.fixture
-def db(tmp_path) -> TimeSeriesDB:
-    return TimeSeriesDB(tmp_path / "tsdb.sqlite")
+def db(tmp_path):
+    database = TimeSeriesDB(tmp_path / "tsdb.sqlite")
+    yield database
+    database.close()
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +56,30 @@ def test_query_15min_averages_respects_end_bound_when_expanding(db: TimeSeriesDB
     # end_ts clips expanded sub-buckets so none leak past the requested window.
     result = db.query_15min_averages("m", end_ts=1800)
     assert result == [(0, 500.0), (900, 500.0)]
+
+
+def test_connection_is_reused_across_operations(db: TimeSeriesDB) -> None:
+    db.insert("m", 1.0, ts=10)
+    first = db._connection
+    db.insert("m", 2.0, ts=20)
+    assert db._connection is first is not None
+
+
+def test_close_is_idempotent_and_usable_as_context_manager(tmp_path) -> None:
+    path = tmp_path / "ctx.sqlite"
+    with TimeSeriesDB(path) as database:
+        database.insert("m", 1.0, ts=10)
+        assert database._connection is not None
+    # Exiting the context closes the connection; closing again is a no-op.
+    assert database._connection is None
+    database.close()
+
+    # Data persisted and a fresh instance can read it back.
+    reopened = TimeSeriesDB(path)
+    try:
+        assert reopened.query("m") == [(10, 1.0)]
+    finally:
+        reopened.close()
 
 
 def test_count_metrics_and_latest(db: TimeSeriesDB) -> None:
