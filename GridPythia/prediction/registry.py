@@ -189,7 +189,7 @@ def _register_builtin_providers() -> None:
     def _fixed_price_factory(cfg: Mapping[str, Any]) -> ElecPriceFixed:
         return ElecPriceFixed(
             price_kwh=cfg.get("price_kwh", cfg.get("charges_kwh", 0.30)),
-            charges_kwh=cfg.get("charges_kwh", 0.0),
+            charges_kwh=cfg.get("charges_kwh", 0.0) if "price_kwh" in cfg else 0.0,
             vat_rate=cfg.get("vat_rate", 0.19),
         )
 

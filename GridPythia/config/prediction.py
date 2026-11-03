@@ -24,7 +24,14 @@ class ElectricPriceConfig(BaseModel):
     """Configuration for electricity price providers."""
 
     provider: Literal["EnergyCharts", "Fixed", "EpexPredictor"] = "EnergyCharts"
-    charges_kwh: float = Field(default=0.1528, ge=0.0)
+    charges_kwh: float = Field(
+        default=0.1528,
+        ge=0.0,
+        description=(
+            "For Fixed, the net price per kWh before VAT. For spot-price providers, "
+            "additional charges per kWh."
+        ),
+    )
     vat_rate: float = Field(default=0.19, ge=0.0)
     cache_ttl_hours: float | None = Field(
         default=1.0,

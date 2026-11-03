@@ -184,7 +184,19 @@ All settings live in a single `config.yaml`. The four top-level sections are:
 | --- | --- |
 | `EpexPredictor` | EPEX spot price via [epexpredictor.batzill.com](https://epexpredictor.batzill.com) (self-hostable) |
 | `EnergyCharts` | Energy-Charts.info API |
-| `Fixed` | Constant price (`charges_kwh`) |
+| `Fixed` | Constant net price from `charges_kwh`; `vat_rate` is applied |
+
+For a fixed tariff, set `charges_kwh` to the net price per kWh (for example,
+`0.30` for 30 ct/kWh before VAT). Unlike the spot-price providers, `Fixed`
+does not add `charges_kwh` as a separate charge.
+
+```yaml
+prediction:
+  electricprice:
+    provider: "Fixed"
+    charges_kwh: 0.30
+    vat_rate: 0.19
+```
 
 **`pvforecast`** – solar generation forecast:
 

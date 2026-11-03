@@ -1,7 +1,13 @@
 """Tests for the provider registry module."""
 
+from datetime import datetime, timezone
+from pathlib import Path
+
 import pytest
 
+from GridPythia.config import AppConfig
+from GridPythia.prediction.base import make_timestamps
+from GridPythia.prediction.factory import build_prediction_setup
 from GridPythia.prediction.registry import (
     ProviderProtocol,
     ProviderRegistry,
@@ -128,6 +134,30 @@ class TestProviderRegistryCreation:
         )
         # Provider ID is the class name, not the registry key
         assert "Fixed" in provider.provider_id
+
+    async def test_fixed_price_from_config_uses_charges_as_net_price(self):
+        yaml_config = """
+prediction:
+  electricprice:
+    provider: Fixed
+    charges_kwh: 0.30
+    vat_rate: 0.19
+  load:
+    path: profile.csv
+"""
+        config = AppConfig.from_yaml(yaml_config)
+        setup = build_prediction_setup(
+            config,
+            {"prediction": {"electricprice": {"provider": "Fixed"}}},
+            Path("."),
+            fresh_instances=True,
+        )
+
+        prices = await setup.electricprice.fetch(
+            make_timestamps(datetime(2025, 6, 15, tzinfo=timezone.utc), 1, 1)
+        )
+
+        assert prices[0] == pytest.approx(0.30 * 1.19 / 1000)
 
     def test_create_fixed_feedintariff(self):
         """Test creating a fixed feed-in tariff provider."""
