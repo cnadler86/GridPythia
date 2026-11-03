@@ -23,7 +23,7 @@ import yaml
 from structlog import get_logger
 
 import GridPythia.server.state as state
-from GridPythia.config import AppConfig
+from GridPythia.config import AppConfig, config_log_summary
 from GridPythia.optimization.solution import OptimizationObjective
 from GridPythia.optimization.solver import LinearOptimizer
 from GridPythia.prediction.factory import build_prediction_setup
@@ -255,6 +255,11 @@ def load_config() -> tuple[AppConfig, dict[str, Any]]:
     state.config_cache = cfg
     state.config_cache_raw = raw
     state.config_cache_mtime = mtime
+    logger.info(
+        "configuration_loaded",
+        config_path=str(path),
+        **config_log_summary(cfg, path, raw),
+    )
     if old_mtime >= 0.0 and old_mtime != mtime:
         clear_chart_cache()
         clear_prediction_cache()
@@ -340,7 +345,7 @@ def get_providers(cfg: AppConfig, raw_yaml: dict[str, Any]) -> PredictionSetup:
     if state.providers is None or mtime != state.providers_config_mtime:
         state.providers = build_providers(cfg, raw_yaml, fresh_instances=True)
         state.providers_config_mtime = mtime
-        logger.info("providers_rebuilt", config_path=str(state.config_path))
+        logger.debug("providers_rebuilt", config_path=str(state.config_path))
     return state.providers
 
 

@@ -170,6 +170,10 @@ Payload: {"soc": 63.5, "mode": 2}
 
 All settings live in a single `config.yaml`. The four top-level sections are:
 
+On startup and after a configuration change, the `configuration_loaded` log
+entry summarizes the active prediction, optimization, and server settings.
+Credentials and secrets are intentionally omitted.
+
 ### `prediction`
 
 | Key | Default | Description |

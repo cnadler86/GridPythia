@@ -29,7 +29,7 @@ from typing import Any
 
 from structlog import get_logger
 
-from GridPythia.config import AppConfig
+from GridPythia.config import AppConfig, config_log_summary
 from GridPythia.optimization.solution import LinearSolution, OptimizationObjective
 from GridPythia.optimization.solver import LinearOptimizer
 from GridPythia.prediction.prediction import Prediction, PredictionData, PredictionSetup
@@ -138,7 +138,11 @@ class GridPythiaService:
         self._config_loaded = True
         self._providers = None  # Invalidate cached providers
         self._optimizer = None  # Invalidate cached optimizer
-        logger.info("config_reloaded", path=str(self.config_path))
+        logger.info(
+            "configuration_loaded",
+            config_path=str(self.config_path),
+            **config_log_summary(self.config, self.config_path, self.raw_yaml),
+        )
         return True
 
     def _build_inverters(self) -> list[InverterBase]:

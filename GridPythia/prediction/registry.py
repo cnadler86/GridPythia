@@ -85,7 +85,6 @@ class ProviderRegistry(Generic[T]):
                 name=name,
             )
         self._factories[name] = factory
-        logger.debug(f"{self._category}_registered", name=name)
 
     def create(
         self,
