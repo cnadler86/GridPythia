@@ -107,6 +107,7 @@ class TestGridPythiaService:
         # Access optimizer property
         optimizer = service.optimizer
         assert optimizer is not None
+        assert optimizer._terminal_soc_mode == service.providers.terminal_soc_mode
         assert service._optimizer is optimizer
 
         # Second access should return same instance

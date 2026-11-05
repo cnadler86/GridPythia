@@ -246,9 +246,10 @@ optimization:
       zero_feed_in: true
 ```
 
-A positive terminal SoC penalty applies to the `cost` objective and replaces
-the default terminal energy reward for that battery. The target and penalty
-default to disabled.
+A positive terminal SoC penalty applies to the `cost` objective when the
+electricity provider is `Fixed`; it replaces the default terminal energy reward
+for that battery. Dynamic-price providers ignore the target settings and retain
+the price-based terminal energy reward. The target and penalty default to disabled.
 
 ### `server`
 

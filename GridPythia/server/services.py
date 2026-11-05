@@ -26,6 +26,7 @@ import GridPythia.server.state as state
 from GridPythia.config import AppConfig, config_log_summary
 from GridPythia.optimization.solution import OptimizationObjective
 from GridPythia.optimization.solver import LinearOptimizer
+from GridPythia.optimization.terminal_soc import TerminalSoCMode
 from GridPythia.prediction.factory import build_prediction_setup
 from GridPythia.prediction.prediction import PredictionData, PredictionSetup
 from GridPythia.server.models import InverterPlanResponse, InverterPlanStep
@@ -349,7 +350,10 @@ def get_providers(cfg: AppConfig, raw_yaml: dict[str, Any]) -> PredictionSetup:
     return state.providers
 
 
-def get_optimizer(cfg: AppConfig) -> LinearOptimizer:
+def get_optimizer(
+    cfg: AppConfig,
+    terminal_soc_mode: TerminalSoCMode = TerminalSoCMode.PRICE_BASED,
+) -> LinearOptimizer:
     """Return the optimizer singleton, rebuilding only when the config changes.
 
     Reusing a ``LinearOptimizer`` instance allows CVXPY model reuse: the problem
@@ -366,6 +370,7 @@ def get_optimizer(cfg: AppConfig) -> LinearOptimizer:
         state.optimizer = LinearOptimizer(
             inverters=build_inverters(cfg),
             objective=objective,
+            terminal_soc_mode=terminal_soc_mode,
             solver_opts=dict(cfg.optimization.solver.solver_opts),
         )
         state.optimizer_config_mtime = mtime
@@ -734,7 +739,7 @@ async def run_optimization_cycle(
     setup = get_providers(cfg, raw_yaml)
     if state.vacation_mode:
         setup = _dc_replace(setup, use_vacation_profile=True)
-    optimizer = get_optimizer(cfg)
+    optimizer = get_optimizer(cfg, setup.terminal_soc_mode)
 
     # ── Inverter readiness check ──────────────────────────────────────
     ready, missing = state.coordinator.all_optimizable_ready(

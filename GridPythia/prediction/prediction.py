@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 from structlog import get_logger
 
+from GridPythia.optimization.terminal_soc import TerminalSoCMode
 from GridPythia.prediction.base import floor_to_slot, make_timestamps
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 from GridPythia.prediction.feedintariff.provider import FeedInTariffProvider
@@ -344,6 +345,13 @@ class PredictionSetup:
     pv: dict[str, PVForecastProvider] = field(default_factory=dict)
     weather: WeatherProvider | None = None
     use_vacation_profile: bool = False
+
+    @property
+    def terminal_soc_mode(self) -> TerminalSoCMode:
+        """Select terminal SoC valuation from the configured price provider."""
+        if self.electricprice is None:
+            return TerminalSoCMode.PRICE_BASED
+        return self.electricprice.terminal_soc_mode
 
 
 class Prediction:

@@ -179,6 +179,7 @@ class GridPythiaService:
             self._optimizer = LinearOptimizer(
                 inverters=self._inverters,
                 objective=objective,
+                terminal_soc_mode=self.providers.terminal_soc_mode,
                 solver_opts=dict(self.config.optimization.solver.solver_opts),
             )
             logger.info("optimizer_created")

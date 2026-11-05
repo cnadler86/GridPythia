@@ -115,7 +115,7 @@ optimization:
       min_soc_percentage: 20
       max_soc_percentage: 100
       terminal_soc_target_percentage: 40
-      terminal_soc_penalty_eur_per_percentage_point: 0.01  # EUR per %-point; optional
+      terminal_soc_penalty_eur_per_percentage_point: 0.01  # EUR per %-point; for Fixed price
 
   inverters:
     - device_id: "SF800Pro"

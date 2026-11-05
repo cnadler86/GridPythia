@@ -8,6 +8,7 @@ from datetime import datetime
 import numpy as np
 from structlog import get_logger
 
+from GridPythia.optimization.terminal_soc import TerminalSoCMode
 from GridPythia.prediction.base import PredictionProvider
 
 logger = get_logger(__name__)
@@ -15,6 +16,11 @@ logger = get_logger(__name__)
 
 class ElecPriceProvider(PredictionProvider):
     """Returns electricity market price in EUR/Wh per time step."""
+
+    @property
+    def terminal_soc_mode(self) -> TerminalSoCMode:
+        """Use forecast-price valuation for terminal SoC by default."""
+        return TerminalSoCMode.PRICE_BASED
 
     @property
     def last_real_ts(self) -> "datetime | None":
@@ -46,6 +52,10 @@ class ElecPriceFallbackChain(ElecPriceProvider):
     @property
     def provider_id(self) -> str:
         return f"{self._primary.provider_id}|fallback:{self._fallback.provider_id}"
+
+    @property
+    def terminal_soc_mode(self) -> TerminalSoCMode:
+        return self._primary.terminal_soc_mode
 
     @property
     def last_real_ts(self) -> datetime | None:

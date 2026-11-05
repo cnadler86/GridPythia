@@ -58,6 +58,7 @@ from GridPythia.optimization.solution import (
     OptimizationObjective,
     SimulationParityReport,
 )
+from GridPythia.optimization.terminal_soc import TerminalSoCMode
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices import InverterMode
 from GridPythia.simulation.devices.inverterbase import InverterBase
@@ -151,11 +152,13 @@ class LinearOptimizer:
         inverters: list[InverterBase],
         *,
         objective: OptimizationObjective = OptimizationObjective.MINIMIZE_COST,
+        terminal_soc_mode: TerminalSoCMode = TerminalSoCMode.PRICE_BASED,
         solver_opts: Mapping[str, Any] | None = None,
     ) -> None:
         _import_cvxpy()
         self.inverters = inverters
         self._objective = objective
+        self._terminal_soc_mode = terminal_soc_mode
         self._solver_opts: dict[str, Any] = dict(solver_opts) if solver_opts else {}
         self._cached_prediction: PredictionData | None = None
         self._cached_solution: LinearSolution | None = None
@@ -195,11 +198,16 @@ class LinearOptimizer:
                          parity report to the returned solution.
         """
         effective_objective = objective if objective is not None else self._objective
-        if effective_objective != OptimizationObjective.MINIMIZE_COST and any(
+        has_configured_target = any(
             inv.battery is not None
             and inv.battery.parameters.terminal_soc_target_percentage is not None
             and inv.battery.parameters.terminal_soc_penalty_eur_per_percentage_point > 0.0
             for inv in self.inverters
+        )
+        if (
+            self._terminal_soc_mode == TerminalSoCMode.TARGET
+            and effective_objective != OptimizationObjective.MINIMIZE_COST
+            and has_configured_target
         ):
             raise ValueError(
                 "Terminal SoC targets with a penalty are only supported for cost objective"
@@ -574,7 +582,9 @@ class LinearOptimizer:
         terminal_terms = [
             block.soc[-1]
             for block in blocks
-            if block.soc is not None and block.terminal_soc_deviation_pct is None
+            if block.soc is not None
+            and block.terminal_soc_deviation_pct is None
+            and self._terminal_soc_mode == TerminalSoCMode.PRICE_BASED
         ]
         self._terminal_soc_sum: cp.Expression | float
         if terminal_terms:
@@ -1101,7 +1111,11 @@ class LinearOptimizer:
             terminal_soc_penalty_eur_per_pct = (
                 bat.parameters.terminal_soc_penalty_eur_per_percentage_point
             )
-            if target_soc_pct is not None and terminal_soc_penalty_eur_per_pct > 0.0:
+            if (
+                self._terminal_soc_mode == TerminalSoCMode.TARGET
+                and target_soc_pct is not None
+                and terminal_soc_penalty_eur_per_pct > 0.0
+            ):
                 terminal_soc_deviation_pct = cp.Variable(
                     nonneg=True, name=f"terminal_soc_deviation_pct_{inv_id}"
                 )
@@ -1197,6 +1211,8 @@ class LinearOptimizer:
         prep: _PreparedInputs,
         blocks: list[_InverterModelBlock],
     ) -> float:
+        if self._terminal_soc_mode != TerminalSoCMode.PRICE_BASED:
+            return 0.0
         if prep.T == 0:
             return 0.0
 

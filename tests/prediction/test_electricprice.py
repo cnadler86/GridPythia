@@ -7,9 +7,15 @@ from unittest.mock import AsyncMock, patch
 import numpy as np
 import pytest
 
+from GridPythia.optimization.terminal_soc import TerminalSoCMode
 from GridPythia.prediction.base import make_timestamps
+from GridPythia.prediction.electricprice.energycharts import (
+    ElecPriceEnergyCharts,
+    EnergyChartsConfig,
+)
 from GridPythia.prediction.electricprice.fixed import ElecPriceFixed, TimeWindow
 from GridPythia.prediction.electricprice.provider import ElecPriceFallbackChain
+from GridPythia.prediction.prediction import PredictionSetup
 
 START = datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)
 
@@ -19,6 +25,12 @@ def _ts(hours: float = 24, dt: float = 1.0) -> list:
 
 
 class TestElecPriceFixed:
+    def test_terminal_soc_uses_target_mode(self):
+        assert ElecPriceFixed().terminal_soc_mode == TerminalSoCMode.TARGET
+        assert PredictionSetup(electricprice=ElecPriceFixed()).terminal_soc_mode == (
+            TerminalSoCMode.TARGET
+        )
+
     async def test_flat_price(self):
         provider = ElecPriceFixed(price_kwh=0.30)
         result = await provider.fetch(_ts())
@@ -69,6 +81,16 @@ class _FailingElecPriceProvider(ElecPriceFixed):
 
 
 class TestElecPriceFallbackChain:
+    def test_dynamic_primary_keeps_price_based_terminal_soc_mode(self):
+        primary = ElecPriceEnergyCharts(EnergyChartsConfig())
+        fallback = ElecPriceFixed(price_kwh=0.30)
+        provider = ElecPriceFallbackChain(primary=primary, fallback=fallback)
+
+        assert provider.terminal_soc_mode == TerminalSoCMode.PRICE_BASED
+        assert PredictionSetup(electricprice=provider).terminal_soc_mode == (
+            TerminalSoCMode.PRICE_BASED
+        )
+
     async def test_uses_primary_when_primary_succeeds(self):
         primary = ElecPriceFixed(price_kwh=0.25)
         fallback = ElecPriceFixed(price_kwh=0.40)
@@ -116,6 +138,7 @@ class TestElecPriceEnergyChartsCache:
     @staticmethod
     def _provider(poll_minutes: int = 30, buffer_hours: int = 25):
         from datetime import timedelta
+
         from GridPythia.prediction.electricprice.energycharts import (
             ElecPriceEnergyCharts,
             EnergyChartsConfig,
@@ -351,6 +374,7 @@ class TestElecPriceEnergyChartsCache:
     async def test_refresh_error_without_cache_raises(self):
         """If EnergyCharts fails and cache is empty, error is raised for decorator chain."""
         from datetime import timedelta
+
         from GridPythia.prediction.electricprice.energycharts import (
             ElecPriceEnergyCharts,
             EnergyChartsConfig,
@@ -481,10 +505,11 @@ class TestEnergyChartsSourceValidUntil:
 
 async def test_energycharts_fetch_today():
     """Integration test: skipped when Energy-Charts API is unreachable."""
+    from zoneinfo import ZoneInfo
+
     import aiohttp
 
     from GridPythia.prediction.electricprice.energycharts import ElecPriceEnergyCharts
-    from zoneinfo import ZoneInfo
 
     berlin = ZoneInfo("Europe/Berlin")
     start_local = datetime.now(berlin).replace(hour=0, minute=0, second=0, microsecond=0)

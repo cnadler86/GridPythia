@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from GridPythia.optimization.terminal_soc import TerminalSoCMode
 from GridPythia.prediction.electricprice.provider import ElecPriceProvider
 
 
@@ -42,6 +43,11 @@ class ElecPriceFixed(ElecPriceProvider):
     @property
     def provider_id(self) -> str:
         return "ElecPriceFixed"
+
+    @property
+    def terminal_soc_mode(self) -> TerminalSoCMode:
+        """Use the configured terminal SoC target for fixed-price tariffs."""
+        return TerminalSoCMode.TARGET
 
     def _price_at(self, hour_of_day: float) -> float:
         """EUR/Wh at a given fractional hour of day."""

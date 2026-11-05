@@ -9,11 +9,11 @@ import pytest
 
 from GridPythia.config.optimization import BatteryParameters, InverterParameters
 from GridPythia.optimization.solver import LinearOptimizer, OptimizationObjective
+from GridPythia.optimization.terminal_soc import TerminalSoCMode
 from GridPythia.prediction.prediction import PredictionData
 from GridPythia.simulation.devices import InverterMode, SystemTopology
 from GridPythia.simulation.devices.battery import Battery
 from GridPythia.simulation.devices.inverterbase import InverterBase
-
 
 # ---------------------------------------------------------------------------
 # Shared test helpers
@@ -1115,6 +1115,7 @@ class TestOptimizationObjectives:
         def make_optimizer(
             target_percentage: float | None = None,
             penalty_eur_per_percentage_point: float = 0.0,
+            terminal_soc_mode: TerminalSoCMode = TerminalSoCMode.PRICE_BASED,
         ) -> LinearOptimizer:
             battery = Battery(
                 BatteryParameters(
@@ -1145,7 +1146,11 @@ class TestOptimizationObjectives:
                 ),
                 battery=battery,
             )
-            return LinearOptimizer([inverter], objective=OptimizationObjective.MINIMIZE_COST)
+            return LinearOptimizer(
+                [inverter],
+                objective=OptimizationObjective.MINIMIZE_COST,
+                terminal_soc_mode=terminal_soc_mode,
+            )
 
         pred = _make_prediction(
             load_w=[0.0, 0.0, 500.0],
@@ -1153,13 +1158,17 @@ class TestOptimizationObjectives:
             pv_wh={"terminal_40": [0.0, 500.0, 0.0]},
         )
 
-        baseline_optimizer = make_optimizer()
+        baseline_optimizer = make_optimizer(40.0, 0.01)
         baseline = baseline_optimizer.solve(pred, soc={"terminal_40": 400}).inverter_plans[0]
         assert baseline.battery_soc_wh[0] == pytest.approx(400.0, abs=0.1)
         assert baseline.battery_soc_wh[-1] == pytest.approx(900.0, abs=0.1)
         assert float(np.sum(baseline.discharge_ac_wh)) == pytest.approx(0.0, abs=0.1)
 
-        target_optimizer = make_optimizer(40.0, 0.01)
+        target_optimizer = make_optimizer(
+            40.0,
+            0.01,
+            terminal_soc_mode=TerminalSoCMode.TARGET,
+        )
         targeted = target_optimizer.solve(pred, soc={"terminal_40": 400}).inverter_plans[0]
         assert targeted.battery_soc_wh[0] == pytest.approx(400.0, abs=0.1)
         assert targeted.battery_soc_wh[-1] == pytest.approx(400.0, abs=0.1)
@@ -1192,7 +1201,9 @@ class TestOptimizationObjectives:
             battery=battery,
         )
         optimizer = LinearOptimizer(
-            [inverter], objective=OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
+            [inverter],
+            objective=OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION,
+            terminal_soc_mode=TerminalSoCMode.TARGET,
         )
         pred = _make_prediction(load_w=[0.0], price_eur_wh=[0.00030])
 
