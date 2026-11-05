@@ -31,6 +31,17 @@ class BatteryParameters(BaseModel):
     initial_soc_percentage: int = Field(default=50, ge=0, le=100, description="Initial SoC in %")
     min_soc_percentage: int = Field(default=0, ge=0, le=100, description="Minimum SoC in %")
     max_soc_percentage: int = Field(default=100, ge=0, le=100, description="Maximum SoC in %")
+    terminal_soc_target_percentage: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Optional end-of-horizon battery SoC target in percent",
+    )
+    terminal_soc_penalty_eur_per_percentage_point: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Cost objective penalty in EUR per terminal SoC percentage point",
+    )
 
     @field_validator("min_soc_percentage", mode="after")
     @classmethod
@@ -48,6 +59,28 @@ class BatteryParameters(BaseModel):
         min_soc = info.data.get("min_soc_percentage", 0)
         max_soc = info.data.get("max_soc_percentage", 100)
         return min(max(v, min_soc), max_soc)
+
+    @field_validator("terminal_soc_target_percentage", mode="after")
+    @classmethod
+    def validate_terminal_soc_target(cls, v: float | None, info) -> float | None:
+        """Ensure the terminal target is inside the configured operating SoC range."""
+        if v is None:
+            return None
+        min_soc = info.data.get("min_soc_percentage", 0)
+        max_soc = info.data.get("max_soc_percentage", 100)
+        if not min_soc <= v <= max_soc:
+            raise ValueError("terminal_soc_target_percentage must be within min_soc and max_soc")
+        return v
+
+    @field_validator("terminal_soc_penalty_eur_per_percentage_point", mode="after")
+    @classmethod
+    def validate_terminal_soc_penalty(cls, v: float, info) -> float:
+        """Require a target whenever a terminal SoC penalty is configured."""
+        if v > 0.0 and info.data.get("terminal_soc_target_percentage") is None:
+            raise ValueError(
+                "terminal_soc_target_percentage is required when the terminal SoC penalty is set"
+            )
+        return v
 
 
 class InverterParameters(BaseModel):

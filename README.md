@@ -234,6 +234,8 @@ optimization:
       capacity_wh: 1920
       min_soc_percentage: 15
       max_soc_percentage: 99
+      terminal_soc_target_percentage: 40  # Optional end-of-horizon target
+      terminal_soc_penalty_eur_per_percentage_point: 0.01  # EUR per %-point; enables target in cost mode
 
   inverters:
     - device_id: "SF800Pro"
@@ -243,6 +245,10 @@ optimization:
       max_ac_charge_power_w: 1000
       zero_feed_in: true
 ```
+
+A positive terminal SoC penalty applies to the `cost` objective and replaces
+the default terminal energy reward for that battery. The target and penalty
+default to disabled.
 
 ### `server`
 

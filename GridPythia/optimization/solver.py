@@ -118,6 +118,8 @@ class _InverterModelBlock:
     mode_ch_activity: cp.Expression | None
     # Binary/indicator for DC-discharge mode activity (1 when discharge/bypass active)
     mode_dc_activity: cp.Expression | None
+    terminal_soc_deviation_pct: cp.Variable | None
+    terminal_soc_penalty_eur_per_pct: float
 
 
 @dataclass
@@ -193,6 +195,15 @@ class LinearOptimizer:
                          parity report to the returned solution.
         """
         effective_objective = objective if objective is not None else self._objective
+        if effective_objective != OptimizationObjective.MINIMIZE_COST and any(
+            inv.battery is not None
+            and inv.battery.parameters.terminal_soc_target_percentage is not None
+            and inv.battery.parameters.terminal_soc_penalty_eur_per_percentage_point > 0.0
+            for inv in self.inverters
+        ):
+            raise ValueError(
+                "Terminal SoC targets with a penalty are only supported for cost objective"
+            )
 
         # Guard: any inverter with has_pv=True must have its id present in
         # pv_by_inverter.  A missing key would silently produce an all-zero PV
@@ -560,7 +571,11 @@ class LinearOptimizer:
             self._g_feedin >= total_pv_ac - total_pv_buffered - self._pv_unbuffered_self
         )
 
-        terminal_terms = [block.soc[-1] for block in blocks if block.soc is not None]
+        terminal_terms = [
+            block.soc[-1]
+            for block in blocks
+            if block.soc is not None and block.terminal_soc_deviation_pct is None
+        ]
         self._terminal_soc_sum: cp.Expression | float
         if terminal_terms:
             self._terminal_soc_sum = cp.sum(cp.hstack(terminal_terms))
@@ -569,6 +584,16 @@ class LinearOptimizer:
 
         mode_switch_costs_term = cp.sum(self._mode_switch_costs) if self._mode_switch_costs else 0.0
         terminal_reward = self._terminal_reward_expr()
+        terminal_soc_penalty_terms_eur = [
+            block.terminal_soc_penalty_eur_per_pct * block.terminal_soc_deviation_pct
+            for block in blocks
+            if block.terminal_soc_deviation_pct is not None
+        ]
+        terminal_soc_penalty_eur = (
+            cp.sum(cp.hstack(terminal_soc_penalty_terms_eur))
+            if terminal_soc_penalty_terms_eur
+            else 0.0
+        )
 
         feedin_revenue_term = cp.multiply(self._g_feedin, self._feedin_param)
 
@@ -576,6 +601,7 @@ class LinearOptimizer:
             cp.sum(cp.multiply(self._g_import, self._price_param) - feedin_revenue_term)
             + mode_switch_costs_term
             - terminal_reward
+            + terminal_soc_penalty_eur
         )
         objective_cost = self._MONETARY_OBJECTIVE_SCALE * objective_cost_eur
 
@@ -967,6 +993,8 @@ class LinearOptimizer:
         self._constraints.append(pv_ac + p_dc <= max_ac_out)
 
         soc_init_param: cp.Parameter | None = None
+        terminal_soc_deviation_pct: cp.Variable | None = None
+        terminal_soc_penalty_eur_per_pct = 0.0
         if inv.battery is not None:
             bat = inv.battery
             soc = cp.Variable(T, nonneg=True, name=f"soc_{inv_id}")
@@ -1068,6 +1096,23 @@ class LinearOptimizer:
 
             self._constraints.append(soc == start_soc + battery_net_flow_wh)
             self._constraints.extend([soc >= bat.min_soc_wh, soc <= bat.max_soc_wh])
+
+            target_soc_pct = bat.parameters.terminal_soc_target_percentage
+            terminal_soc_penalty_eur_per_pct = (
+                bat.parameters.terminal_soc_penalty_eur_per_percentage_point
+            )
+            if target_soc_pct is not None and terminal_soc_penalty_eur_per_pct > 0.0:
+                terminal_soc_deviation_pct = cp.Variable(
+                    nonneg=True, name=f"terminal_soc_deviation_pct_{inv_id}"
+                )
+                self._constraints.extend(
+                    [
+                        terminal_soc_deviation_pct
+                        >= soc[-1] * (100.0 / bat.capacity_wh) - target_soc_pct,
+                        terminal_soc_deviation_pct
+                        >= target_soc_pct - soc[-1] * (100.0 / bat.capacity_wh),
+                    ]
+                )
         else:
             soc = None
 
@@ -1084,6 +1129,8 @@ class LinearOptimizer:
             battery_net_flow_wh=battery_net_flow_wh,
             mode_ch_activity=mode_ch_activity,
             mode_dc_activity=mode_dc_activity,
+            terminal_soc_deviation_pct=terminal_soc_deviation_pct,
+            terminal_soc_penalty_eur_per_pct=terminal_soc_penalty_eur_per_pct,
         )
 
     def _add_mode_switch_costs(

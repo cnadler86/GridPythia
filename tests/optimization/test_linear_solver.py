@@ -1111,6 +1111,94 @@ class TestEnergyConservation:
 class TestOptimizationObjectives:
     """The MAXIMIZE_SELF_CONSUMPTION objective should prefer local use of PV."""
 
+    def test_terminal_soc_target_prevents_pv_hording_from_40_percent_start(self) -> None:
+        def make_optimizer(
+            target_percentage: float | None = None,
+            penalty_eur_per_percentage_point: float = 0.0,
+        ) -> LinearOptimizer:
+            battery = Battery(
+                BatteryParameters(
+                    device_id="battery_terminal_40",
+                    capacity_wh=1000,
+                    charging_efficiency=1.0,
+                    discharging_efficiency=1.0,
+                    max_charge_power_w=1000,
+                    max_discharge_power_w=1000,
+                    initial_soc_percentage=40,
+                    min_soc_percentage=20,
+                    max_soc_percentage=100,
+                    terminal_soc_target_percentage=target_percentage,
+                    terminal_soc_penalty_eur_per_percentage_point=penalty_eur_per_percentage_point,
+                )
+            )
+            inverter = InverterBase(
+                InverterParameters(
+                    device_id="terminal_40",
+                    battery_id="battery_terminal_40",
+                    has_pv=True,
+                    max_ac_output_power_w=1000,
+                    max_ac_charge_power_w=0,
+                    dc_to_ac_efficiency=1.0,
+                    ac_to_dc_efficiency=1.0,
+                    zero_feed_in=True,
+                    active_inverter_consumption_w=0.0,
+                ),
+                battery=battery,
+            )
+            return LinearOptimizer([inverter], objective=OptimizationObjective.MINIMIZE_COST)
+
+        pred = _make_prediction(
+            load_w=[0.0, 0.0, 500.0],
+            price_eur_wh=[0.00030, 0.00030, 0.00030],
+            pv_wh={"terminal_40": [0.0, 500.0, 0.0]},
+        )
+
+        baseline_optimizer = make_optimizer()
+        baseline = baseline_optimizer.solve(pred, soc={"terminal_40": 400}).inverter_plans[0]
+        assert baseline.battery_soc_wh[0] == pytest.approx(400.0, abs=0.1)
+        assert baseline.battery_soc_wh[-1] == pytest.approx(900.0, abs=0.1)
+        assert float(np.sum(baseline.discharge_ac_wh)) == pytest.approx(0.0, abs=0.1)
+
+        target_optimizer = make_optimizer(40.0, 0.01)
+        targeted = target_optimizer.solve(pred, soc={"terminal_40": 400}).inverter_plans[0]
+        assert targeted.battery_soc_wh[0] == pytest.approx(400.0, abs=0.1)
+        assert targeted.battery_soc_wh[-1] == pytest.approx(400.0, abs=0.1)
+        assert float(np.sum(targeted.discharge_ac_wh)) == pytest.approx(500.0, abs=0.1)
+        assert (
+            target_optimizer._problems[
+                OptimizationObjective.MINIMIZE_COST
+            ].size_metrics.num_scalar_variables
+            == baseline_optimizer._problems[
+                OptimizationObjective.MINIMIZE_COST
+            ].size_metrics.num_scalar_variables
+            + 1
+        )
+
+    def test_terminal_soc_penalty_is_cost_objective_only(self) -> None:
+        battery = Battery(
+            BatteryParameters(
+                device_id="battery_terminal_soc_objective",
+                terminal_soc_target_percentage=40,
+                terminal_soc_penalty_eur_per_percentage_point=0.01,
+            )
+        )
+        inverter = InverterBase(
+            InverterParameters(
+                device_id="terminal_soc_objective",
+                battery_id="battery_terminal_soc_objective",
+                has_pv=False,
+                max_ac_charge_power_w=1000,
+            ),
+            battery=battery,
+        )
+        optimizer = LinearOptimizer(
+            [inverter], objective=OptimizationObjective.MAXIMIZE_SELF_CONSUMPTION
+        )
+        pred = _make_prediction(load_w=[0.0], price_eur_wh=[0.00030])
+
+        with pytest.raises(ValueError, match="only supported for cost objective"):
+            optimizer.solve(pred)
+
     def test_maximize_self_consumption_reduces_feedin_vs_cost_objective(self) -> None:
         """With MAXIMIZE_SELF_CONSUMPTION, feed-in should be lower than with MINIMIZE_COST
         when the feed-in tariff is zero (no export incentive under cost objective either).

@@ -114,6 +114,8 @@ optimization:
       initial_soc_percentage: 50   # Used when no live status is available
       min_soc_percentage: 20
       max_soc_percentage: 100
+      terminal_soc_target_percentage: 40
+      terminal_soc_penalty_eur_per_percentage_point: 0.01  # EUR per %-point; optional
 
   inverters:
     - device_id: "SF800Pro"
@@ -127,6 +129,10 @@ optimization:
       mode_switch_cost: 0.005      # EUR per mode change (wear cost)
       active_inverter_consumption_w: 15
 ```
+
+A positive terminal SoC penalty applies to the `cost` objective and replaces
+the default terminal energy reward for that battery. The target and penalty
+default to disabled.
 
 ### `server` – runtime behaviour
 
